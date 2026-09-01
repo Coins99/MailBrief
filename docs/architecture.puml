@@ -1,0 +1,48 @@
+@startuml
+left to right direction
+skinparam componentStyle rectangle
+
+actor User
+
+package "MailBrief Desktop" {
+  [PySide6 UI] as UI
+  [Application Services] as App
+  [Sync Service] as Sync
+  [Digest Service] as Digest
+  [Local Ranker] as Ranker
+  database "SQLite" as DB
+
+  interface EmailProvider
+  interface AIProvider
+
+  [Microsoft Provider] as Microsoft
+  [Gmail Provider] as Gmail
+  [IMAP Provider] as IMAP
+  [Cloud AI] as CloudAI
+  [Local AI] as LocalAI
+}
+
+cloud "Microsoft Graph" as Graph
+cloud "Gmail API" as GmailAPI
+cloud "IMAP Server" as IMAPServer
+
+User --> UI
+UI --> App
+App --> Sync
+App --> Digest
+Sync --> EmailProvider
+Sync --> DB
+Digest --> Ranker
+Digest --> AIProvider
+Digest --> DB
+
+EmailProvider <|.. Microsoft
+EmailProvider <|.. Gmail
+EmailProvider <|.. IMAP
+AIProvider <|.. CloudAI
+AIProvider <|.. LocalAI
+
+Microsoft --> Graph
+Gmail --> GmailAPI
+IMAP --> IMAPServer
+@enduml
