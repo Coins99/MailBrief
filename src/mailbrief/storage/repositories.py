@@ -82,9 +82,7 @@ class AccountRepository:
         provider_account_id: str,
     ) -> AccountTable | None:
         """Fetch an account by its unique provider identity."""
-        provider_val = (
-            provider.value if isinstance(provider, ProviderKind) else str(provider)
-        )
+        provider_val = provider.value if isinstance(provider, ProviderKind) else str(provider)
         stmt = select(AccountTable).where(
             AccountTable.provider == provider_val,
             AccountTable.provider_account_id == provider_account_id,
@@ -403,9 +401,7 @@ class DigestRepository:
         items: Sequence[tuple[int, int | None, int, str | DigestSection]] = (),
     ) -> DigestTable:
         """Create or update a daily digest and its ordered items atomically."""
-        status_val = (
-            status.value if isinstance(status, DigestStatus) else str(status)
-        )
+        status_val = status.value if isinstance(status, DigestStatus) else str(status)
         base_stmt = sqlite_insert(DigestTable).values(
             account_id=account_id,
             local_date=local_date,
@@ -436,9 +432,7 @@ class DigestRepository:
                     "message_id": msg_id,
                     "analysis_id": analysis_id,
                     "position": pos,
-                    "section": (
-                        sec.value if isinstance(sec, DigestSection) else str(sec)
-                    ),
+                    "section": (sec.value if isinstance(sec, DigestSection) else str(sec)),
                 }
                 for msg_id, analysis_id, pos, sec in items
             ]
@@ -491,15 +485,9 @@ class DigestRepository:
         """Map a DigestTable and its joined item records to a DailyDigest domain model."""
         domain_items: list[DigestItem] = []
         for item_table, msg_table, analysis_table in items_with_relations:
-            summary_val = (
-                analysis_table.summary if analysis_table else msg_table.body_preview
-            )
-            action_text_val = (
-                analysis_table.action_text if analysis_table else None
-            )
-            deadline_val = (
-                analysis_table.deadline_at_utc if analysis_table else None
-            )
+            summary_val = analysis_table.summary if analysis_table else msg_table.body_preview
+            action_text_val = analysis_table.action_text if analysis_table else None
+            deadline_val = analysis_table.deadline_at_utc if analysis_table else None
             domain_items.append(
                 DigestItem(
                     message_key=msg_table.provider_message_id,
@@ -541,9 +529,7 @@ class SyncRunRepository:
         status: str | SyncStatus = "started",
     ) -> SyncRunTable:
         """Record the initiation of a mailbox synchronization run."""
-        status_val = (
-            status.value if isinstance(status, SyncStatus) else str(status)
-        )
+        status_val = status.value if isinstance(status, SyncStatus) else str(status)
         sync_run = SyncRunTable(
             account_id=account_id,
             range_start_utc=normalize_utc(range_start_utc),
@@ -573,9 +559,7 @@ class SyncRunRepository:
             return None
 
         if status is not None:
-            sync_run.status = (
-                status.value if isinstance(status, SyncStatus) else str(status)
-            )
+            sync_run.status = status.value if isinstance(status, SyncStatus) else str(status)
         if page_count is not None:
             sync_run.page_count = page_count
         if message_count is not None:
