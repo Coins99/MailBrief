@@ -63,6 +63,10 @@ warn_unreachable = true
 show_error_codes = true
 pretty = true
 
+[[tool.mypy.overrides]]
+module = ["msal", "msal.*", "msal_extensions", "msal_extensions.*", "qasync", "qasync.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 minversion = "9.0"
 testpaths = ["tests"]
