@@ -1,0 +1,1 @@
+"""MailBrief test suite."""

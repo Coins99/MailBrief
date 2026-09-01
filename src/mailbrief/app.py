@@ -1,0 +1,29 @@
+"""Desktop application entry point."""
+
+import sys
+from collections.abc import Sequence
+
+from PySide6.QtWidgets import QApplication
+
+from mailbrief.ui.main_window import MainWindow
+
+
+def create_application(arguments: Sequence[str] | None = None) -> QApplication:
+    """Create or return the process-wide Qt application."""
+    existing = QApplication.instance()
+    if isinstance(existing, QApplication):
+        return existing
+
+    application = QApplication(list(arguments) if arguments is not None else sys.argv)
+    application.setApplicationName("MailBrief")
+    application.setApplicationVersion("0.1.0")
+    application.setOrganizationName("MailBrief")
+    return application
+
+
+def main() -> int:
+    """Launch the MailBrief desktop application."""
+    application = create_application()
+    window = MainWindow()
+    window.show()
+    return application.exec()

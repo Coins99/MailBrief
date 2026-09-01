@@ -1,0 +1,1 @@
+"""MailBrief application services."""

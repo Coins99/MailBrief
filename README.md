@@ -27,6 +27,13 @@ Mail providers are isolated behind a common interface. Messages are normalized b
 
 See [`docs/architecture.puml`](docs/architecture.puml).
 
+Implementation documents:
+
+- [`docs/mvp-scope.md`](docs/mvp-scope.md) freezes the version 0.1.0 scope and
+  acceptance criteria.
+- [`docs/mvp-plan.md`](docs/mvp-plan.md) contains the milestone and task roadmap.
+- [`docs/adr/`](docs/adr/) records accepted architecture decisions.
+
 ## MVP
 
 1. Connect a Microsoft account.
