@@ -204,23 +204,45 @@ async def test_message_repository_upsert_and_ranking(database: Database) -> None
         assert domain_msg.provider_message_id == "msg-001"
         assert domain_msg.subject == "Important Announcement (Updated)"
 
-    # Update ranking score and reasons
+    # Batch update ranking score and reasons
     async with database.transaction() as session:
         repo = MessageRepository(session)
-        fetched = await repo.get_by_provider_message_id(account_id, "msg-001")
-        assert fetched is not None
-        await repo.update_ranking(
-            fetched.id,
-            rank_score=48,
-            rank_reasons=[RankReason.HIGH_IMPORTANCE, RankReason.UNREAD],
+        msg1_row = await repo.get_by_provider_message_id(account_id, "msg-001")
+        msg2_row = await repo.get_by_provider_message_id(account_id, "msg-002")
+        assert msg1_row is not None and msg2_row is not None
+        await repo.update_rankings(
+            [
+                (msg1_row.id, 50, [RankReason.HIGH_IMPORTANCE]),
+                (msg2_row.id, -5, [RankReason.LOW_IMPORTANCE]),
+            ]
         )
+        await repo.update_rankings([])  # Empty batch handled gracefully
 
     async with database.session() as session:
         repo = MessageRepository(session)
-        fetched = await repo.get_by_provider_message_id(account_id, "msg-001")
-        assert fetched is not None
-        assert fetched.rank_score == 48
-        assert fetched.rank_reasons_json == ["high_importance", "unread"]
+        f1 = await repo.get_by_provider_message_id(account_id, "msg-001")
+        f2 = await repo.get_by_provider_message_id(account_id, "msg-002")
+        assert f1 is not None and f1.rank_score == 50
+        assert f2 is not None and f2.rank_score == -5
+
+    # Batch update by provider_message_id
+    async with database.transaction() as session:
+        repo = MessageRepository(session)
+        await repo.update_rankings_by_provider_id(
+            account_id,
+            [
+                ("msg-001", 60, [RankReason.VERY_RECENT]),
+                ("msg-002", 15, [RankReason.RECENT]),
+            ],
+        )
+        await repo.update_rankings_by_provider_id(account_id, [])
+
+    async with database.session() as session:
+        repo = MessageRepository(session)
+        f1 = await repo.get_by_provider_message_id(account_id, "msg-001")
+        f2 = await repo.get_by_provider_message_id(account_id, "msg-002")
+        assert f1 is not None and f1.rank_score == 60 and f1.rank_reasons_json == ["very_recent"]
+        assert f2 is not None and f2.rank_score == 15 and f2.rank_reasons_json == ["recent"]
 
 
 @pytest.mark.asyncio

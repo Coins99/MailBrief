@@ -221,6 +221,42 @@ class MessageRepository:
         )
         await self._session.execute(stmt)
 
+    async def update_rankings(
+        self,
+        rankings: Sequence[tuple[int, int, Sequence[str | RankReason]]],
+    ) -> None:
+        """Persist computed rank scores and readable reasons for multiple messages by ID."""
+        if not rankings:
+            return
+        for message_id, rank_score, rank_reasons in rankings:
+            reasons_list = [r.value if isinstance(r, RankReason) else str(r) for r in rank_reasons]
+            stmt = (
+                update(MessageTable)
+                .where(MessageTable.id == message_id)
+                .values(rank_score=rank_score, rank_reasons_json=reasons_list)
+            )
+            await self._session.execute(stmt)
+
+    async def update_rankings_by_provider_id(
+        self,
+        account_id: int,
+        rankings: Sequence[tuple[str, int, Sequence[str | RankReason]]],
+    ) -> None:
+        """Persist rank scores and reasons for multiple messages by provider_message_id."""
+        if not rankings:
+            return
+        for provider_msg_id, rank_score, rank_reasons in rankings:
+            reasons_list = [r.value if isinstance(r, RankReason) else str(r) for r in rank_reasons]
+            stmt = (
+                update(MessageTable)
+                .where(
+                    MessageTable.account_id == account_id,
+                    MessageTable.provider_message_id == provider_msg_id,
+                )
+                .values(rank_score=rank_score, rank_reasons_json=reasons_list)
+            )
+            await self._session.execute(stmt)
+
     async def get_messages_in_range(
         self,
         account_id: int,
