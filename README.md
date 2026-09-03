@@ -32,6 +32,8 @@ Implementation documents:
 - [`docs/mvp-scope.md`](docs/mvp-scope.md) freezes the version 0.1.0 scope and
   acceptance criteria.
 - [`docs/mvp-plan.md`](docs/mvp-plan.md) contains the milestone and task roadmap.
+- [`docs/microsoft-setup.md`](docs/microsoft-setup.md) explains Entra registration,
+  secure local configuration, and the Microsoft diagnostic workflow.
 - [`docs/adr/`](docs/adr/) records accepted architecture decisions.
 
 ## MVP

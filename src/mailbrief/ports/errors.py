@@ -9,6 +9,10 @@ class AuthenticationRequiredError(ProviderError):
     """The user must authenticate or reconnect before work can continue."""
 
 
+class AuthenticationCancelledError(AuthenticationRequiredError):
+    """The user cancelled or denied an interactive authentication prompt."""
+
+
 class ProviderPermissionError(ProviderError):
     """The connected account did not grant the required permission."""
 

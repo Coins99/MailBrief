@@ -22,6 +22,8 @@ pytestmark = pytest.mark.skipif(
 
 def test_create_application_reuses_qapplication(qapp: QApplication) -> None:
     assert create_application([]) is qapp
+    assert qapp.applicationName() == "MailBrief"
+    assert qapp.organizationName() == "MailBrief"
 
 
 def test_main_window_has_mvp_placeholder(qtbot: QtBot) -> None:

@@ -3,11 +3,20 @@
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 from mailbrief.ports.email_provider import EmailProvider
-from mailbrief.ports.errors import AuthenticationRequiredError
-from mailbrief.providers.microsoft.auth import MicrosoftAuth, get_default_token_cache
+from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
+from mailbrief.providers.microsoft.auth import (
+    DEFAULT_AUTHORITY,
+    DEFAULT_SCOPES,
+    MicrosoftAuth,
+)
+from mailbrief.providers.microsoft.cache import (
+    clear_microsoft_session,
+    get_default_token_cache,
+)
 from mailbrief.providers.microsoft.graph_client import GraphClient
 from mailbrief.providers.microsoft.mapper import (
     map_account_identity,
@@ -20,6 +29,7 @@ __all__ = [
     "GraphClient",
     "MicrosoftAuth",
     "MicrosoftEmailProvider",
+    "clear_microsoft_session",
     "get_default_token_cache",
 ]
 
@@ -98,13 +108,24 @@ class MicrosoftEmailProvider(EmailProvider):
         """Fetch plain-text body for one shortlisted message."""
         headers = {"Prefer": 'outlook.body-content-type="text"'}
         params = {"$select": "id,body"}
+        encoded_message_id = quote(provider_message_id, safe="")
         data = await self._client.get(
-            f"me/messages/{provider_message_id}",
+            f"me/messages/{encoded_message_id}",
             params=params,
             headers=headers,
         )
-        body = data.get("body", {})
-        return str(body.get("content", ""))
+        body = data.get("body")
+        if not isinstance(body, dict):
+            raise ProviderResponseError("Microsoft Graph returned a malformed message body.")
+        content_type = body.get("contentType")
+        content = body.get("content")
+        if (
+            not isinstance(content_type, str)
+            or content_type.casefold() != "text"
+            or not isinstance(content, str)
+        ):
+            raise ProviderResponseError("Microsoft Graph returned a malformed message body.")
+        return content
 
     async def disconnect(self) -> None:
         """Clear local session and cached tokens."""
