@@ -80,7 +80,11 @@ def test_contact_requires_graph_shape_but_absent_sender_has_fallback() -> None:
     contact = map_email_contact({"emailAddress": {"name": "Alice", "address": "alice@example.com"}})
     assert contact == EmailContact(name="Alice", address="alice@example.com")
     assert map_email_contact(None) == EmailContact(name=None, address="unknown@example.com")
-    for invalid in ({"address": "bob@example.com"}, {"emailAddress": []}):
+    invalid_contacts: tuple[dict[str, object], ...] = (
+        {"address": "bob@example.com"},
+        {"emailAddress": []},
+    )
+    for invalid in invalid_contacts:
         with pytest.raises(ProviderResponseError):
             map_email_contact(invalid)
 

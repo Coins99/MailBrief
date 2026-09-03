@@ -101,7 +101,7 @@ async def test_interactive_result_selects_client_info_and_removes_stale_account(
     application.get_accounts.return_value = [stale, selected]
     auth = _auth(application)
 
-    assert await auth.acquire_token_interactive() is None
+    await auth.acquire_token_interactive()
     application.remove_account.assert_called_once_with(stale)
     assert auth._active_account == selected
 
