@@ -325,15 +325,25 @@ Prefer: outlook.body-content-type="text"
 
 Never fetch attachments during the MVP.
 
-Apply this error policy:
+Apply this error, timeout, and retry policy:
 
-- `401`: silently renew once, then require reconnection.
-- `403`: display a tenant or permission explanation.
-- `429`: honor `Retry-After`; stop after three retries or 60 cumulative seconds.
-- `500`, `502`, `503`, `504`: retry after 1, 2, and 4 seconds.
-- Other `4xx` responses: do not retry.
-- Connection timeout: 10 seconds.
-- Read timeout: 30 seconds.
+- Shared attempt budget: up to 3 retries maximum across all retryable categories.
+- Wall-clock deadlines & budgets:
+  * Per-HTTP request deadline: 45 seconds maximum. Minimum viable budget floor is 2.0 seconds; if remaining time is below 2.0s, raise `ProviderTimeoutError` immediately to avoid burning attempts on doomed calls.
+  * Per-sync run-level budget: 180 seconds of active work, owned and monitored by `SyncService`. Provider-mandated sleeps are excluded from this 180s work budget.
+- Provider-mandated rate-limit wait ceiling:
+  * In pagination, single `Retry-After` waits up to 60 seconds are honored by pausing and retrying the current page.
+  * If `Retry-After > 60s`, the provider raises `ProviderRateLimitError`, ending the run cleanly as throttled (`PARTIAL` if pages were committed, `FAILED` otherwise) with error code `RATE_LIMIT_EXCEEDED`, rather than hanging the desktop app.
+- Per-attempt timeouts: Connection timeout 10 seconds, read timeout 30 seconds (each clamped to `min(limit, remaining_deadline)`).
+- Host security & pagination: Continuation URLs (`@odata.nextLink`) must strictly match the configured `base_url` host (case-folded) over HTTPS, with no userinfo. Sync pagination is capped at 200 pages maximum to prevent circular loops.
+- `401`: Silently renew once via `get_access_token(force_refresh=True)`, then raise `AuthenticationRequiredError`.
+- `403`: Raise `ProviderPermissionError` carrying structured correlation IDs (`client_request_id`, `server_request_id`, and `provider_error_code`).
+- `429`: Parse `Retry-After` (integer delta-seconds or RFC 2822 HTTP date). Clamped to the 45s request deadline; if sleeping exceeds deadline or attempts are exhausted, raise `ProviderRateLimitError` immediately.
+- `503`: Inspect `Retry-After` header first; if present and within remaining deadline, honor it. If absent, fallback to transient delays (1, 2, and 4 seconds).
+- `500`, `502`, `504`: Retry after 1, 2, and 4 seconds within the shared retry budget and deadline.
+- Network transport errors (`httpx.TransportError`): Retries after 1, 2, and 4 seconds within the shared retry budget and request deadline.
+- Other `4xx` responses: Do not retry. Raise `ProviderResponseError`.
+- Progress callbacks: `on_retry` callback invocations are wrapped to swallow and log callback exceptions, ensuring UI reporting issues never derail the HTTP retry loop or mask provider errors.
 
 ## 9. Local Ranking Specification
 
@@ -359,6 +369,10 @@ highest-scoring messages until it contains three.
 
 Persist both the score and readable reasons such as `unread`, `direct recipient`,
 and `deadline language`.
+
+> [!NOTE]
+> Direct recipient matching tests case-folded membership across the user's known account addresses (`account_addresses` collected from `mail`, `userPrincipalName`, and session credentials) to ensure identical ranking between fresh sign-in and disk-restored sessions.
+> **Known limitation**: Aliases and distribution lists that do not match these explicit addresses will miss the direct-recipient bonus without LDAP/GAL expansion.
 
 ## 10. AI Analysis Specification
 

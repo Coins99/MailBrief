@@ -58,6 +58,7 @@ class AccountRepository:
             email_address=identity.email_address,
             display_name=identity.display_name,
             tenant_id=identity.tenant_id,
+            account_addresses=list(identity.account_addresses) if identity.account_addresses else [identity.email_address],
             created_at_utc=datetime.now(UTC),
         )
         stmt = base_stmt.on_conflict_do_update(
@@ -66,11 +67,24 @@ class AccountRepository:
                 "email_address": base_stmt.excluded.email_address,
                 "display_name": base_stmt.excluded.display_name,
                 "tenant_id": base_stmt.excluded.tenant_id,
+                "account_addresses": base_stmt.excluded.account_addresses,
             },
         ).returning(AccountTable)
         account = await self._session.scalar(stmt)
         assert account is not None
         return account
+
+    @staticmethod
+    def to_domain(account: AccountTable) -> AccountIdentity:
+        """Convert an AccountTable ORM model into a domain AccountIdentity."""
+        return AccountIdentity(
+            provider=ProviderKind(account.provider),
+            provider_account_id=account.provider_account_id,
+            email_address=account.email_address,
+            display_name=account.display_name,
+            tenant_id=account.tenant_id,
+            account_addresses=tuple(account.account_addresses or (account.email_address,)),
+        )
 
     async def get_by_id(self, account_id: int) -> AccountTable | None:
         """Fetch an account by its primary key ID."""

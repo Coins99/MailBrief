@@ -26,6 +26,7 @@ def upgrade() -> None:
         sa.Column("email_address", sa.String(length=320), nullable=False),
         sa.Column("display_name", sa.String(length=255), nullable=True),
         sa.Column("tenant_id", sa.String(length=255), nullable=True),
+        sa.Column("account_addresses", sa.JSON(), nullable=True),
         sa.Column("created_at_utc", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_sync_at_utc", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_accounts")),

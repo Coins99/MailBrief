@@ -77,7 +77,7 @@ async def _run_fetch(settings: Settings, paths: AppPaths, *, silent_only: bool) 
         )
         page = await _first_page(iterator)
         count = len(page.messages) if page is not None else 0
-        print(f"Connected: {account.email_address}")
+        print(f"Connected: {account.email_address} (Account ID: {account.provider_account_id})")
         print(f"Messages in first page: {count}")
 
 
@@ -115,6 +115,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except (asyncio.CancelledError, KeyboardInterrupt):
         return _failure("Microsoft diagnostic was cancelled.", _ExitCode.CANCELLED)
     except Exception:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         return _failure("Microsoft diagnostic failed unexpectedly.", _ExitCode.PROVIDER)
     return int(_ExitCode.SUCCESS)
 

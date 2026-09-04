@@ -1,5 +1,7 @@
 """Microsoft email provider package and adapter."""
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
@@ -7,7 +9,12 @@ from urllib.parse import quote
 
 from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 from mailbrief.ports.email_provider import EmailProvider
-from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
+from mailbrief.ports.errors import (
+    AuthenticationRequiredError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderResponseError,
+)
 from mailbrief.providers.microsoft.auth import (
     DEFAULT_AUTHORITY,
     DEFAULT_SCOPES,
@@ -34,6 +41,9 @@ __all__ = [
 ]
 
 
+logger = logging.getLogger(__name__)
+
+
 class MicrosoftEmailProvider(EmailProvider):
     """Adapter bridging Microsoft Graph to MailBrief's EmailProvider protocol."""
 
@@ -53,19 +63,32 @@ class MicrosoftEmailProvider(EmailProvider):
         except AuthenticationRequiredError:
             await self._auth.acquire_token_interactive()
 
+        cached = await self._auth.get_account_identity_from_cache()
+        if cached is None:
+            raise ProviderError("Malformed Microsoft account record in token cache.")
+
         account_data = await self._client.get("me")
-        self._account = map_account_identity(account_data)
+        self._account = map_account_identity(
+            account_data,
+            provider_account_id=cached.provider_account_id,
+            tenant_id=cached.tenant_id,
+            extra_addresses=(cached.email_address,),
+        )
         return self._account
 
     async def current_account(self) -> AccountIdentity | None:
         """Return the connected account or None."""
         if self._account:
             return self._account
+        cached = await self._auth.get_account_identity_from_cache()
+        if cached:
+            self._account = cached
+            return self._account
         try:
             account_data = await self._client.get("me")
             self._account = map_account_identity(account_data)
             return self._account
-        except AuthenticationRequiredError:
+        except (AuthenticationRequiredError, ProviderError):
             return None
 
     async def iter_message_pages(
@@ -73,29 +96,45 @@ class MicrosoftEmailProvider(EmailProvider):
         *,
         range_start_utc: datetime,
         range_end_utc: datetime,
+        continuation: str | None = None,
+        max_pages: int = 200,
     ) -> AsyncIterator[MessagePage]:
         """Paginate Inbox messages received within the specified UTC boundaries."""
-        account = await self.current_account()
+        account = self._account or await self._auth.get_account_identity_from_cache()
+        if not account:
+            account = await self.current_account()
         if not account:
             raise AuthenticationRequiredError("Must connect before retrieving messages.")
 
         start_iso = range_start_utc.isoformat().replace("+00:00", "Z")
         end_iso = range_end_utc.isoformat().replace("+00:00", "Z")
 
-        params: dict[str, Any] | None = {
-            "$select": (
-                "id,internetMessageId,conversationId,subject,sender,toRecipients,"
-                "receivedDateTime,isRead,importance,hasAttachments,bodyPreview,webLink"
-            ),
-            "$filter": f"receivedDateTime ge {start_iso} and receivedDateTime lt {end_iso}",
-            "$orderby": "receivedDateTime desc",
-            "$top": 50,
-        }
+        params: dict[str, Any] | None = (
+            None
+            if continuation
+            else {
+                "$select": (
+                    "id,internetMessageId,conversationId,subject,sender,toRecipients,"
+                    "receivedDateTime,isRead,importance,hasAttachments,bodyPreview,webLink"
+                ),
+                "$filter": f"receivedDateTime ge {start_iso} and receivedDateTime lt {end_iso}",
+                "$orderby": "receivedDateTime desc",
+                "$top": 50,
+            }
+        )
 
-        url = "me/mailFolders/inbox/messages"
+        url = continuation or "me/mailFolders/inbox/messages"
         page_number = 1
+        seen_urls: set[str] = set()
 
         while url:
+            if page_number > max_pages:
+                raise ProviderResponseError(f"Maximum pagination page limit ({max_pages}) exceeded.")
+
+            if url in seen_urls:
+                raise ProviderResponseError("Circular continuation link detected in pagination.")
+            seen_urls.add(url)
+
             data = await self._client.get(url, params=params)
             page = map_message_page(data, account.provider_account_id, page_number)
             yield page

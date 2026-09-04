@@ -130,7 +130,8 @@ class ApplicationService:
                 logger.warning("Progress callback raised an exception during ranking: %s", exc)
 
         # 3. Deterministic local ranking
-        ranked = rank_messages(domain_messages, user_email=account.email_address, now_utc=now)
+        user_addresses = account.account_addresses if getattr(account, "account_addresses", None) else (account.email_address,)
+        ranked = rank_messages(domain_messages, user_email=user_addresses, now_utc=now)
 
         # 4. Batch persist computed rankings in SQLite
         rankings_data = [(row.id, r.score, r.reasons) for row, r in zip(rows, ranked, strict=True)]

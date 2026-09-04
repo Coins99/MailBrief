@@ -65,7 +65,9 @@ async def test_fetch_prints_only_account_and_first_page_count(
         )
 
     assert closed
-    assert capsys.readouterr().out == ("Connected: user@example.com\nMessages in first page: 0\n")
+    assert capsys.readouterr().out == (
+        "Connected: user@example.com (Account ID: account)\nMessages in first page: 0\n"
+    )
 
 
 async def test_silent_fetch_never_connects_and_requires_cached_account(tmp_path: Path) -> None:

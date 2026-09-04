@@ -62,6 +62,7 @@ class AccountTable(Base):
     email_address: Mapped[str] = mapped_column(String(320), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(255))
     tenant_id: Mapped[str | None] = mapped_column(String(255))
+    account_addresses: Mapped[list[str] | None] = mapped_column(JSON, default=list)
     created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     last_sync_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 

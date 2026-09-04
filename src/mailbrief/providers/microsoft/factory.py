@@ -24,7 +24,11 @@ async def microsoft_provider_context(
     """Build and close the Microsoft provider's production dependencies."""
     client_id = settings.require_microsoft_client_id()
     cache = await asyncio.to_thread(get_default_token_cache, paths.microsoft_token_cache_path)
-    auth = await MicrosoftAuth.create(client_id, token_cache=cache)
+    auth = await MicrosoftAuth.create(
+        client_id,
+        token_cache=cache,
+        cache_path=paths.microsoft_token_cache_path,
+    )
     graph_client = GraphClient(
         auth,
         base_url=str(settings.graph_base_url),

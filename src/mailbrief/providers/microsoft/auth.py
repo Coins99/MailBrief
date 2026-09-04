@@ -6,6 +6,7 @@ import binascii
 import json
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
+from pathlib import Path
 from typing import Any, cast
 
 import msal
@@ -16,7 +17,7 @@ from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     ProviderError,
 )
-from mailbrief.providers.microsoft.cache import get_default_token_cache
+from mailbrief.providers.microsoft.cache import get_default_token_cache, purge_token_cache
 
 DEFAULT_SCOPES = ["User.Read", "Mail.Read"]
 DEFAULT_AUTHORITY = "https://login.microsoftonline.com/common"
@@ -52,11 +53,13 @@ class MicrosoftAuth:
         client_id: str,
         *,
         token_cache: msal.SerializableTokenCache,
+        cache_path: Path | None = None,
         authority: str = DEFAULT_AUTHORITY,
         scopes: Sequence[str] = DEFAULT_SCOPES,
         _application: msal.PublicClientApplication | None = None,
     ) -> None:
         self._client_id = client_id
+        self._cache_path = cache_path or Path("msal-token-cache.bin")
         self._authority = authority
         self._scopes = list(scopes)
         self._token_cache = token_cache
@@ -74,6 +77,7 @@ class MicrosoftAuth:
         client_id: str,
         *,
         token_cache: msal.SerializableTokenCache,
+        cache_path: Path | None = None,
         authority: str = DEFAULT_AUTHORITY,
         scopes: Sequence[str] = DEFAULT_SCOPES,
     ) -> "MicrosoftAuth":
@@ -94,6 +98,7 @@ class MicrosoftAuth:
         return cls(
             client_id,
             token_cache=token_cache,
+            cache_path=cache_path,
             authority=authority,
             scopes=scope_list,
             _application=application,
@@ -293,7 +298,7 @@ class MicrosoftAuth:
             raise ProviderError("Unable to read the Microsoft account session.") from exc
 
     async def disconnect(self) -> None:
-        """Remove all PCA accounts and verify no account records remain."""
+        """Remove all PCA accounts, purge cached ciphertext from disk, and verify absence."""
 
         def remove() -> None:
             for account in self._list_accounts():
@@ -301,6 +306,8 @@ class MicrosoftAuth:
             self._active_account = None
             if self._list_accounts():
                 raise ProviderError("Microsoft credentials could not be completely removed.")
+
+            purge_token_cache(self._cache_path, self._token_cache)
 
         try:
             await self._run_blocking_exclusive(remove)

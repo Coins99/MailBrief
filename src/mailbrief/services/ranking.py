@@ -88,7 +88,7 @@ def _is_automated_sender(sender_address: str) -> bool:
 def score_message(
     msg: NormalizedMessage,
     *,
-    user_email: str,
+    user_email: str | Sequence[str] | set[str] | frozenset[str],
     now_utc: datetime,
 ) -> tuple[int, tuple[RankReason, ...]]:
     """Compute deterministic local score and reason list for one message.
@@ -114,8 +114,12 @@ def score_message(
         reasons.append(RankReason.UNREAD)
 
     # 4. User is directly in to_recipients (+8)
-    normalized_user = user_email.strip().lower()
-    is_direct = any(r.address.strip().lower() == normalized_user for r in msg.to_recipients)
+    if isinstance(user_email, str):
+        target_addresses = {user_email.strip().lower()}
+    else:
+        target_addresses = {a.strip().lower() for a in user_email if a}
+
+    is_direct = any(r.address.strip().lower() in target_addresses for r in msg.to_recipients)
     if is_direct:
         score += 8
         reasons.append(RankReason.DIRECT_RECIPIENT)
@@ -163,7 +167,7 @@ def score_message(
 def rank_messages(
     messages: Sequence[NormalizedMessage],
     *,
-    user_email: str,
+    user_email: str | Sequence[str] | set[str] | frozenset[str],
     now_utc: datetime,
 ) -> list[RankedMessage]:
     """Score a collection of normalized messages with a shared reference timestamp."""
