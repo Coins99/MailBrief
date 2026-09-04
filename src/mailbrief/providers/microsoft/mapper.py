@@ -1,6 +1,6 @@
 """Strict transformations from Microsoft Graph JSON into domain models."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -26,14 +26,14 @@ def _optional_str(data: Mapping[str, Any], key: str) -> str | None:
     value = data.get(key)
     if value is None:
         return None
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value.strip():
         raise ProviderResponseError("Microsoft Graph returned malformed data.")
     return value
 
 
 def _optional_bool(data: Mapping[str, Any], key: str, *, default: bool) -> bool:
     value = data.get(key)
-    if value is None and key not in data:
+    if value is None:
         return default
     if not isinstance(value, bool):
         raise ProviderResponseError("Microsoft Graph returned malformed data.")
@@ -43,11 +43,13 @@ def _optional_bool(data: Mapping[str, Any], key: str, *, default: bool) -> bool:
 def map_account_identity(
     data: Mapping[str, Any],
     *,
+    provider_account_id: str | None = None,
     tenant_id: str | None = None,
+    extra_addresses: Sequence[str] = (),
 ) -> AccountIdentity:
     """Map a Graph ``/me`` object without echoing identity data in errors."""
     try:
-        account_id = _required_str(data, "id")
+        account_id = provider_account_id if provider_account_id is not None else _required_str(data, "id")
         email = next(
             (
                 value
@@ -58,6 +60,16 @@ def map_account_identity(
         )
         if email is None:
             raise ProviderResponseError("Microsoft Graph returned an invalid account profile.")
+
+        seen: set[str] = set()
+        account_addresses: list[str] = []
+        for candidate in (email, data.get("mail"), data.get("userPrincipalName"), *extra_addresses):
+            if isinstance(candidate, str) and candidate.strip():
+                folded = candidate.strip().lower()
+                if folded not in seen:
+                    seen.add(folded)
+                    account_addresses.append(candidate.strip())
+
         display_name = _optional_str(data, "displayName")
         return AccountIdentity(
             provider=ProviderKind.MICROSOFT,
@@ -65,6 +77,7 @@ def map_account_identity(
             email_address=email,
             display_name=display_name,
             tenant_id=tenant_id,
+            account_addresses=tuple(account_addresses),
         )
     except ProviderResponseError:
         raise

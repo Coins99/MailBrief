@@ -47,7 +47,11 @@ async def test_factory_builds_in_order_and_preserves_injected_client(tmp_path: P
             assert isinstance(provider, MicrosoftEmailProvider)
 
     cache_factory.assert_called_once_with(tmp_path / "tokens.bin")
-    auth_factory.assert_awaited_once_with("client-id", token_cache=cache)
+    auth_factory.assert_awaited_once_with(
+        "client-id",
+        token_cache=cache,
+        cache_path=tmp_path / "tokens.bin",
+    )
     graph_factory.assert_called_once_with(
         auth,
         base_url="https://graph.microsoft.com/v1.0",

@@ -1,5 +1,3 @@
-"""Unit tests for the hardened Microsoft Graph client."""
-
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -7,12 +5,14 @@ import httpx
 import pytest
 import respx
 
+from mailbrief import __version__
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
     ProviderResponseError,
+    ProviderTimeoutError,
 )
 from mailbrief.providers.microsoft.auth import MicrosoftAuth
 from mailbrief.providers.microsoft.graph_client import GraphClient, parse_retry_after
@@ -47,10 +47,45 @@ async def test_get_adds_controlled_headers_and_returns_object(mock_auth: MagicMo
     assert request.headers["Authorization"] == "Bearer valid-token"
     assert request.headers["Prefer"] == "safe"
     assert request.headers["return-client-request-id"] == "true"
-    assert request.headers["User-Agent"] == "MailBrief/0.1.0"
+    assert request.headers["User-Agent"] == f"MailBrief/{__version__}"
+    assert request.extensions["timeout"]["connect"] == 10.0
+    assert request.extensions["timeout"]["read"] == 30.0
 
 
-@pytest.mark.parametrize("header", ["Authorization", "authorization", "USER-AGENT"])
+@respx.mock
+async def test_get_with_injected_client_overrides_constructed_timeouts(
+    mock_auth: MagicMock,
+) -> None:
+    route = respx.get("https://graph.microsoft.com/v1.0/me").respond(
+        200,
+        json={"id": "account"},
+    )
+    bare_client = httpx.AsyncClient(timeout=5.0)
+    async with GraphClient(mock_auth, http_client=bare_client) as client:
+        assert await client.get("me") == {"id": "account"}
+
+    request = route.calls.last.request
+    assert request.extensions["timeout"]["connect"] == 10.0
+    assert request.extensions["timeout"]["read"] == 30.0
+    await bare_client.aclose()
+
+
+@respx.mock
+async def test_redirect_is_rejected_and_not_followed(mock_auth: MagicMock) -> None:
+    respx.get("https://graph.microsoft.com/v1.0/me").respond(
+        302,
+        headers={"Location": "https://evil.example/token-target"},
+    )
+    evil_route = respx.get("https://evil.example/token-target").respond(200, json={})
+
+    async with GraphClient(mock_auth) as client:
+        with pytest.raises(ProviderResponseError, match=r"request failed \(302\)"):
+            await client.get("me")
+
+    assert not evil_route.called
+
+
+@pytest.mark.parametrize("header", ["Authorization", "authorization", "USER-AGENT", "Host", "host"])
 async def test_reserved_header_override_is_rejected_before_token(
     mock_auth: MagicMock,
     header: str,
@@ -112,7 +147,7 @@ async def test_trusted_relative_path_allows_encoded_message_id(mock_auth: MagicM
 
 
 @respx.mock
-async def test_401_refreshes_once_then_requires_authentication(mock_auth: MagicMock) -> None:
+async def test_401_refreshes_once_silently(mock_auth: MagicMock) -> None:
     route = respx.get("https://graph.microsoft.com/v1.0/me").mock(
         side_effect=[httpx.Response(401), httpx.Response(200, json={"id": "account"})]
     )
@@ -122,7 +157,9 @@ async def test_401_refreshes_once_then_requires_authentication(mock_auth: MagicM
     assert route.call_count == 2
     mock_auth.get_access_token.assert_awaited_with(force_refresh=True)
 
-    respx.reset()
+
+@respx.mock
+async def test_401_repeated_requires_authentication(mock_auth: MagicMock) -> None:
     respx.get("https://graph.microsoft.com/v1.0/me").respond(401)
     mock_auth.get_access_token = AsyncMock(return_value="token")
     async with GraphClient(mock_auth) as client:
@@ -131,7 +168,7 @@ async def test_401_refreshes_once_then_requires_authentication(mock_auth: MagicM
 
 
 @respx.mock
-async def test_429_retries_and_enforces_cumulative_budget(mock_auth: MagicMock) -> None:
+async def test_429_retries_when_within_budget(mock_auth: MagicMock) -> None:
     route = respx.get("https://graph.microsoft.com/v1.0/me").mock(
         side_effect=[
             httpx.Response(429, headers={"Retry-After": "0"}),
@@ -142,15 +179,63 @@ async def test_429_retries_and_enforces_cumulative_budget(mock_auth: MagicMock) 
         assert await client.get("me") == {"id": "account"}
     assert route.call_count == 2
 
-    respx.reset()
+
+@respx.mock
+async def test_429_raises_immediately_when_retry_after_exceeds_deadline(
+    mock_auth: MagicMock,
+) -> None:
     respx.get("https://graph.microsoft.com/v1.0/me").respond(
         429,
-        headers={"Retry-After": "61"},
+        headers={"Retry-After": "60", "request-id": "srv-throttle-123"},
     )
     async with GraphClient(mock_auth) as client:
         with pytest.raises(ProviderRateLimitError) as exc_info:
-            await client.get("me")
-    assert exc_info.value.retry_after_seconds == 61
+            await client.get("me", deadline_seconds=45.0)
+    assert exc_info.value.retry_after_seconds == 60.0
+    assert exc_info.value.server_request_id == "srv-throttle-123"
+    assert exc_info.value.client_request_id is not None
+
+
+@respx.mock
+async def test_503_honors_retry_after(mock_auth: MagicMock) -> None:
+    route = respx.get("https://graph.microsoft.com/v1.0/me").mock(
+        side_effect=[
+            httpx.Response(503, headers={"Retry-After": "3"}),
+            httpx.Response(200, json={"id": "account"}),
+        ]
+    )
+    sleep = AsyncMock()
+    async with GraphClient(mock_auth) as client:
+        with patch("mailbrief.providers.microsoft.graph_client.asyncio.sleep", sleep):
+            assert await client.get("me") == {"id": "account"}
+    assert route.call_count == 2
+    assert sleep.await_args_list[0].args[0] == 3.0
+
+
+@respx.mock
+async def test_client_request_id_reused_across_retries(mock_auth: MagicMock) -> None:
+    route = respx.get("https://graph.microsoft.com/v1.0/me").mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(200, json={"id": "account"}),
+        ]
+    )
+    sleep = AsyncMock()
+    async with GraphClient(mock_auth) as client:
+        with patch("mailbrief.providers.microsoft.graph_client.asyncio.sleep", sleep):
+            assert await client.get("me") == {"id": "account"}
+    assert route.call_count == 2
+    first_req_id = route.calls[0].request.headers["client-request-id"]
+    second_req_id = route.calls[1].request.headers["client-request-id"]
+    assert first_req_id == second_req_id
+
+
+@respx.mock
+async def test_request_deadline_exceeded_raises_timeout_error(mock_auth: MagicMock) -> None:
+    respx.get("https://graph.microsoft.com/v1.0/me").respond(200, json={"id": "account"})
+    async with GraphClient(mock_auth) as client:
+        with pytest.raises(ProviderTimeoutError):
+            await client.get("me", deadline_seconds=0.0)
 
 
 @respx.mock
@@ -287,3 +372,34 @@ async def test_owned_http_client_is_closed(mock_auth: MagicMock) -> None:
     async with graph_client:
         pass
     assert owned_client.is_closed
+
+
+@respx.mock
+async def test_request_budget_floor_raises_before_dispatch(mock_auth: MagicMock) -> None:
+    route = respx.get("https://graph.microsoft.com/v1.0/me").respond(200, json={"id": "account"})
+    async with GraphClient(mock_auth) as client:
+        with pytest.raises(ProviderTimeoutError):
+            await client.get("me", deadline_seconds=1.5)
+    assert not route.called
+
+
+@respx.mock
+async def test_on_retry_exception_does_not_abort_retry(mock_auth: MagicMock) -> None:
+    route = respx.get("https://graph.microsoft.com/v1.0/me").mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(200, json={"id": "account"}),
+        ]
+    )
+
+    def exploding_callback(_attempt: int, _delay: float) -> None:
+        raise RuntimeError("callback explosion")
+
+    sleep = AsyncMock()
+    async with GraphClient(mock_auth) as client:
+        with patch("mailbrief.providers.microsoft.graph_client.asyncio.sleep", sleep):
+            result = await client.get("me", on_retry=exploding_callback)
+
+    assert result == {"id": "account"}
+    assert route.call_count == 2
+

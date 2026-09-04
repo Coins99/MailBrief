@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -19,10 +20,11 @@ from mailbrief.ports.errors import (
 from mailbrief.providers.microsoft.auth import DEFAULT_SCOPES, MicrosoftAuth
 
 
-def _auth(application: MagicMock) -> MicrosoftAuth:
+def _auth(application: MagicMock, cache_path: Path | None = None) -> MicrosoftAuth:
     return MicrosoftAuth(
         "client-id",
         token_cache=msal.SerializableTokenCache(),
+        cache_path=cache_path or Path("/dummy/cache.bin"),
         _application=application,
     )
 
@@ -274,6 +276,85 @@ async def test_disconnect_removes_snapshot_and_verifies_empty() -> None:
     assert auth._active_account is None
 
 
+async def test_disconnect_deletes_cache_file_and_verifies_absence(tmp_path: Path) -> None:
+    from mailbrief.providers.microsoft.cache import ManagedTokenCache
+
+    cache_file = tmp_path / "msal-token-cache.bin"
+    application = MagicMock()
+    application.get_accounts.side_effect = [[], []]
+
+    class FakePersistence:
+        is_encrypted = True
+
+        def get_location(self) -> str:
+            return str(cache_file)
+
+        def time_last_modified(self) -> float:
+            return 0.0
+
+        def load(self) -> str | None:
+            return None
+
+        def save(self, content: str) -> None:
+            cache_file.write_text(content)
+
+    persistence = FakePersistence()
+    token_cache = ManagedTokenCache(persistence)
+    
+    token_event = {
+        "client_id": "client-id",
+        "scope": ["User.Read"],
+        "token_endpoint": "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+        "grant_type": "authorization_code",
+        "response": {
+            "access_token": "token",
+            "refresh_token": "rt",
+            "id_token": "header." + base64.urlsafe_b64encode(b'{"oid": "local-object-id", "preferred_username": "user@example.com"}').decode() + ".signature",
+            "client_info": _client_info("uid", "tenant"),
+            "expires_in": 3600,
+        },
+    }
+
+    # 1. Control: verify adding to a non-purged cache creates the file and populates memory
+    token_cache.add(token_event)
+    assert cache_file.exists(), "Control failed: cache file wasn't created on add"
+    assert len(token_cache.find(msal.TokenCache.CredentialType.ACCESS_TOKEN)) > 0
+    assert len(token_cache.find(msal.TokenCache.CredentialType.REFRESH_TOKEN)) > 0
+    assert len(token_cache.find(msal.TokenCache.CredentialType.ID_TOKEN)) > 0
+    assert len(token_cache.find(msal.TokenCache.CredentialType.ACCOUNT)) > 0
+
+    auth = MicrosoftAuth(
+        "client-id",
+        token_cache=token_cache,
+        cache_path=cache_file,
+        _application=application,
+    )
+    await auth.disconnect()
+
+    # Disk file gone
+    assert not cache_file.exists()
+    # Purge flag set on our own class
+    assert token_cache.is_purged is True
+    # Zero in-memory credentials remaining
+    assert len(token_cache.find(msal.TokenCache.CredentialType.ACCESS_TOKEN)) == 0
+    assert len(token_cache.find(msal.TokenCache.CredentialType.REFRESH_TOKEN)) == 0
+    assert len(token_cache.find(msal.TokenCache.CredentialType.ID_TOKEN)) == 0
+    assert len(token_cache.find(msal.TokenCache.CredentialType.ACCOUNT)) == 0
+
+    # Attempt to trigger persistence save post-disconnect via add()
+    token_cache.add(token_event)
+    assert not cache_file.exists(), "Cache file must not be resurrected after purge"
+    assert len(token_cache.find(msal.TokenCache.CredentialType.ACCESS_TOKEN)) == 0
+
+
+async def test_clear_microsoft_session_purges_cache(tmp_path: Path) -> None:
+    cache_file = tmp_path / "msal-token-cache.bin"
+    cache_file.write_bytes(b"encrypted-tokens")
+    from mailbrief.providers.microsoft.cache import clear_microsoft_session
+    await clear_microsoft_session(cache_file)
+    assert not cache_file.exists()
+
+
 async def test_disconnect_verification_and_msal_failure_are_sanitized() -> None:
     account = {"home_account_id": "uid.tenant"}
     application = MagicMock()
@@ -383,3 +464,14 @@ async def test_cancelled_msal_worker_holds_lock_until_it_finishes() -> None:
     with pytest.raises(asyncio.CancelledError):
         await token_task
     await disconnect_task
+
+
+def test_persisted_token_cache_signature_canary() -> None:
+    """Canary test to detect upstream signature churn in msal-extensions PersistedTokenCache.modify."""
+    import inspect
+    from msal_extensions import PersistedTokenCache
+
+    sig = inspect.signature(PersistedTokenCache.modify)
+    param_names = list(sig.parameters.keys())
+    assert param_names == ["self", "credential_type", "old_entry", "new_key_value_pairs"]
+    assert not hasattr(PersistedTokenCache, "_save")

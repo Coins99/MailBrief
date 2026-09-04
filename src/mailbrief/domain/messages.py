@@ -64,6 +64,7 @@ class AccountIdentity(DomainModel):
     email_address: str = Field(min_length=3, max_length=320)
     display_name: str | None = Field(default=None, max_length=255)
     tenant_id: str | None = Field(default=None, max_length=255)
+    account_addresses: tuple[str, ...] = ()
 
     @field_validator("email_address")
     @classmethod

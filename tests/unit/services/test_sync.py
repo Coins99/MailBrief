@@ -73,9 +73,16 @@ class FakeEmailProvider(EmailProvider):
         *,
         range_start_utc: datetime,
         range_end_utc: datetime,
+        continuation: str | None = None,
     ) -> AsyncIterator[MessagePage]:
-        for i, page_messages in enumerate(self.pages, start=1):
+        start_idx = 0
+        if continuation and continuation.startswith("page-"):
+            start_idx = int(continuation.split("-")[1]) - 1
+
+        for i, page_messages in enumerate(self.pages[start_idx:], start=start_idx + 1):
             if self.fail_at_page == i:
+                # Clear so retry succeeds if configured
+                self.fail_at_page = None
                 raise self.failure_exception
             yield MessagePage(
                 page_number=i,
@@ -423,3 +430,88 @@ async def test_sync_progress_callback_exception_handled(
 
     assert result.status == SyncStatus.COMPLETE
     assert result.message_count == 1
+
+
+async def test_sync_day_rate_limit_exceeded_marks_partial_and_records_error_code(
+    async_session: AsyncSession, test_account: int
+) -> None:
+    provider = FakeEmailProvider(
+        pages=[
+            [make_message(provider_message_id="msg-1")],
+            [make_message(provider_message_id="msg-2")],
+        ]
+    )
+    provider.fail_at_page = 2
+    provider.failure_exception = ProviderRateLimitError(
+        "throttled",
+        retry_after_seconds=120.0,
+        provider_error_code="RATE_LIMIT_EXCEEDED",
+    )
+    sync_run_repo = SyncRunRepository(async_session)
+    sync_service = SyncService(
+        provider=provider,
+        message_repo=MessageRepository(async_session),
+        sync_run_repo=sync_run_repo,
+        account_repo=AccountRepository(async_session),
+        session=async_session,
+    )
+
+    result = await sync_service.sync_day(
+        account_id=test_account,
+        account_identity="user@example.com",
+        window=TEST_WINDOW,
+    )
+
+    assert result.status == SyncStatus.PARTIAL
+    assert result.page_count == 1
+    assert result.message_count == 1
+    assert result.error_code == "RATE_LIMIT_EXCEEDED"
+
+    latest = await sync_run_repo.get_latest_sync_run(test_account)
+    assert latest is not None
+    assert latest.status == "partial"
+    assert latest.sanitized_error_code == "RATE_LIMIT_EXCEEDED"
+
+
+async def test_sync_day_rate_limit_honored_within_cap_resumes_pagination(
+    async_session: AsyncSession, test_account: int
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    provider = FakeEmailProvider(
+        pages=[
+            [make_message(provider_message_id="msg-1")],
+            [make_message(provider_message_id="msg-2")],
+        ]
+    )
+    provider.fail_at_page = 2
+    provider.failure_exception = ProviderRateLimitError(
+        "throttled",
+        retry_after_seconds=5.0,
+        provider_error_code="RATE_LIMIT_EXCEEDED",
+    )
+    sync_run_repo = SyncRunRepository(async_session)
+    sync_service = SyncService(
+        provider=provider,
+        message_repo=MessageRepository(async_session),
+        sync_run_repo=sync_run_repo,
+        account_repo=AccountRepository(async_session),
+        session=async_session,
+    )
+
+    progress_events: list[SyncProgress] = []
+    with patch("mailbrief.services.sync.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await sync_service.sync_day(
+            account_id=test_account,
+            account_identity="user@example.com",
+            window=TEST_WINDOW,
+            progress=lambda p: progress_events.append(p),
+        )
+
+    assert result.status == SyncStatus.COMPLETE
+    assert result.page_count == 2
+    assert result.message_count == 2
+    mock_sleep.assert_awaited_once_with(5.0)
+    assert len(progress_events) >= 3
+
+

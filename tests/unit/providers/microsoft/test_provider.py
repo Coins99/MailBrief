@@ -1,16 +1,18 @@
 """Unit tests for the MicrosoftEmailProvider adapter."""
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import msal
 import pytest
+import respx
 
-from mailbrief.domain.messages import MessagePage, ProviderKind
+from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     ProviderError,
+    ProviderRateLimitError,
     ProviderResponseError,
 )
 from mailbrief.providers.microsoft import MicrosoftEmailProvider
@@ -23,6 +25,7 @@ def mock_auth() -> MagicMock:
     auth = MagicMock(spec=MicrosoftAuth)
     auth.get_access_token = AsyncMock(return_value="valid-token")
     auth.acquire_token_interactive = AsyncMock(return_value=None)
+    auth.get_account_identity_from_cache = AsyncMock(return_value=None)
     auth.disconnect = AsyncMock()
     return auth
 
@@ -47,6 +50,12 @@ async def test_connect_success(
     mock_auth: MagicMock,
     mock_graph_client: MagicMock,
 ) -> None:
+    mock_auth.get_account_identity_from_cache.return_value = AccountIdentity(
+        provider=ProviderKind.MICROSOFT,
+        provider_account_id="acc-1",
+        email_address="taylor@example.com",
+        display_name="Taylor Smith",
+    )
     provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
     mock_graph_client.get.return_value = {
         "id": "acc-1",
@@ -66,6 +75,11 @@ async def test_connect_interactive_fallback(
     mock_auth: MagicMock,
     mock_graph_client: MagicMock,
 ) -> None:
+    mock_auth.get_account_identity_from_cache.return_value = AccountIdentity(
+        provider=ProviderKind.MICROSOFT,
+        provider_account_id="acc-1",
+        email_address="taylor@example.com",
+    )
     provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
     mock_auth.get_access_token.side_effect = [
         AuthenticationRequiredError("No session"),
@@ -234,3 +248,160 @@ async def test_disconnect(
     mock_auth.disconnect.assert_awaited_once()
     mock_graph_client.get.side_effect = AuthenticationRequiredError("No account")
     assert await provider.current_account() is None
+
+
+async def test_connect_pins_canonical_form_directly(
+    mock_auth: MagicMock,
+    mock_graph_client: MagicMock,
+) -> None:
+    oid = "11111111-2222-3333-4444-555555555555"
+    tid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    canonical_id = f"{oid}.{tid}"
+
+    cached_identity = AccountIdentity(
+        provider=ProviderKind.MICROSOFT,
+        provider_account_id=canonical_id,
+        email_address="upn-user@example.com",
+        display_name="Taylor Smith",
+        tenant_id=tid,
+    )
+    mock_auth.get_account_identity_from_cache.return_value = cached_identity
+    mock_graph_client.get.return_value = {
+        "id": "deliberately-different-me-id",
+        "displayName": "Taylor Smith",
+        "mail": "primary-smtp@example.com",
+        "userPrincipalName": "upn-user@example.com",
+    }
+    provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
+    connected = await provider.connect()
+
+    assert connected.provider_account_id == canonical_id
+    assert connected.provider_account_id == f"{oid}.{tid}"
+    assert connected.provider_account_id != "deliberately-different-me-id"
+    assert connected.tenant_id == tid
+    assert connected.email_address == "primary-smtp@example.com"
+    assert "primary-smtp@example.com" in connected.account_addresses
+    assert "upn-user@example.com" in connected.account_addresses
+
+
+async def test_connect_raises_when_cache_identity_is_none(
+    mock_auth: MagicMock,
+    mock_graph_client: MagicMock,
+) -> None:
+    mock_auth.get_account_identity_from_cache.return_value = None
+    mock_graph_client.get.return_value = {"id": "bare-oid", "mail": "user@example.com"}
+    provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
+    with pytest.raises(ProviderError, match="Malformed Microsoft account record"):
+        await provider.connect()
+
+
+async def test_iter_message_pages_propagates_rate_limit_to_caller(
+    mock_auth: MagicMock,
+    mock_graph_client: MagicMock,
+) -> None:
+    mock_auth.get_account_identity_from_cache.return_value = AccountIdentity(
+        provider=ProviderKind.MICROSOFT,
+        provider_account_id="user.tenant",
+        email_address="user@example.com",
+    )
+    mock_graph_client.get.side_effect = ProviderRateLimitError("throttled", retry_after_seconds=30.0)
+    provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
+    now = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
+
+    with pytest.raises(ProviderRateLimitError) as exc_info:
+        async for _ in provider.iter_message_pages(range_start_utc=now, range_end_utc=now):
+            pass
+    assert exc_info.value.retry_after_seconds == 30.0
+
+
+async def test_iter_message_pages_circular_continuation_detected(
+    mock_auth: MagicMock,
+    mock_graph_client: MagicMock,
+) -> None:
+    mock_auth.get_account_identity_from_cache.return_value = AccountIdentity(
+        provider=ProviderKind.MICROSOFT,
+        provider_account_id="user.tenant",
+        email_address="user@example.com",
+    )
+    circular_url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=abc"
+    mock_graph_client.get.side_effect = [
+        {"value": [], "@odata.nextLink": circular_url},
+        {"value": [], "@odata.nextLink": circular_url},
+    ]
+    provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
+    now = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
+
+    with pytest.raises(ProviderResponseError, match="Circular continuation link detected"):
+        async for _ in provider.iter_message_pages(range_start_utc=now, range_end_utc=now):
+            pass
+
+
+async def test_iter_message_pages_supports_resuming_with_continuation(
+    mock_auth: MagicMock,
+    mock_graph_client: MagicMock,
+) -> None:
+    mock_auth.get_account_identity_from_cache.return_value = AccountIdentity(
+        provider=ProviderKind.MICROSOFT,
+        provider_account_id="user.tenant",
+        email_address="user@example.com",
+    )
+    resume_url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=xyz"
+    mock_graph_client.get.return_value = {"value": []}
+    provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
+    now = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
+
+    pages = [
+        p
+        async for p in provider.iter_message_pages(
+            range_start_utc=now,
+            range_end_utc=now,
+            continuation=resume_url,
+        )
+    ]
+    assert len(pages) == 1
+    mock_graph_client.get.assert_awaited_once_with(resume_url, params=None)
+
+
+@respx.mock
+async def test_fetch_plain_text_body_raw_path_encodes_question_mark_and_hash(
+    mock_auth: MagicMock,
+) -> None:
+    route = respx.get(
+        "https://graph.microsoft.com/v1.0/me/messages/msg%3Fwith%23symbols"
+    ).respond(
+        200,
+        json={"body": {"contentType": "text", "content": "body text"}},
+    )
+    async with GraphClient(mock_auth) as client:
+        provider = MicrosoftEmailProvider(mock_auth, client)
+        body = await provider.fetch_plain_text_body("msg?with#symbols")
+
+    assert body == "body text"
+    assert route.called
+    assert b"msg%3Fwith%23symbols" in route.calls.last.request.url.raw_path
+
+
+async def test_iter_message_pages_max_pages_limit(
+    mock_auth: MagicMock,
+    mock_graph_client: MagicMock,
+) -> None:
+    mock_auth.get_account_identity_from_cache.return_value = AccountIdentity(
+        provider=ProviderKind.MICROSOFT,
+        provider_account_id="user.tenant",
+        email_address="user@example.com",
+    )
+    mock_graph_client.get.return_value = {
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=next",
+        "value": [],
+    }
+    provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
+    now = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
+    pages_iter = provider.iter_message_pages(
+        range_start_utc=now,
+        range_end_utc=now,
+        max_pages=2,
+    )
+    with pytest.raises(ProviderResponseError, match="Maximum pagination page limit"):
+        async for _ in pages_iter:
+            pass
+

@@ -1,0 +1,311 @@
+================================================================================
+MAILBRIEF - AI AGENT CONTEXT & INSTRUCTION GUIDE
+================================================================================
+Document: AGENT_CONTEXT.txt
+Target Audience: AI Coding Agents assisting with development on the MailBrief repository.
+Last Updated: 2026-09-03
+Version Target: 0.1.0 (MVP)
+
+--------------------------------------------------------------------------------
+1. PROJECT OVERVIEW & CORE PHILOSOPHY
+--------------------------------------------------------------------------------
+MailBrief is a Python-first desktop application designed to provide busy professionals
+with a daily highlight brief of important emails, actionable tasks, decisions, and
+deadlines across connected inboxes.
+
+Version 0.1.0 (MVP) focuses on:
+- Connecting ONE Microsoft account (personal, Outlook.com, or Microsoft 365 / Entra ID).
+- Fetching and caching metadata for messages received in the user's Inbox during the
+  current local calendar day (midnight-to-midnight in the user's local timezone).
+- Locally and deterministically ranking messages BEFORE fetching any full email body.
+- Extracting plain-text bodies ONLY for shortlisted messages (up to 10, minimum 3 fallback).
+- Sending shortlisted messages to OpenAI (Structured Outputs via Responses API) with
+  strict data minimization and response caching.
+- Assembling and displaying an interactive daily brief categorized into Highlights,
+  Actions, Deadlines, and Decisions, with direct links back to original messages in Outlook.
+- Packaging as a standalone Windows desktop app (using PySide6 / Qt and PyInstaller onedir).
+
+Core Product Philosophies:
+1. Privacy First & Local by Default:
+   - Full email bodies are NEVER persisted in SQLite and NEVER written to logs.
+   - Message bodies exist in memory only during analysis and are discarded immediately after.
+   - Credentials (Microsoft OAuth tokens and OpenAI API keys) are stored ONLY in the
+     operating-system secure credential store (Windows Credential Manager / macOS Keychain /
+     SecretService via keyring and msal-extensions). NEVER store tokens or keys in SQLite or logs.
+   - Only shortlisted messages (at most 10) are sent to the AI provider.
+   - Cloud AI requests must set `store=False` where supported.
+2. Data Minimization:
+   - Attachments, tenant IDs, Graph message IDs, and webLinks are NOT sent to AI.
+   - Message bodies sent to AI are truncated to 8,000 characters.
+3. Responsive & Cancellable:
+   - All I/O (network and database) is asynchronous (`asyncio`).
+   - Desktop UI is built with PySide6 (Qt) integrated with asyncio via `qasync`.
+   - Long-running sync or AI operations must never freeze the UI repainting (>250ms)
+     and must support cooperative cancellation at any stage.
+
+--------------------------------------------------------------------------------
+2. TECHNOLOGY STACK & VERSION CONSTRAINTS
+--------------------------------------------------------------------------------
+All dependencies are strictly managed with `uv` and pinned in `pyproject.toml` / `uv.lock`.
+
+- Python Version: `>=3.13,<3.14` (STRICT: Must use Python 3.13; qasync 0.28 does not support 3.14).
+- Package Manager: `uv` (build-backend: `uv_build`).
+- GUI Framework: `PySide6` (`>=6.11.2,<6.12`).
+- Event Loop Integration: `qasync` (`>=0.28,<0.29`).
+- HTTP Client: `httpx` (`>=0.28.1,<0.29`) with direct Microsoft Graph REST API calls (NO Graph SDK).
+- Domain & Validation: `pydantic` (`>=2.13.5,<3`), `pydantic-settings` (`>=2.15,<3`).
+- Database & ORM: `SQLAlchemy[asyncio]` (`>=2.0.52,<2.1`), `aiosqlite` (`>=0.22.1,<1`).
+- Database Migrations: `alembic` (`>=1.19.1,<2`).
+- Authentication & Secrets:
+  * `msal` (`>=1.38,<2`): PublicClientApplication interactive and silent OAuth.
+  * `msal-extensions[portalocker]` (`>=1.3.1,<2`): Encrypted token-cache persistence.
+  * `keyring` (`>=25.7,<26`): Secure OS storage for OpenAI API keys.
+- AI Provider: `openai` (`>=3.6,<4`): Async client, Responses API, Structured Outputs (`store=False`).
+- Timezone Handling: `tzlocal>=5.2`, `tzdata>=2026.3`.
+- Dev & Test Tools:
+  * `pytest` (`>=9.1.1`), `pytest-asyncio` (`>=1.4.0`), `pytest-qt` (`>=4.5.0`), `pytest-cov` (`>=7.1.0`).
+  * `respx` (`>=0.23.1`): Mocking httpx requests to Microsoft Graph.
+  * `time-machine` (`>=3.5.0`): Deterministic time-zone, calendar, and DST testing.
+  * `ruff` (`>=0.16.5`): Fast linter and formatter.
+  * `mypy` (`>=2.3.1`): Strict static type checking with pydantic plugin.
+  * `pyinstaller` (`>=6.22.2`): Standalone executable distribution.
+
+PACKAGES INTENTIONALLY EXCLUDED (DO NOT ADD):
+- Microsoft Graph SDK (direct Graph REST API via httpx is mandated).
+- Gmail or IMAP packages (deferred to post-MVP).
+- Local model libraries / Ollama / PyTorch (deferred to post-MVP).
+- HTML parsers / BeautifulSoup (shortlisted bodies requested as plain text via Outlook headers).
+- python-dotenv (keys must use keyring).
+- Generic retry libraries (tenacity/backoff - Graph throttling must explicitly inspect Retry-After).
+
+--------------------------------------------------------------------------------
+3. PROJECT ARCHITECTURE & DIRECTORY STRUCTURE
+--------------------------------------------------------------------------------
+MailBrief uses a Hexagonal / Ports & Adapters architecture:
+
+MailBrief/
+|-- pyproject.toml               # Project metadata, dependencies, tool configurations
+|-- uv.lock                      # Exact resolved dependency lockfile
+|-- alembic.ini                  # Alembic configuration
+|-- README.md                    # User and developer documentation
+|-- docs/
+|   |-- architecture.puml        # PlantUML system architecture diagram
+|   |-- mvp-scope.md             # Frozen scope contract and acceptance criteria (AC-01 to AC-15)
+|   |-- mvp-plan.md              # Milestone breakdown and detailed implementation tasks
+|   `-- adr/                     # Architecture Decision Records (0001 to 0006)
+|-- migrations/                  # Alembic database migrations
+|   |-- env.py
+|   `-- versions/                # Migration scripts
+|-- src/
+|   `-- mailbrief/
+|       |-- __init__.py
+|       |-- __main__.py          # `python -m mailbrief` entry
+|       |-- app.py               # `create_application()`, `main()` PySide6 entry
+|       |-- config.py            # `Settings` (pydantic-settings, `MAILBRIEF_` env prefix)
+|       |-- domain/              # Pure domain models (Pydantic models, no DB or I/O)
+|       |   |-- common.py        # `DomainModel`, `normalize_utc`
+|       |   |-- messages.py      # `EmailContact`, `NormalizedMessage`, `RankedMessage`, enums
+|       |   |-- analysis.py      # `AnalysisRequest`, `MessageAnalysis`, `AnalysisCategory`
+|       |   `-- digests.py       # `DigestItem`, `DailyDigest`, `SyncProgress`, `SyncResult`
+|       |-- ports/               # Protocol contracts & exceptions (Application boundaries)
+|       |   |-- email_provider.py# `EmailProvider` protocol
+|       |   |-- ai_provider.py   # `AIProvider` protocol
+|       |   `-- errors.py        # `ProviderError`, `AuthenticationRequiredError`, etc.
+|       |-- providers/           # External adapter implementations
+|       |   |-- microsoft/       # Microsoft Graph & MSAL implementation
+|       |   |   |-- auth.py      # `MicrosoftAuthProvider` (MSAL, silent + browser login)
+|       |   |   |-- graph_client.py # `MicrosoftGraphClient` (httpx REST client)
+|       |   |   `-- mapper.py    # Maps Graph JSON -> `NormalizedMessage`
+|       |   `-- openai/          # OpenAI structured analysis implementation
+|       |       `-- provider.py  # `OpenAIProvider` (implements AIProvider protocol)
+|       |-- services/            # Application business logic & orchestration
+|       |   |-- application.py   # `ApplicationService` (coordinates sync, ranking, shortlist)
+|       |   |-- calendar.py      # Local day boundary calculation (`local_day_window`)
+|       |   |-- sync.py          # `SyncService` (paginated Graph sync, deduplication)
+|       |   |-- ranking.py       # Deterministic local heuristic ranking (`rank_messages`)
+|       |   `-- digest.py        # `DigestService` (body fetching, AI analysis, digest build)
+|       |-- storage/             # Database persistence layer (SQLAlchemy + SQLite)
+|       |   |-- database.py      # Async engine, session factory, AppData path resolution
+|       |   |-- tables.py        # SQLAlchemy ORM table definitions
+|       |   |-- types.py         # Custom SQLAlchemy types (`UTCDateTime`)
+|       |   `-- repositories.py  # `AccountRepo`, `MessageRepo`, `AnalysisRepo`, `DigestRepo`, etc.
+|       `-- ui/                  # PySide6 desktop user interface
+|           |-- main_window.py   # Main window shell & layout
+|           |-- connection_view.py # Account connection & API key configuration
+|           |-- progress_view.py # Sync, ranking, and AI progress indicators
+|           `-- digest_view.py   # Render Highlights, Actions, Deadlines, Decisions
+`-- tests/
+    |-- conftest.py              # Pytest setup (QT_QPA_PLATFORM=offscreen)
+    |-- factories.py             # Typed test data builders (make_message, make_analysis, etc.)
+    |-- unit/                    # Unit tests for domain, ports, providers, services, storage
+    |-- integration/             # End-to-end service integration tests
+    `-- ui/                      # PySide6 widget and signal tests (pytest-qt)
+
+--------------------------------------------------------------------------------
+4. CURRENT ROADMAP & MILESTONE STATUS
+--------------------------------------------------------------------------------
+- Milestone 1 (Foundation & Contracts): [COMPLETED]
+  Domain models, Pydantic contracts, SQLite schema, Alembic migrations, all repositories.
+- Milestone 2 (Microsoft Auth & Graph Client): [COMPLETED]
+  MSAL public client authentication, token cache encryption, Graph REST client, error handling.
+- Milestone 3 (Synchronization & Local Ranking): [COMPLETED]
+  Timezone-aware calendar windows, paginated message sync, deduplication, local heuristic ranking,
+  ApplicationService vertical slice.
+- Milestone 4 (AI Analysis & Digest Generation): [IN PROGRESS / NEXT PRIORITY]
+  * Implement `src/mailbrief/providers/openai/provider.py`:
+    - AsyncOpenAI client, Responses API, Structured Outputs conforming to `MessageAnalysis`.
+    - Batch size max 5 (`Settings.ai_batch_size`).
+    - Enforce `store=False`.
+    - Error mapping to `ports.errors` (`ProviderError`, `ProviderRateLimitError`, etc.).
+    - First-use cloud disclosure / consent check.
+  * Implement `src/mailbrief/services/digest.py`:
+    - Plain-text body retrieval for shortlisted messages via `EmailProvider.fetch_plain_text_body`.
+    - Truncate body to 8,000 characters (`Settings.ai_body_character_limit`).
+    - Keep bodies strictly in memory.
+    - Check and reuse cached analyses from `AnalysisRepository` via SHA-256 hash:
+      Hash over: normalized message content + provider + model + prompt_version + schema_version.
+    - Run AI batches for uncached messages.
+    - Assemble results into `DailyDigest` with sections:
+      `HIGHLIGHTS`, `ACTIONS`, `DEADLINES`, `DECISIONS`.
+    - Support `COMPLETE`, `PARTIAL` (if some batches fail), and `EMPTY` digests.
+    - Persist digest and digest items via `DigestRepository`.
+- Milestone 5 (Desktop User Interface): [UPCOMING]
+  * PySide6 + qasync async integration.
+  * Application state machine:
+    `disconnected -> idle -> syncing -> ranking -> analyzing -> success / partial / failed / cancelled`.
+  * Views: `ConnectionView`, `ProgressView`, `DigestView`.
+  * Open original messages via `QDesktopServices.openUrl(QUrl(item.source_url))`.
+- Milestone 6 (Automated Verification & Hardening): [UPCOMING]
+  * Achieve >=90% test coverage on services (`ranking`, `sync`, `digest`), >=80% overall.
+  * Error recovery tests (Graph throttling, network down, invalid AI responses).
+- Milestone 7 (Security Audit & PyInstaller Packaging): [UPCOMING]
+  * Validate no token/body leaks in DB or logs.
+  * PyInstaller `mailbrief.spec` for Windows onedir packaging.
+- Milestone 8 (MVP Release Candidate 0.1.0): [UPCOMING]
+
+--------------------------------------------------------------------------------
+5. DETAILED DOMAIN & BUSINESS LOGIC SPECIFICATIONS
+--------------------------------------------------------------------------------
+
+A. Local Ranking Heuristics (Deterministic, runs BEFORE body retrieval):
+Scoring adjustments based on metadata:
+  - High importance: +20
+  - Low importance: -10
+  - Unread: +8
+  - User is directly in `toRecipients`: +8
+  - Has attachments: +3
+  - Action or deadline keywords in subject/preview: Up to +20
+    (e.g., 'action required', 'deadline', 'due by', 'urgent', 'asap', 'by eod', etc.)
+  - Approval, reply, or request keywords: +10
+    (e.g., 'approve', 'approval', 'review', 'please confirm', 'feedback needed', etc.)
+  - Very recent (received <= 3 hours ago): +8
+  - Recent (received <= 8 hours ago): +5
+  - Automated sender ('no-reply' or 'noreply' in address): -12
+Sorting & Shortlist Selection:
+  - Sort order: score DESC, received_at_utc DESC, provider_message_id ASC.
+  - Shortlist cutoff: up to 10 messages with score >= 10.
+  - Fallback rule: if fewer than 3 messages have score >= 10, take top 3 messages anyway
+    (if at least 3 exist).
+  - Persist scores and `RankReason` enum strings in `messages` table.
+
+B. AI Structured Output Specification:
+Pydantic Schema: `MessageAnalysis`
+  - `message_key`: str (temporary identifier)
+  - `category`: `AnalysisCategory` ('action', 'deadline', 'decision', 'information')
+  - `summary`: str (max 240 chars)
+  - `action_required`: bool
+  - `action_text`: str | None (required if `action_required` is True, max 1,000 chars)
+  - `deadline_text`: str | None (max 500 chars)
+  - `deadline_at_utc`: datetime | None (aware UTC datetime)
+  - `confidence`: float (0.0 to 1.0)
+  - `evidence`: str (short excerpt supporting result, max 1,000 chars)
+Constraints:
+  - If `category` == DEADLINE, must have either `deadline_text` or `deadline_at_utc`.
+  - Batch size: max 5 messages per API call.
+
+C. Daily Digest Structure:
+Sections:
+  - `HIGHLIGHTS`: Key informational items or top summaries.
+  - `ACTIONS`: Items with `action_required = True`.
+  - `DEADLINES`: Items with deadlines.
+  - `DECISIONS`: Important decisions recorded in messages.
+Statuses:
+  - `COMPLETE`: All shortlisted items successfully analyzed.
+  - `PARTIAL`: One or more batches failed, but some items succeeded.
+  - `EMPTY`: No messages found for the calendar day.
+
+D. Database Schema & Tables:
+SQLite database stored at: `QStandardPaths.AppDataLocation` / `mailbrief.db`
+Tables:
+  - `accounts`: id, provider, provider_account_id, email_address, display_name, tenant_id,
+    created_at_utc, last_sync_at_utc.
+  - `messages`: id, account_id, provider_message_id, internet_message_id, conversation_id,
+    subject, sender_name, sender_address, to_recipients_json, received_at_utc, is_read,
+    importance, has_attachments, body_preview, web_link, rank_score, rank_reasons_json,
+    synced_at_utc. Unique constraint: (account_id, provider_message_id).
+  - `analyses`: id, message_id, input_hash, provider, model, prompt_version, schema_version,
+    category, summary, action_required, action_text, deadline_text, deadline_at_utc,
+    confidence, analyzed_at_utc. Unique constraint: (message_id, input_hash, model, prompt_version).
+  - `digests`: id, account_id, local_date, timezone_name, status, generated_at_utc.
+    Unique constraint: (account_id, local_date).
+  - `digest_items`: id, digest_id, message_id, analysis_id, position, section.
+  - `sync_runs`: id, account_id, range_start_utc, range_end_utc, started_at_utc,
+    completed_at_utc, page_count, message_count, status, sanitized_error_code.
+
+--------------------------------------------------------------------------------
+6. CODING CONVENTIONS & QUALITY STANDARDS
+--------------------------------------------------------------------------------
+- Typing: 100% type-annotated code. `mypy` runs in strict mode (`strict = true`,
+  `warn_unreachable = true`, `plugins = ["pydantic.mypy"]`).
+- Timestamps: Always timezone-aware UTC (`datetime.now(UTC)` or `normalize_utc(dt)`).
+  Never use naive datetimes or `datetime.utcnow()`.
+- Formatting & Linting: Ruff enforces 100 character max line length.
+  Lints enabled: `ASYNC`, `B` (bugbear), `C4` (comprehensions), `E`/`F` (pycodestyle/pyflakes),
+  `I` (isort), `SIM` (simplify), `UP` (pyupgrade).
+  Run `uv run ruff check .` and `uv run ruff format .` before finishing any task.
+- Testing Guidelines:
+  * Tests live under `tests/unit/`, `tests/integration/`, or `tests/ui/`.
+  * Use factories from `tests/factories.py` (`make_message()`, `make_analysis()`, etc.).
+  * Mock Microsoft Graph REST calls with `respx`.
+  * Mock time/timezone logic with `time-machine`.
+  * Pytest configuration: `asyncio_mode = "auto"`, `qt_api = "pyside6"`.
+  * Test coverage threshold: Minimum 80% overall, 90% for services.
+
+--------------------------------------------------------------------------------
+7. COMMON DEVELOPER & AGENT COMMANDS
+--------------------------------------------------------------------------------
+Dependencies and Environment:
+  uv sync --dev                    # Sync virtualenv with locked dependencies
+  uv add <pkg>                     # Add a runtime dependency
+  uv add --dev <pkg>               # Add a development dependency
+
+Code Quality & Verification:
+  uv run ruff check .              # Run Ruff linter
+  uv run ruff format .             # Run Ruff code formatter
+  uv run mypy                      # Run strict Mypy type checker
+  uv run pytest                    # Run test suite with coverage
+  uv run pytest tests/unit/...     # Run specific test module
+
+Database Migrations:
+  uv run alembic upgrade head      # Apply latest migrations to database
+  uv run alembic revision --autogenerate -m "description"  # Create new migration
+
+Running the Application:
+  uv run mailbrief                 # Run application via entry point
+  uv run python -m mailbrief       # Run application as module
+
+--------------------------------------------------------------------------------
+8. CRITICAL INVARIANTS & "DO NOT DO" CHECKLIST FOR AGENTS
+--------------------------------------------------------------------------------
+[!] DO NOT store full message bodies in SQLite or logs under any circumstance.
+[!] DO NOT store OAuth access/refresh tokens or OpenAI API keys in SQLite or logs.
+[!] DO NOT install or import the official Microsoft Graph SDK (direct REST via httpx is required).
+[!] DO NOT import HTML parsers or scrape HTML (Graph requests plaintext bodies directly).
+[!] DO NOT send attachments, tenant IDs, webLinks, or Graph message IDs to the AI provider.
+[!] DO NOT call OpenAI without `store=False`.
+[!] DO NOT perform synchronous network or heavy database operations on the Qt main thread.
+[!] DO NOT use naive datetimes (always use aware UTC datetimes).
+[!] DO NOT bypass Ruff or Mypy checks. Code must pass clean strict type checking.
+[!] CANONICAL ACCOUNT IDENTITY: `provider_account_id` MUST always be formatted as `{oid}.{tid}` (matching MSAL `home_account_id`). Never use bare Graph OID (`me.id`) as `provider_account_id`.
+[!] PRE-RELEASE DATABASE NOTICE: Any development SQLite database created during Milestone 2 testing with bare OIDs must be wiped (`rm mailbrief.db`), or its account rows will fork due to canonical `{oid}.{tid}` account IDs.
+================================================================================
