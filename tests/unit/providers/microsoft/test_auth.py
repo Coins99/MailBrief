@@ -353,10 +353,16 @@ async def test_disconnect_deletes_cache_file_and_verifies_absence(tmp_path: Path
 
 async def test_clear_microsoft_session_purges_cache(tmp_path: Path) -> None:
     cache_file = tmp_path / "msal-token-cache.bin"
-    cache_file.write_bytes(b"encrypted-tokens")
+    cache_file.write_text('{"AccessToken": {}}')
+    from msal_extensions import FilePersistence
+
     from mailbrief.providers.microsoft.cache import clear_microsoft_session
 
-    await clear_microsoft_session(cache_file)
+    with patch(
+        "mailbrief.providers.microsoft.cache.build_encrypted_persistence",
+        return_value=FilePersistence(str(cache_file)),
+    ):
+        await clear_microsoft_session(cache_file)
     assert not cache_file.exists()
 
 
