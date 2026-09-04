@@ -49,7 +49,9 @@ def map_account_identity(
 ) -> AccountIdentity:
     """Map a Graph ``/me`` object without echoing identity data in errors."""
     try:
-        account_id = provider_account_id if provider_account_id is not None else _required_str(data, "id")  # noqa: E501
+        account_id = (
+            provider_account_id if provider_account_id is not None else _required_str(data, "id")
+        )  # noqa: E501
         email = next(
             (
                 value

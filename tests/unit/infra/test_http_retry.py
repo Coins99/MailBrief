@@ -67,7 +67,9 @@ def _simple_classify(response: httpx.Response, client_request_id: str) -> Respon
         )
     return ResponseVerdict(
         VerdictKind.FAIL,
-        exception=ProviderError(f"HTTP {response.status_code}", client_request_id=client_request_id),  # noqa: E501
+        exception=ProviderError(
+            f"HTTP {response.status_code}", client_request_id=client_request_id
+        ),  # noqa: E501
     )
 
 
@@ -315,7 +317,12 @@ def test_classify_openai_response_401_unauthorized() -> None:
 def test_classify_openai_response_403_forbidden_region() -> None:
     response = httpx.Response(
         403,
-        json={"error": {"message": "Country or territory not supported", "type": "unsupported_country_region_error"}},  # noqa: E501
+        json={
+            "error": {
+                "message": "Country or territory not supported",
+                "type": "unsupported_country_region_error",
+            }
+        },  # noqa: E501
     )
     verdict = classify_openai_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
@@ -326,7 +333,9 @@ def test_classify_openai_response_403_forbidden_region() -> None:
 def test_classify_openai_response_429_insufficient_quota_is_terminal() -> None:
     response = httpx.Response(
         429,
-        json={"error": {"message": "You exceeded your current quota", "code": "insufficient_quota"}},  # noqa: E501
+        json={
+            "error": {"message": "You exceeded your current quota", "code": "insufficient_quota"}
+        },  # noqa: E501
     )
     verdict = classify_openai_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
@@ -382,11 +391,17 @@ async def test_execute_with_retry_records_sleep_into_current_retry_tracker() -> 
 
         policy = RetryPolicy(
             parse_retry_after=lambda _: 0.01,
-            classify_response=lambda resp, cid: ResponseVerdict(VerdictKind.SUCCESS) if resp.status_code == 200 else ResponseVerdict(VerdictKind.RETRY, retry_delay=0.01),  # noqa: E501
+            classify_response=lambda resp, cid: (
+                ResponseVerdict(VerdictKind.SUCCESS)
+                if resp.status_code == 200
+                else ResponseVerdict(VerdictKind.RETRY, retry_delay=0.01)
+            ),  # noqa: E501
             transient_delays=(0.01,),
         )
 
-        with patch("mailbrief.infra.http_retry.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:  # noqa: E501
+        with patch(
+            "mailbrief.infra.http_retry.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:  # noqa: E501
             async with httpx.AsyncClient() as client:
                 result = await execute_with_retry(
                     client,

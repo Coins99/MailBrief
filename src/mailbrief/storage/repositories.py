@@ -58,7 +58,9 @@ class AccountRepository:
             email_address=identity.email_address,
             display_name=identity.display_name,
             tenant_id=identity.tenant_id,
-            account_addresses=list(identity.account_addresses) if identity.account_addresses else [identity.email_address],  # noqa: E501
+            account_addresses=list(identity.account_addresses)
+            if identity.account_addresses
+            else [identity.email_address],  # noqa: E501
             created_at_utc=datetime.now(UTC),
         )
         stmt = base_stmt.on_conflict_do_update(

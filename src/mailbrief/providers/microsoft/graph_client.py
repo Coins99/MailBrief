@@ -312,10 +312,7 @@ class GraphClient:
                         if retry_count < len(TRANSIENT_SERVER_DELAYS)
                         else TRANSIENT_SERVER_DELAYS[-1]
                     )
-                if (
-                    retry_count >= MAX_RETRIES
-                    or (time.monotonic() + retry_delay) > deadline
-                ):
+                if retry_count >= MAX_RETRIES or (time.monotonic() + retry_delay) > deadline:
                     raise ProviderRateLimitError(
                         "Microsoft Graph rate limit exceeded.",
                         retry_after_seconds=retry_delay,

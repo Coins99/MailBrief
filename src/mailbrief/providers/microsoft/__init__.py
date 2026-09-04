@@ -129,7 +129,9 @@ class MicrosoftEmailProvider(EmailProvider):
 
         while url:
             if page_number > max_pages:
-                raise ProviderResponseError(f"Maximum pagination page limit ({max_pages}) exceeded.")  # noqa: E501
+                raise ProviderResponseError(
+                    f"Maximum pagination page limit ({max_pages}) exceeded."
+                )  # noqa: E501
 
             if url in seen_urls:
                 raise ProviderResponseError("Circular continuation link detected in pagination.")

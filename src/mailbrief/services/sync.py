@@ -102,7 +102,9 @@ class SyncService:
                     except Exception as exc:
                         logger.warning("Progress callback raised an exception: %s", exc)
 
-            emit_progress(SyncProgress(stage=SyncStage.FETCHING, pages_fetched=0, messages_fetched=0))  # noqa: E501
+            emit_progress(
+                SyncProgress(stage=SyncStage.FETCHING, pages_fetched=0, messages_fetched=0)
+            )  # noqa: E501
 
             pages_count = 0
             messages_count = 0
@@ -196,9 +198,7 @@ class SyncService:
 
                     except ProviderRateLimitError as exc:
                         sleep_from_exc = (
-                            exc.accumulated_sleep_seconds
-                            if isinstance(exc, ProviderError)
-                            else 0.0
+                            exc.accumulated_sleep_seconds if isinstance(exc, ProviderError) else 0.0
                         )
                         if tracker.sleep_seconds == 0.0 and sleep_from_exc > 0.0:
                             local_wait_seconds += sleep_from_exc

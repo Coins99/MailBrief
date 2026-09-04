@@ -116,6 +116,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return _failure("Microsoft diagnostic was cancelled.", _ExitCode.CANCELLED)
     except Exception:
         import traceback
+
         traceback.print_exc(file=sys.stderr)
         return _failure("Microsoft diagnostic failed unexpectedly.", _ExitCode.PROVIDER)
     return int(_ExitCode.SUCCESS)

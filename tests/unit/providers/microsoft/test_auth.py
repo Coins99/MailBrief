@@ -300,7 +300,7 @@ async def test_disconnect_deletes_cache_file_and_verifies_absence(tmp_path: Path
 
     persistence = FakePersistence()
     token_cache = ManagedTokenCache(persistence)
-    
+
     token_event = {
         "client_id": "client-id",
         "scope": ["User.Read"],
@@ -309,7 +309,11 @@ async def test_disconnect_deletes_cache_file_and_verifies_absence(tmp_path: Path
         "response": {
             "access_token": "token",
             "refresh_token": "rt",
-            "id_token": "header." + base64.urlsafe_b64encode(b'{"oid": "local-object-id", "preferred_username": "user@example.com"}').decode() + ".signature",  # noqa: E501
+            "id_token": "header."
+            + base64.urlsafe_b64encode(
+                b'{"oid": "local-object-id", "preferred_username": "user@example.com"}'
+            ).decode()
+            + ".signature",  # noqa: E501
             "client_info": _client_info("uid", "tenant"),
             "expires_in": 3600,
         },
@@ -351,6 +355,7 @@ async def test_clear_microsoft_session_purges_cache(tmp_path: Path) -> None:
     cache_file = tmp_path / "msal-token-cache.bin"
     cache_file.write_bytes(b"encrypted-tokens")
     from mailbrief.providers.microsoft.cache import clear_microsoft_session
+
     await clear_microsoft_session(cache_file)
     assert not cache_file.exists()
 

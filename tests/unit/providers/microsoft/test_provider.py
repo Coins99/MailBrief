@@ -304,7 +304,9 @@ async def test_iter_message_pages_propagates_rate_limit_to_caller(
         provider_account_id="user.tenant",
         email_address="user@example.com",
     )
-    mock_graph_client.get.side_effect = ProviderRateLimitError("throttled", retry_after_seconds=30.0)  # noqa: E501
+    mock_graph_client.get.side_effect = ProviderRateLimitError(
+        "throttled", retry_after_seconds=30.0
+    )  # noqa: E501
     provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
     now = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
 
@@ -366,9 +368,7 @@ async def test_iter_message_pages_supports_resuming_with_continuation(
 async def test_fetch_plain_text_body_raw_path_encodes_question_mark_and_hash(
     mock_auth: MagicMock,
 ) -> None:
-    route = respx.get(
-        "https://graph.microsoft.com/v1.0/me/messages/msg%3Fwith%23symbols"
-    ).respond(
+    route = respx.get("https://graph.microsoft.com/v1.0/me/messages/msg%3Fwith%23symbols").respond(
         200,
         json={"body": {"contentType": "text", "content": "body text"}},
     )
@@ -404,4 +404,3 @@ async def test_iter_message_pages_max_pages_limit(
     with pytest.raises(ProviderResponseError, match="Maximum pagination page limit"):
         async for _ in pages_iter:
             pass
-

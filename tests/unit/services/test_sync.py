@@ -513,5 +513,3 @@ async def test_sync_day_rate_limit_honored_within_cap_resumes_pagination(
     assert result.message_count == 2
     mock_sleep.assert_awaited_once_with(5.0)
     assert len(progress_events) >= 3
-
-

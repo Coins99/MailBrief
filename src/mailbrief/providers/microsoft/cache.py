@@ -177,4 +177,3 @@ def _clear_cache(cache_path: Path) -> None:
 async def clear_microsoft_session(cache_path: Path) -> None:
     """Remove Microsoft credentials without constructing MSAL or using the network."""
     await asyncio.to_thread(_clear_cache, cache_path)
-

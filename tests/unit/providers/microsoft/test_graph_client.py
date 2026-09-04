@@ -402,4 +402,3 @@ async def test_on_retry_exception_does_not_abort_retry(mock_auth: MagicMock) -> 
 
     assert result == {"id": "account"}
     assert route.call_count == 2
-
