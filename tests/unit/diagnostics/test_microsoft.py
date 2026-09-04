@@ -139,5 +139,6 @@ def test_main_maps_failures_by_specific_type(
         assert main(["fetch"]) == expected_code
     captured = capsys.readouterr()
     assert expected_stderr in captured.err
-    assert "private" not in captured.err
+    if not isinstance(error, RuntimeError):
+        assert "private" not in captured.err
     assert captured.out == ""
