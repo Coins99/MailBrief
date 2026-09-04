@@ -18,7 +18,7 @@ from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import ProviderError
 
 
-class ManagedTokenCache(PersistedTokenCache):
+class ManagedTokenCache(PersistedTokenCache):  # type: ignore[misc]
     """Encrypted persistent token cache with an explicit sticky purge lifecycle."""
 
     def __init__(self, persistence: Any) -> None:
@@ -111,7 +111,7 @@ def purge_token_cache(
         else:
             token_cache.deserialize("{}")
             token_cache.has_state_changed = False
-            setattr(token_cache, "is_purged", True)
+            token_cache.is_purged = True
 
         # Assert zero tokens remaining in memory as part of the postcondition
         access_tokens = token_cache.find(msal.TokenCache.CredentialType.ACCESS_TOKEN)

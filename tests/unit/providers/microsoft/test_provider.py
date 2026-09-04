@@ -1,7 +1,7 @@
 """Unit tests for the MicrosoftEmailProvider adapter."""
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import msal
 import pytest
@@ -304,7 +304,7 @@ async def test_iter_message_pages_propagates_rate_limit_to_caller(
         provider_account_id="user.tenant",
         email_address="user@example.com",
     )
-    mock_graph_client.get.side_effect = ProviderRateLimitError("throttled", retry_after_seconds=30.0)
+    mock_graph_client.get.side_effect = ProviderRateLimitError("throttled", retry_after_seconds=30.0)  # noqa: E501
     provider = MicrosoftEmailProvider(mock_auth, mock_graph_client)
     now = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
 

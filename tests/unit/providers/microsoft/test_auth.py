@@ -309,7 +309,7 @@ async def test_disconnect_deletes_cache_file_and_verifies_absence(tmp_path: Path
         "response": {
             "access_token": "token",
             "refresh_token": "rt",
-            "id_token": "header." + base64.urlsafe_b64encode(b'{"oid": "local-object-id", "preferred_username": "user@example.com"}').decode() + ".signature",
+            "id_token": "header." + base64.urlsafe_b64encode(b'{"oid": "local-object-id", "preferred_username": "user@example.com"}').decode() + ".signature",  # noqa: E501
             "client_info": _client_info("uid", "tenant"),
             "expires_in": 3600,
         },
@@ -467,8 +467,9 @@ async def test_cancelled_msal_worker_holds_lock_until_it_finishes() -> None:
 
 
 def test_persisted_token_cache_signature_canary() -> None:
-    """Canary test to detect upstream signature churn in msal-extensions PersistedTokenCache.modify."""
+    """Canary test to detect upstream signature churn in msal-extensions PersistedTokenCache.modify."""  # noqa: E501
     import inspect
+
     from msal_extensions import PersistedTokenCache
 
     sig = inspect.signature(PersistedTokenCache.modify)

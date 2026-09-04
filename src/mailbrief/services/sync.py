@@ -102,7 +102,7 @@ class SyncService:
                     except Exception as exc:
                         logger.warning("Progress callback raised an exception: %s", exc)
 
-            emit_progress(SyncProgress(stage=SyncStage.FETCHING, pages_fetched=0, messages_fetched=0))
+            emit_progress(SyncProgress(stage=SyncStage.FETCHING, pages_fetched=0, messages_fetched=0))  # noqa: E501
 
             pages_count = 0
             messages_count = 0
@@ -148,7 +148,7 @@ class SyncService:
                             range_start_utc=window.start_utc,
                             range_end_utc=window.end_utc,
                             continuation=current_continuation,
-                        )
+                        )  # type: ignore[call-arg]
 
                         async for page in pages_iter:
                             if cancel and cancel.is_set():
@@ -212,7 +212,7 @@ class SyncService:
                         ):
                             error_code = exc.provider_error_code or "RATE_LIMITED"
                             logger.warning(
-                                "Rate limit wait ceiling exceeded or no retry-after (wait=%s, total_slept=%.1fs, allowed_total=%.1fs): %s",
+                                "Rate limit wait ceiling exceeded or no retry-after (wait=%s, total_slept=%.1fs, allowed_total=%.1fs): %s",  # noqa: E501
                                 wait_delay,
                                 total_wait_seconds,
                                 MAX_TOTAL_WAIT_SECONDS,
@@ -243,7 +243,7 @@ class SyncService:
 
                         honored_waits_count += 1
                         logger.info(
-                            "Honoring provider rate limit wait of %.1fs (wait %d, accumulated=%.1fs)",
+                            "Honoring provider rate limit wait of %.1fs (wait %d, accumulated=%.1fs)",  # noqa: E501
                             wait_delay,
                             honored_waits_count,
                             total_wait_seconds + wait_delay,

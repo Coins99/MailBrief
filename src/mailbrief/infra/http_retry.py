@@ -1,17 +1,16 @@
 """Shared HTTP retry policy, execution engine, duration parsing, and response classification."""
 
 import asyncio
-from contextvars import ContextVar
-from dataclasses import dataclass
 import email.utils
-from enum import StrEnum
 import logging
 import math
 import re
 import time
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from enum import StrEnum
 
 import httpx
 
@@ -37,7 +36,7 @@ def parse_retry_delay(header_value: str | None) -> float | None:
     """Parse nonnegative delta-seconds, duration string, or HTTP-date without arbitrary lower clamping.
 
     Rejects absurd delays (> 24 hours), non-finite floats, exponential notation, and negative numbers.
-    """
+    """  # noqa: E501
     if header_value is None:
         return None
 
@@ -101,13 +100,13 @@ def parse_openai_ratelimit_reset(headers: Mapping[str, str]) -> float | None:
     rem_tokens: int | None = None
     raw_rem_req = normalized.get("x-ratelimit-remaining-requests")
     if raw_rem_req is not None:
-        try:
+        try:  # noqa: SIM105
             rem_requests = int(raw_rem_req)
         except ValueError:
             pass
     raw_rem_tok = normalized.get("x-ratelimit-remaining-tokens")
     if raw_rem_tok is not None:
-        try:
+        try:  # noqa: SIM105
             rem_tokens = int(raw_rem_tok)
         except ValueError:
             pass
@@ -116,12 +115,12 @@ def parse_openai_ratelimit_reset(headers: Mapping[str, str]) -> float | None:
     reset_tokens = parse_retry_delay(normalized.get("x-ratelimit-reset-tokens"))
 
     # If tokens are exhausted and requests are not, token limit is the binding constraint
-    if rem_tokens == 0 and (rem_requests is None or rem_requests > 0):
+    if rem_tokens == 0 and (rem_requests is None or rem_requests > 0):  # noqa: SIM102
         if reset_tokens is not None:
             return reset_tokens
 
     # If requests are exhausted and tokens are not, request limit is the binding constraint
-    if rem_requests == 0 and (rem_tokens is None or rem_tokens > 0):
+    if rem_requests == 0 and (rem_tokens is None or rem_tokens > 0):  # noqa: SIM102
         if reset_requests is not None:
             return reset_requests
 
@@ -311,7 +310,7 @@ async def execute_with_retry(
     client_request_id: str,
     on_retry: Callable[[int, float], None] | None = None,
 ) -> RetryResult:
-    """Execute a single logical request with wall-clock deadline, timeout clamping, and sleep accounting."""
+    """Execute a single logical request with wall-clock deadline, timeout clamping, and sleep accounting."""  # noqa: E501
     deadline = time.monotonic() + policy.request_deadline_seconds
     attempt = 0
     accumulated_sleep = 0.0
@@ -387,7 +386,7 @@ async def execute_with_retry(
             f"HTTP request failed with status {response.status_code}.",
             client_request_id=client_request_id,
         )
-        setattr(exc_to_raise, "accumulated_sleep_seconds", accumulated_sleep)
+        exc_to_raise.accumulated_sleep_seconds = accumulated_sleep  # type: ignore[attr-defined]
 
         if verdict.kind == VerdictKind.RETRY:
             raw_delay = (

@@ -275,7 +275,7 @@ class GraphClient:
                 if retry_count < MAX_RETRIES and (time.monotonic() + delay) <= deadline:
                     retry_count += 1
                     logger.warning(
-                        "Graph transport error on %s, retrying in %.1fs (attempt=%d, client-request-id=%s)",
+                        "Graph transport error on %s, retrying in %.1fs (attempt=%d, client-request-id=%s)",  # noqa: E501
                         target_url,
                         delay,
                         retry_count,

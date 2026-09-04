@@ -1,6 +1,6 @@
 """Microsoft email provider package and adapter."""
 
-import asyncio
+import asyncio  # noqa: F401
 import logging
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -12,7 +12,7 @@ from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     ProviderError,
-    ProviderRateLimitError,
+    ProviderRateLimitError,  # noqa: F401
     ProviderResponseError,
 )
 from mailbrief.providers.microsoft.auth import (
@@ -129,7 +129,7 @@ class MicrosoftEmailProvider(EmailProvider):
 
         while url:
             if page_number > max_pages:
-                raise ProviderResponseError(f"Maximum pagination page limit ({max_pages}) exceeded.")
+                raise ProviderResponseError(f"Maximum pagination page limit ({max_pages}) exceeded.")  # noqa: E501
 
             if url in seen_urls:
                 raise ProviderResponseError("Circular continuation link detected in pagination.")
