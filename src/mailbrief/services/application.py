@@ -106,11 +106,7 @@ class ApplicationService:
         if not rows:
             return sync_result, []
 
-        provider_kind = (
-            ProviderKind(account.provider)
-            if account.provider in ProviderKind._value2member_map_
-            else ProviderKind.MICROSOFT
-        )
+        provider_kind = ProviderKind(account.provider)
 
         domain_messages = [
             MessageRepository.to_domain(row, account.provider_account_id, provider_kind)
