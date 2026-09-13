@@ -297,7 +297,7 @@ class MessageRepository:
     def to_domain(
         row: MessageTable,
         provider_account_id: str,
-        provider: ProviderKind = ProviderKind.MICROSOFT,
+        provider: ProviderKind,
     ) -> NormalizedMessage:
         """Map a MessageTable ORM entity to a NormalizedMessage domain model."""
         return NormalizedMessage(

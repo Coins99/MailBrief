@@ -12,6 +12,7 @@ from mailbrief.domain.common import DomainModel, normalize_utc
 class ProviderKind(StrEnum):
     """Email providers understood by the provider-neutral domain."""
 
+    GMAIL = "gmail"
     MICROSOFT = "microsoft"
 
 
