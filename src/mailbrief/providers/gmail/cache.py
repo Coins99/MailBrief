@@ -42,9 +42,14 @@ class VaultBackend(Protocol):
     def delete_password(self, service: str, username: str) -> None: ...
 
 
+def _platform() -> str:
+    """Read the platform at call time without letting mypy narrow it per OS."""
+    return sys.platform
+
+
 def windows_vault() -> VaultBackend:
     """Avoid keyring auto-selection, including insecure third-party backends."""
-    if sys.platform != "win32":
+    if _platform() != "win32":
         raise GmailSetupError("Gmail credential storage currently requires Windows.")
     try:
         from keyring.backends.Windows import WinVaultKeyring
