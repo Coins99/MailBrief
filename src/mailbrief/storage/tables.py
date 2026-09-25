@@ -105,6 +105,9 @@ class MessageTable(Base):
         server_default=false(),
     )
     importance: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_in_inbox: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
     has_attachments: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -238,3 +241,6 @@ class SyncRunTable(Base):
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     sanitized_error_code: Mapped[str | None] = mapped_column(String(128))
+    failed_message_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )

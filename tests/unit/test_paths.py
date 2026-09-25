@@ -14,6 +14,7 @@ from mailbrief.paths import AppPaths, configure_qt_identity
 
 def test_configure_qt_identity_uses_package_version() -> None:
     configure_qt_identity()
+    assert QCoreApplication.organizationName() == "MailBrief"
     assert QCoreApplication.applicationName() == "MailBrief"
     assert QCoreApplication.applicationVersion() == __version__
 

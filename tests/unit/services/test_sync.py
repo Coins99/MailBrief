@@ -27,6 +27,7 @@ from mailbrief.ports.errors import (
     ProviderRateLimitError,
     ProviderResponseError,
 )
+from mailbrief.services import sync as sync_module
 from mailbrief.services.calendar import DayWindow
 from mailbrief.services.sync import SyncService
 from mailbrief.storage.repositories import (
@@ -513,3 +514,44 @@ async def test_sync_day_rate_limit_honored_within_cap_resumes_pagination(
     assert result.message_count == 2
     mock_sleep.assert_awaited_once_with(5.0)
     assert len(progress_events) >= 3
+
+
+async def test_sync_work_budget_is_enforced_between_pages(
+    async_session: AsyncSession, test_account: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class SlowProvider(FakeEmailProvider):
+        async def iter_message_pages(
+            self,
+            *,
+            range_start_utc: datetime,
+            range_end_utc: datetime,
+            continuation: str | None = None,
+        ) -> AsyncIterator[MessagePage]:
+            async for page in super().iter_message_pages(
+                range_start_utc=range_start_utc,
+                range_end_utc=range_end_utc,
+                continuation=continuation,
+            ):
+                await asyncio.sleep(0.05)
+                yield page
+
+    monkeypatch.setattr(sync_module, "MAX_RUN_WORK_SECONDS", 0.02)
+    provider = SlowProvider(
+        pages=[[make_message(provider_message_id=f"slow-{i}")] for i in range(1, 4)]
+    )
+    sync_service = SyncService(
+        provider=provider,
+        message_repo=MessageRepository(async_session),
+        sync_run_repo=SyncRunRepository(async_session),
+        account_repo=AccountRepository(async_session),
+    )
+
+    result = await sync_service.sync_day(
+        account_id=test_account,
+        account_identity="user@example.com",
+        window=TEST_WINDOW,
+    )
+
+    assert result.status is SyncStatus.PARTIAL
+    assert result.error_code == "SYNC_RUN_TIMEOUT"
+    assert result.page_count == 1

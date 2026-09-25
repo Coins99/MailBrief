@@ -27,6 +27,7 @@ dependencies = [
 [project.scripts]
 mailbrief = "mailbrief.app:main"
 mailbrief-ms-diagnostic = "mailbrief.diagnostics.microsoft:main"
+mailbrief-gmail-diagnostic = "mailbrief.diagnostics.gmail:main"
 
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]

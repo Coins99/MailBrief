@@ -20,7 +20,11 @@ target_metadata = Base.metadata
 
 def database_url() -> str:
     """Read an explicit URL from the environment or Alembic configuration."""
-    url = os.getenv("MAILBRIEF_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    url = (
+        config.attributes.get("explicit_database_url")
+        or os.getenv("MAILBRIEF_DATABASE_URL")
+        or config.get_main_option("sqlalchemy.url")
+    )
     if not url:
         raise RuntimeError("MAILBRIEF_DATABASE_URL or sqlalchemy.url must be configured")
     return url

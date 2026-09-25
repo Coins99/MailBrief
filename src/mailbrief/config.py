@@ -1,8 +1,11 @@
 """Validated nonsecret application configuration."""
 
+from pathlib import Path
+
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from mailbrief.domain.messages import ProviderKind
 from mailbrief.errors import ConfigurationError
 
 
@@ -11,6 +14,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="MAILBRIEF_", extra="ignore")
 
+    email_provider: ProviderKind = ProviderKind.GMAIL
+    gmail_oauth_client_path: Path | None = None
     microsoft_client_id: str | None = None
     graph_base_url: HttpUrl = HttpUrl("https://graph.microsoft.com/v1.0")
     openai_model: str | None = None
@@ -42,3 +47,11 @@ class Settings(BaseSettings):
                 "Microsoft integration is not configured; set MAILBRIEF_MICROSOFT_CLIENT_ID."
             )
         return value
+
+    def require_gmail_oauth_client_path(self) -> Path:
+        """Return the configured Google desktop OAuth client file."""
+        if self.gmail_oauth_client_path is None:
+            raise ConfigurationError(
+                "Gmail integration is not configured; set MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH."
+            )
+        return self.gmail_oauth_client_path.expanduser()

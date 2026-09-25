@@ -15,16 +15,14 @@ package "MailBrief Desktop" {
   interface EmailProvider
   interface AIProvider
 
-  [Microsoft Provider] as Microsoft
-  [Gmail Provider] as Gmail
-  [IMAP Provider] as IMAP
+  [Gmail Provider (active)] as Gmail
+  [Microsoft Provider (dormant)] as Microsoft
   [Cloud AI] as CloudAI
   [Local AI] as LocalAI
 }
 
 cloud "Microsoft Graph" as Graph
 cloud "Gmail API" as GmailAPI
-cloud "IMAP Server" as IMAPServer
 
 User --> UI
 UI --> App
@@ -36,13 +34,11 @@ Digest --> Ranker
 Digest --> AIProvider
 Digest --> DB
 
-EmailProvider <|.. Microsoft
 EmailProvider <|.. Gmail
-EmailProvider <|.. IMAP
+EmailProvider <|.. Microsoft
 AIProvider <|.. CloudAI
 AIProvider <|.. LocalAI
 
 Microsoft --> Graph
 Gmail --> GmailAPI
-IMAP --> IMAPServer
 @enduml
