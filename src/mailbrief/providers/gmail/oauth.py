@@ -208,11 +208,15 @@ class LoopbackAuthorization:
             ) from None
         finally:
             server.close()
-            await server.wait_closed()
             pending = tuple(handlers)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            if pending:
+                # Let an in-flight reply finish, then drop idle sockets (for example browser
+                # preconnects) so shutdown never waits out their 5-second read timeout.
+                _, lingering = await asyncio.wait(pending, timeout=0.5)
+                for task in lingering:
+                    task.cancel()
+                await asyncio.gather(*lingering, return_exceptions=True)
+            await server.wait_closed()
             if not result.done():
                 result.cancel()
             elif not result.cancelled():

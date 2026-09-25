@@ -171,3 +171,32 @@ async def test_task_cancellation_closes_listener() -> None:
         await task
     with pytest.raises(httpx.ConnectError):
         await callback(redirect, {})
+
+
+async def test_idle_browser_connection_does_not_delay_completion() -> None:
+    held: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    async def browser(url: str) -> bool:
+        query = parse_qs(urlsplit(url).query)
+        redirect, state = query["redirect_uri"][0], query["state"][0]
+        port = urlsplit(redirect).port
+        assert port is not None
+
+        async def respond() -> None:
+            held.append(await asyncio.open_connection("127.0.0.1", port))
+            await callback(redirect, {"state": state, "code": "idle-code"})
+
+        tasks.append(asyncio.create_task(respond()))
+        return True
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    grant = await LoopbackAuthorization(browser=browser).authorize(CLIENT)
+    elapsed = loop.time() - started
+    await asyncio.gather(*tasks)
+    for _, writer in held:
+        writer.close()
+
+    assert grant.code == "idle-code"
+    assert elapsed < 2.0
