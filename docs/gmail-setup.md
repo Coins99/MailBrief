@@ -15,9 +15,13 @@ Daily summaries and UI wiring follow in later milestones.
    is Testing, add your own Gmail address as a test user.
 4. Configure the read-only Gmail scope:
    `https://www.googleapis.com/auth/gmail.readonly`.
-5. Create an OAuth client with application type **Desktop app**, then download
+5. On the Audience page, select **Publish app** so the publishing status becomes
+   **In production**. A personal app can stay unverified: Google then shows an
+   unverified-app warning on the consent screen at each interactive sign-in, which you
+   accept. While the status is Testing, Google expires the saved sign-in after seven days.
+6. Create an OAuth client with application type **Desktop app**, then download
    its JSON file. A Web application client file is not interchangeable.
-6. Store the file outside the repository and avoid shared/synced folders. Do not
+7. Store the file outside the repository and avoid shared/synced folders. Do not
    paste the JSON into issues, logs or chats. No redirect endpoint or hosted
    server needs to be deployed; the app uses an ephemeral loopback port.
 
@@ -71,7 +75,10 @@ different mailbox requires an explicit local disconnect first. A profile mismatc
 does not overwrite an existing account's credentials.
 
 Google documents seven-day refresh-token expiry for External apps in Testing
-when using Gmail scopes. Reconnect when needed; this is not a failed persistence
+when using Gmail scopes; publishing the app (setup step 5) avoids it. If you publish
+after connecting, run `disconnect` and then an interactive `fetch` once so the new
+sign-in is not time-limited. If you stay in Testing, reconnect when needed; this is
+not a failed persistence
 test. Tokens can also be revoked or expire for other reasons. See
 [Google's token-expiration guidance](https://developers.google.com/identity/protocols/oauth2#expiration).
 

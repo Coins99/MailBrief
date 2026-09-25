@@ -11,7 +11,8 @@ M2 implementation adds `client.py`, `mapper.py`, and `provider.py`, and extends 
 diagnostic with metadata sync. Shared models/services now carry failed-item counts
 and cached Inbox membership; additive revision `20260925_0002` preserves existing
 data. These later changes supersede the original preserve-unchanged list for the
-shared sync/ranking/storage surface. Microsoft adapter source remains unchanged.
+shared sync/ranking/storage surface. The 2026-09-25 reconciliation with `main` moved
+main's newer Microsoft adapter into `providers/microsoft/provider.py`.
 
 ## Changed now
 

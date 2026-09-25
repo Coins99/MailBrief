@@ -28,6 +28,9 @@ disconnect/reconnect. M2 metadata sync and ranking are implemented; see
 remains an M1 live check. The [M1 validation](m1-validation.md) records its original baseline.
 No feature is marked implemented merely because it appears in this plan.
 
+Main was reconciled with the Gmail line on 2026-09-25 and is again the integration
+branch; new work branches from `main`.
+
 Next: complete remaining live acceptance checks, then M3 shortlisted-body retrieval.
 General tasks, calendar, analytics and website directions are intentionally rough
 in [ecosystem-roadmap.md](ecosystem-roadmap.md).
