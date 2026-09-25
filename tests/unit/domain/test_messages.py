@@ -16,6 +16,10 @@ from mailbrief.domain.messages import (
 from tests.factories import make_message
 
 
+def test_provider_kinds_keep_microsoft_and_add_gmail() -> None:
+    assert {kind.value for kind in ProviderKind} == {"gmail", "microsoft"}
+
+
 def test_normalized_message_round_trips_as_json() -> None:
     message = make_message()
 

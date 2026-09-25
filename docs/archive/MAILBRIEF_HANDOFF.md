@@ -1,3 +1,6 @@
+> Archived 2026-09-25: superseded by `AGENTS.md`. The Microsoft diagnostic gate below no
+> longer applies; its AI-adapter notes will be re-evaluated when M4 is planned.
+
 # MailBrief Agent Handoff
 
 ## 1. Current Status & Context

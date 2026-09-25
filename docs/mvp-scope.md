@@ -1,96 +1,54 @@
-# MailBrief MVP Scope
+# Personal desktop scope
 
-Status: Frozen for version 0.1.0
+Updated: 2026-09-25. MailBrief is the email entry point for a future personal
+task/calendar/analytics ecosystem. Build for the owner, one Gmail account and
+Windows first. The server-hosted website comes after the desktop ecosystem.
 
-This document is the scope contract for the first MailBrief release. New work
-that is not explicitly included below must be deferred unless the scope is
-formally revised.
+## Email MVP: M0–M5
 
-## Product statement
+- Gmail read-only OAuth, secure restoration and disconnect.
+- Today's Inbox metadata, pagination, exact local-day boundaries and ranking.
+- Reviewable shortlist and body retrieval only for selected messages.
+- Explicit cloud-AI consent, structured summaries/actions/deadlines, valid-result
+  caching, saved briefs and Gmail source links.
+- Responsive, cancellable PySide6 workflow and Windows `onedir` package.
+- Existing Microsoft support retained but dormant.
 
-MailBrief 0.1.0 is a Windows desktop application that connects one Microsoft
-mail account, collects metadata for messages received in the Inbox during the
-user's current local calendar day, ranks those messages locally, sends only a
-shortlist to a configured cloud AI provider, and presents a daily brief with
-links to the original messages.
+## Complete personal email workspace: M6–M9
 
-## Included
+- Multiple action suggestions, durable accepted actions, editable plans,
+  extracted deadlines and separate suggested/user-selected target dates.
+- Carryover, waiting/completed states, thread updates and protection of user edits.
+- Locally saved email, note and message drafts with editing, copy and export.
+- History, bounded catch-up, local preferences and optional refresh while running.
+- Backup/restore, retention controls, upgrades and personal-use validation.
 
-- One Microsoft 365, Outlook, or personal Microsoft account.
-- Interactive Microsoft OAuth with a securely persisted token cache.
-- A manual **Generate today's brief** action.
-- Time-zone-aware retrieval of the current day's Inbox messages.
-- Complete Graph pagination and message deduplication.
-- Local SQLite storage for account data, message metadata, ranking results,
-  analyses, digests, and synchronization history.
-- Deterministic local ranking before any full message body is fetched.
-- Plain-text body retrieval for shortlisted messages only.
-- One OpenAI implementation behind an `AIProvider` protocol.
-- Structured highlights, actions, decisions, and deadlines.
-- A link from every digest item to the original Microsoft message.
-- A responsive, cancellable PySide6 workflow.
-- A Windows `onedir` package built with PyInstaller.
+Direct Gmail draft saving is optional M10. Sending is not required to finish the
+email scope. A generated/copied draft is not evidence of sending or completion.
 
-## Explicitly deferred
+## Later work
 
-- Gmail, IMAP, and multiple connected accounts.
-- Local AI models and additional cloud AI implementations.
-- Attachment download or analysis.
-- Background sync, scheduled briefs, notifications, and auto-start.
-- User-configurable ranking rules.
-- Replying, deleting, moving, or marking email as read.
-- Outlook add-ins, mobile clients, web clients, and cross-platform packages.
-- Installer signing, automatic updates, and telemetry.
+General tasks/projects, an adjustable internal calendar with suggested work
+blocks, richer notes and analytics follow email. See the provisional
+[ecosystem roadmap](ecosystem-roadmap.md).
 
-## Privacy boundary
+Website/server development, cross-device sync, public distribution, multiple
+accounts/users, external calendar writes, attachments, autonomous mail changes,
+local AI, installers and auto-update are not email-release requirements.
 
-- Access tokens, refresh tokens, and AI API keys must use operating-system-backed
-  encrypted storage and must never be written to SQLite or logs.
-- Full message bodies are held in memory only.
-- Only shortlisted messages may be sent to the AI provider.
-- Attachments, tenant identifiers, Graph message identifiers, and `webLink`
-  values are not AI inputs.
-- Cloud analysis requires explicit first-use consent.
-- AI requests use provider controls that disable response storage where
-  supported.
+## Data and release rules
 
-## Acceptance criteria
+Persist metadata, bounded derived results, preferences and explicit user-owned
+artifacts locally. Never store full incoming bodies or credentials in SQLite or
+logs. Clarify the storage ADR before introducing saved drafts; their text is
+user-owned work, not a mailbox-body cache. Credentials use the OS store.
+Local storage does not imply local AI processing.
 
-- **AC-01 — Installation:** The packaged application starts on a clean supported
-  Windows machine without a separately installed Python or Qt runtime.
-- **AC-02 — Connection:** A user can connect one supported Microsoft account
-  through interactive OAuth without a client secret embedded in the app.
-- **AC-03 — Session restoration:** A valid cached session reconnects silently
-  after an application restart.
-- **AC-04 — Date correctness:** The application converts the user's local-day
-  boundaries to UTC correctly, including daylight-saving transitions.
-- **AC-05 — Complete retrieval:** Every Inbox metadata page in the requested
-  interval is followed until Graph returns no `nextLink` or the user cancels.
-- **AC-06 — Idempotency:** Repeating a sync does not create duplicate messages.
-- **AC-07 — Local ranking:** Ranking is deterministic, runs before body retrieval,
-  and records readable reasons for every score adjustment.
-- **AC-08 — Data minimization:** Full bodies are fetched only for shortlisted
-  messages, are limited before AI submission, and are not persisted.
-- **AC-09 — Structured analysis:** Every accepted AI response satisfies the
-  versioned Pydantic response schema.
-- **AC-10 — Analysis reuse:** Unchanged message input analyzed with the same
-  provider, model, prompt, and schema reuses the cached analysis.
-- **AC-11 — Daily brief:** A completed or partially completed run displays
-  highlights, actions, decisions, and deadlines in a deterministic order.
-- **AC-12 — Source navigation:** Every digest item with a valid source link opens
-  the original Microsoft message in the system browser or Outlook client.
-- **AC-13 — Responsiveness:** Sync and AI work do not block UI repainting, and a
-  user can cancel an active generation operation.
-- **AC-14 — Recoverability:** Authentication, permission, throttling, timeout,
-  offline, invalid-AI-response, and partial-result failures produce clear and
-  recoverable states without exposing sensitive content.
-- **AC-15 — Quality gate:** CI passes Ruff formatting and linting, strict mypy,
-  and pytest with at least 90% coverage for synchronization, ranking, and digest
-  services and at least 80% overall coverage.
+Provider identity changes require no migration; new actions, drafts and tracking
+state require tested additive migrations. Preserve Microsoft data and tests.
+Quality targets remain Ruff, strict mypy, 90% service coverage and 80% overall
+coverage, with packaged-app and live-mailbox checks.
 
-## Release boundary
-
-Version 0.1.0 is ready only when every acceptance criterion above is satisfied,
-the Windows package has passed a clean-machine test, and all critical or
-high-severity defects are closed.
-
+See [delivery sequence](mvp-plan.md) and the
+[detailed implementation plan](email-implementation-plan.md) for dependencies,
+file guidance and acceptance criteria. Planned features are not implemented yet.

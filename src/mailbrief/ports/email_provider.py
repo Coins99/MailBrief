@@ -29,8 +29,13 @@ class EmailProvider(Protocol):
         *,
         range_start_utc: datetime,
         range_end_utc: datetime,
+        continuation: str | None = None,
     ) -> AsyncIterator[MessagePage]:
-        """Yield all normalized message pages in the requested UTC interval."""
+        """Yield all normalized message pages in the requested UTC interval.
+
+        ``continuation`` is an opaque ``MessagePage.continuation`` value previously yielded
+        by the same provider; passing it resumes enumeration at the page it points to.
+        """
         ...
 
     async def fetch_plain_text_body(self, provider_message_id: str) -> str:

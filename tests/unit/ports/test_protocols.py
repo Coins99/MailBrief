@@ -32,8 +32,9 @@ class FakeEmailProvider:
         *,
         range_start_utc: datetime,
         range_end_utc: datetime,
+        continuation: str | None = None,
     ) -> AsyncIterator[MessagePage]:
-        del range_start_utc, range_end_utc
+        del range_start_utc, range_end_utc, continuation
         yield MessagePage(page_number=1, messages=())
 
     async def fetch_plain_text_body(self, provider_message_id: str) -> str:

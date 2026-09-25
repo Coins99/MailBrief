@@ -1,3 +1,6 @@
+ARCHIVED 2026-09-25: superseded by AGENTS.md. Historical reference only; it describes
+the earlier Microsoft-first plan and is not current guidance.
+
 ================================================================================
 MAILBRIEF - AI AGENT CONTEXT & INSTRUCTION GUIDE
 ================================================================================

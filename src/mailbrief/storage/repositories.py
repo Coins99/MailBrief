@@ -183,6 +183,7 @@ class MessageRepository:
                     ],
                     "received_at_utc": m.received_at_utc,
                     "is_read": m.is_read,
+                    "is_in_inbox": m.is_in_inbox,
                     "importance": (
                         m.importance.value
                         if isinstance(m.importance, MessageImportance)
@@ -209,6 +210,7 @@ class MessageRepository:
                     "to_recipients_json": base_stmt.excluded.to_recipients_json,
                     "received_at_utc": base_stmt.excluded.received_at_utc,
                     "is_read": base_stmt.excluded.is_read,
+                    "is_in_inbox": base_stmt.excluded.is_in_inbox,
                     "importance": base_stmt.excluded.importance,
                     "has_attachments": base_stmt.excluded.has_attachments,
                     "body_preview": base_stmt.excluded.body_preview,
@@ -278,6 +280,8 @@ class MessageRepository:
         account_id: int,
         start_utc: datetime,
         end_utc: datetime,
+        *,
+        inbox_only: bool = False,
     ) -> list[MessageTable]:
         """Fetch all messages for an account within a UTC datetime range."""
         stmt = (
@@ -289,8 +293,33 @@ class MessageRepository:
             )
             .order_by(MessageTable.received_at_utc.desc(), MessageTable.id.asc())
         )
-        result = await self._session.scalars(stmt)
+        if inbox_only:
+            stmt = stmt.where(MessageTable.is_in_inbox.is_(True))
+        result = await self._session.scalars(stmt.execution_options(populate_existing=True))
         return list(result.all())
+
+    async def reconcile_inbox(
+        self, account_id: int, start_utc: datetime, end_utc: datetime, seen_ids: set[str]
+    ) -> None:
+        """Call only after complete enumeration; preserve cached content and references."""
+        window = (
+            MessageTable.account_id == account_id,
+            MessageTable.received_at_utc >= normalize_utc(start_utc),
+            MessageTable.received_at_utc < normalize_utc(end_utc),
+        )
+        await self._session.execute(update(MessageTable).where(*window).values(is_in_inbox=False))
+        identifiers = sorted(seen_ids)
+        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+            await self._session.execute(
+                update(MessageTable)
+                .where(
+                    *window,
+                    MessageTable.provider_message_id.in_(
+                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
+                    ),
+                )
+                .values(is_in_inbox=True)
+            )
 
     async def get_by_provider_message_id(
         self,
@@ -313,7 +342,7 @@ class MessageRepository:
     def to_domain(
         row: MessageTable,
         provider_account_id: str,
-        provider: ProviderKind = ProviderKind.MICROSOFT,
+        provider: ProviderKind,
     ) -> NormalizedMessage:
         """Map a MessageTable ORM entity to a NormalizedMessage domain model."""
         return NormalizedMessage(
@@ -330,6 +359,7 @@ class MessageRepository:
             ),
             received_at_utc=row.received_at_utc,
             is_read=row.is_read,
+            is_in_inbox=row.is_in_inbox,
             importance=MessageImportance(row.importance),
             has_attachments=row.has_attachments,
             body_preview=row.body_preview,
@@ -602,6 +632,7 @@ class SyncRunRepository:
         status: str | SyncStatus | None = None,
         page_count: int | None = None,
         message_count: int | None = None,
+        failed_message_count: int | None = None,
         error_code: str | None = None,
         completed: bool = False,
     ) -> SyncRunTable | None:
@@ -616,6 +647,8 @@ class SyncRunRepository:
             sync_run.page_count = page_count
         if message_count is not None:
             sync_run.message_count = message_count
+        if failed_message_count is not None:
+            sync_run.failed_message_count = failed_message_count
         if error_code is not None:
             sync_run.sanitized_error_code = error_code
         if completed:

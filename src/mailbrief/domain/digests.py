@@ -105,6 +105,7 @@ class SyncProgress(DomainModel):
     stage: SyncStage
     pages_fetched: int = Field(default=0, ge=0)
     messages_fetched: int = Field(default=0, ge=0)
+    failed_message_count: int = Field(default=0, ge=0)
     ai_batches_completed: int = Field(default=0, ge=0)
     detail: str | None = Field(default=None, max_length=255)
 
@@ -118,6 +119,7 @@ class SyncResult(DomainModel):
     status: SyncStatus
     page_count: int = Field(ge=0)
     message_count: int = Field(ge=0)
+    failed_message_count: int = Field(default=0, ge=0)
     shortlisted_message_keys: tuple[str, ...] = ()
     error_code: str | None = Field(default=None, max_length=128)
 

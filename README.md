@@ -1,65 +1,40 @@
 # MailBrief
 
-MailBrief is a Python-first desktop app that creates a daily highlight of important emails, action items, and deadlines across connected inboxes.
+MailBrief is a Windows desktop app that turns today's important email into a
+short brief. Gmail is the first supported mailbox. Outlook code is retained for
+later use after Microsoft Entra access is resolved.
 
-## Goals
+## Current state
 
-- Combine multiple email accounts into one daily brief.
-- Surface important messages, actions, and deadlines.
-- Support Microsoft 365/Outlook first, Gmail next, and IMAP providers later.
-- Keep storage local by default.
-- Allow cloud or local AI through a provider interface.
+- Implemented: provider-neutral models, SQLite storage, daily sync, ranking, and
+  a tested Microsoft Graph adapter.
+- Implemented for M1: Gmail OAuth, Windows credential storage, and an authentication
+  diagnostic. The owner verified sign-in, restoration, disconnect and reconnect.
+- Implemented for M2: Gmail Inbox metadata, pagination, safe reconciliation,
+  local ranking and a metadata sync/review diagnostic.
+- Next: shortlisted body retrieval (M3).
+- Pending: AI analysis, digest assembly, desktop workflow, and packaging.
 
-## Planned Stack
+## Start here
 
-- Python 3.13+
-- PySide6 / Qt
-- asyncio + httpx
-- Pydantic
-- SQLite + SQLAlchemy
-- Microsoft Graph + MSAL
-- Gmail API + Google OAuth
-- Optional IMAP support
+- [Scope](docs/mvp-scope.md)
+- [Implementation plan](docs/mvp-plan.md)
+- [Detailed email milestones and acceptance checks](docs/email-implementation-plan.md)
+- [Later desktop ecosystem and website guidelines](docs/ecosystem-roadmap.md)
+- [Gmail setup and authentication diagnostic](docs/gmail-setup.md)
+- [Gmail metadata synchronization and shortlist review](docs/gmail-metadata.md)
+- [File change map](docs/change-map.md)
+- [Microsoft work retained for later](docs/microsoft-setup.md)
 
-## Architecture
+## Development
 
-Mail providers are isolated behind a common interface. Messages are normalized before ranking, AI analysis, storage, and display.
+```powershell
+uv sync --locked --all-groups
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src tests
+uv run pytest
+```
 
-See [`docs/architecture.puml`](docs/architecture.puml).
-
-Implementation documents:
-
-- [`docs/mvp-scope.md`](docs/mvp-scope.md) freezes the version 0.1.0 scope and
-  acceptance criteria.
-- [`docs/mvp-plan.md`](docs/mvp-plan.md) contains the milestone and task roadmap.
-- [`docs/microsoft-setup.md`](docs/microsoft-setup.md) explains Entra registration,
-  secure local configuration, and the Microsoft diagnostic workflow.
-- [`docs/adr/`](docs/adr/) records accepted architecture decisions.
-
-## MVP
-
-1. Connect a Microsoft account.
-2. Fetch the day's inbox messages.
-3. Normalize and cache messages locally.
-4. Rank messages using local rules.
-5. Send shortlisted messages for structured AI analysis.
-6. Generate a daily brief.
-7. Open the original email from a highlight.
-
-## Constraints
-
-- OAuth is required per provider and account.
-- Email content is sensitive; stored and transmitted data should be minimized.
-- Provider APIs differ and must be normalized.
-- API keys must not be embedded in distributed builds.
-- Sync and AI work must not block the desktop UI.
-- API quotas and rate limits must be handled.
-
-## Future Scope
-
-- Gmail and multi-account support
-- IMAP provider support
-- Local AI models
-- Configurable ranking rules
-- Background daily summaries
-- Optional Outlook add-in
+Python is pinned to 3.13. Runtime code lives under `src/mailbrief`; tests mirror
+that structure under `tests`.
