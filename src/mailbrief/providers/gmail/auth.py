@@ -8,7 +8,6 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from mailbrief.domain.messages import AccountIdentity, ProviderKind
-from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     ProviderPermissionError,
@@ -16,6 +15,7 @@ from mailbrief.ports.errors import (
     ProviderResponseError,
 )
 from mailbrief.providers.gmail.cache import CredentialStore, RefreshCredential
+from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.oauth import (
     GMAIL_SCOPE,
     TOKEN_URL,
@@ -91,7 +91,7 @@ class GmailAuth:
         self._account = None
         cached = await asyncio.to_thread(self._store.load)
         if cached is not None and cached.client_id != self._client.client_id:
-            raise ConfigurationError("Gmail OAuth client changed; disconnect before reconnecting.")
+            raise GmailSetupError("Gmail OAuth client changed; disconnect before reconnecting.")
         tokens: TokenResponse | None = None
         restored = False
         if cached is not None:

@@ -5,7 +5,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
-from mailbrief.errors import ConfigurationError
+from mailbrief.providers.gmail.errors import GmailSetupError
 
 SERVICE = "MailBrief.Gmail"
 ENTRY = "personal-account-v1"
@@ -45,13 +45,13 @@ class VaultBackend(Protocol):
 def windows_vault() -> VaultBackend:
     """Avoid keyring auto-selection, including insecure third-party backends."""
     if sys.platform != "win32":
-        raise ConfigurationError("Gmail credential storage currently requires Windows.")
+        raise GmailSetupError("Gmail credential storage currently requires Windows.")
     try:
         from keyring.backends.Windows import WinVaultKeyring
 
         return WinVaultKeyring()  # type: ignore[no-untyped-call]
     except Exception:
-        raise ConfigurationError("Windows Credential Manager is unavailable.") from None
+        raise GmailSetupError("Windows Credential Manager is unavailable.") from None
 
 
 class GmailCredentialStore:
@@ -64,15 +64,13 @@ class GmailCredentialStore:
         try:
             value = self._backend.get_password(SERVICE, ENTRY)
         except Exception:
-            raise ConfigurationError(
-                "Unable to read Gmail credentials from the OS vault."
-            ) from None
+            raise GmailSetupError("Unable to read Gmail credentials from the OS vault.") from None
         if value is None:
             return None
         try:
             return RefreshCredential.model_validate_json(value)
         except ValidationError:
-            raise ConfigurationError(
+            raise GmailSetupError(
                 "Stored Gmail credentials are invalid; disconnect and reconnect."
             ) from None
 
@@ -85,13 +83,11 @@ class GmailCredentialStore:
         try:
             self._backend.set_password(SERVICE, ENTRY, json.dumps(payload))
         except Exception:
-            raise ConfigurationError("Unable to save Gmail credentials in the OS vault.") from None
+            raise GmailSetupError("Unable to save Gmail credentials in the OS vault.") from None
 
     def clear(self) -> None:
         try:
             if self._backend.get_password(SERVICE, ENTRY) is not None:
                 self._backend.delete_password(SERVICE, ENTRY)
         except Exception:
-            raise ConfigurationError(
-                "Unable to remove Gmail credentials from the OS vault."
-            ) from None
+            raise GmailSetupError("Unable to remove Gmail credentials from the OS vault.") from None

@@ -11,6 +11,7 @@ from mailbrief.config import Settings
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.providers.gmail.cache import GmailCredentialStore
+from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth
 
 
@@ -42,6 +43,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except AuthenticationRequiredError as exc:
         print(str(exc))
         return 2
+    except GmailSetupError as exc:
+        print(str(exc))
+        return 3
     except (ConfigurationError, ValidationError):
         print("Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md.")
         return 3

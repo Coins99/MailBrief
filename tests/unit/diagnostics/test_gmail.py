@@ -11,6 +11,7 @@ from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
 from mailbrief.providers.gmail.auth import GmailAuth
 from mailbrief.providers.gmail.cache import GmailCredentialStore
+from mailbrief.providers.gmail.errors import GmailSetupError
 from tests.unit.providers.gmail.test_cache import MemoryVault, credential
 
 
@@ -65,3 +66,24 @@ def test_safe_failure_codes(
     monkeypatch.setattr(gmail, "gmail_auth", factory)
     assert gmail.main(["fetch", "--silent-only"]) == code
     assert "sensitive" not in capsys.readouterr().out
+
+
+def test_actionable_setup_error_is_displayed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    @asynccontextmanager
+    async def factory(settings: Settings) -> AsyncIterator[GmailAuth]:
+        raise GmailSetupError("OAuth client file not found. Check the configured path.")
+        yield  # type: ignore[unreachable]
+
+    monkeypatch.setattr(gmail, "gmail_auth", factory)
+    assert gmail.main(["fetch"]) == 3
+    assert "OAuth client file not found" in capsys.readouterr().out
+
+
+def test_missing_path_is_actionable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH", raising=False)
+    assert gmail.main(["fetch", "--silent-only"]) == 3
+    assert "Set MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH" in capsys.readouterr().out

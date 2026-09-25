@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationCancelledError, AuthenticationRequiredError
+from mailbrief.providers.gmail.errors import GmailSetupError
 
 AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -32,8 +32,31 @@ class DesktopClient:
     def load(cls, path: Path) -> "DesktopClient":
         try:
             if path.stat().st_size > 64_000:
-                raise ValueError
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
+                raise GmailSetupError(
+                    "The OAuth client file is too large; download the Desktop client JSON."
+                )
+            contents = path.read_text(encoding="utf-8-sig")
+        except FileNotFoundError:
+            raise GmailSetupError(
+                "OAuth client file not found. Set MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH "
+                "to the actual downloaded JSON file, not the example path."
+            ) from None
+        except (OSError, UnicodeError):
+            raise GmailSetupError(
+                "Cannot read the OAuth client file; check file access and UTF-8 encoding."
+            ) from None
+        try:
+            data = json.loads(contents)
+        except ValueError:
+            raise GmailSetupError(
+                "OAuth client file is not valid JSON; download the Desktop client JSON again."
+            ) from None
+        if isinstance(data, dict) and "web" in data and "installed" not in data:
+            raise GmailSetupError(
+                "This is a Web OAuth client. "
+                "Create and download a Desktop app OAuth client instead."
+            )
+        try:
             installed = data["installed"]
             client_id = installed["client_id"]
             client_secret = installed["client_secret"]
@@ -45,8 +68,8 @@ class DesktopClient:
             ):
                 raise ValueError
             return cls(client_id=client_id, client_secret=client_secret)
-        except (OSError, UnicodeError, ValueError, KeyError, TypeError):
-            raise ConfigurationError(
+        except (ValueError, KeyError, TypeError):
+            raise GmailSetupError(
                 "Gmail requires a valid Google Desktop OAuth client JSON file."
             ) from None
 

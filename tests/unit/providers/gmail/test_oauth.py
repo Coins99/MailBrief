@@ -44,11 +44,24 @@ def test_invalid_client_file(tmp_path: Path, payload: str) -> None:
 
 def test_missing_and_oversized_file(tmp_path: Path) -> None:
     path = tmp_path / "client.json"
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match="file not found"):
         DesktopClient.load(path)
     path.write_text("x" * 64_001)
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match="too large"):
         DesktopClient.load(path)
+
+
+def test_web_client_error_is_actionable(tmp_path: Path) -> None:
+    path = tmp_path / "client.json"
+    path.write_text('{"web":{"client_secret":"do-not-print"}}')
+    with pytest.raises(ConfigurationError, match="Web OAuth client") as error:
+        DesktopClient.load(path)
+    assert "do-not-print" not in str(error.value)
+
+
+def test_unreadable_path_is_actionable(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="Cannot read"):
+        DesktopClient.load(tmp_path)
 
 
 async def callback(url: str, fields: dict[str, str]) -> httpx.Response:

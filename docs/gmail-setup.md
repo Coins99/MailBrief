@@ -36,6 +36,9 @@ uv run mailbrief-gmail-diagnostic fetch
 
 Replace the example path with your downloaded file's actual location. The
 environment setting applies to this PowerShell process and its child commands.
+PowerShell accepts the assignment even if the file does not exist. Check it with
+`Test-Path -LiteralPath $env:MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH -PathType Leaf`;
+the result must be `True` before running the diagnostic.
 Sign in to the intended Gmail account in the browser and approve read-only access.
 The callback waits up to three minutes. Ctrl+C cancels and closes the listener.
 
