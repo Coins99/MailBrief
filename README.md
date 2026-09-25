@@ -15,6 +15,8 @@ later use after Microsoft Entra access is resolved.
 
 - [Scope](docs/mvp-scope.md)
 - [Implementation plan](docs/mvp-plan.md)
+- [Detailed email milestones and acceptance checks](docs/email-implementation-plan.md)
+- [Later desktop ecosystem and website guidelines](docs/ecosystem-roadmap.md)
 - [File change map](docs/change-map.md)
 - [Microsoft work retained for later](docs/microsoft-setup.md)
 

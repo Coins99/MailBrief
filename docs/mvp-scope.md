@@ -1,29 +1,54 @@
-# MVP scope
+# Personal desktop scope
 
-MailBrief 0.1 is a Windows desktop app for one personal Gmail account. A user can
-connect with Google OAuth, generate a brief for today's Inbox, and open each source
-message in Gmail.
+Updated: 2026-09-25. MailBrief is the email entry point for a future personal
+task/calendar/analytics ecosystem. Build for the owner, one Gmail account and
+Windows first. The server-hosted website comes after the desktop ecosystem.
 
-## Included
+## Email MVP: M0–M5
 
-- Gmail read-only access and secure session restoration
-- Local-day Inbox pagination, deduplication, SQLite metadata, and local ranking
-- Body retrieval only for shortlisted messages
-- Explicit consent before shortlisted content is sent to the configured AI
-- Structured highlights, actions, decisions, and deadlines
-- Responsive, cancellable PySide6 workflow and Windows `onedir` package
-- Retained but dormant Microsoft provider and diagnostic
+- Gmail read-only OAuth, secure restoration and disconnect.
+- Today's Inbox metadata, pagination, exact local-day boundaries and ranking.
+- Reviewable shortlist and body retrieval only for selected messages.
+- Explicit cloud-AI consent, structured summaries/actions/deadlines, valid-result
+  caching, saved briefs and Gmail source links.
+- Responsive, cancellable PySide6 workflow and Windows `onedir` package.
+- Existing Microsoft support retained but dormant.
 
-## Deferred
+## Complete personal email workspace: M6–M9
 
-- Public Gmail distribution and its verification/CASA assessment decision
-- Outlook as a supported UI option, multiple accounts, IMAP, and mail changes
-- Attachments, background sync, local AI, telemetry, installers, and auto-update
+- Multiple action suggestions, durable accepted actions, editable plans,
+  extracted deadlines and separate suggested/user-selected target dates.
+- Carryover, waiting/completed states, thread updates and protection of user edits.
+- Locally saved email, note and message drafts with editing, copy and export.
+- History, bounded catch-up, local preferences and optional refresh while running.
+- Backup/restore, retention controls, upgrades and personal-use validation.
 
-## Release checks
+Direct Gmail draft saving is optional M10. Sending is not required to finish the
+email scope. A generated/copied draft is not evidence of sending or completion.
 
-The packaged app must connect, restore, sync every page in the exact local-day
-window, avoid duplicates, rank deterministically, fetch only shortlisted bodies,
-cache valid AI results, handle cancellation/failures, and open source messages.
-Tokens, API keys, and full bodies must be absent from SQLite and logs. CI requires
-Ruff, strict mypy, tests, 90% service coverage, and 80% overall coverage.
+## Later work
+
+General tasks/projects, an adjustable internal calendar with suggested work
+blocks, richer notes and analytics follow email. See the provisional
+[ecosystem roadmap](ecosystem-roadmap.md).
+
+Website/server development, cross-device sync, public distribution, multiple
+accounts/users, external calendar writes, attachments, autonomous mail changes,
+local AI, installers and auto-update are not email-release requirements.
+
+## Data and release rules
+
+Persist metadata, bounded derived results, preferences and explicit user-owned
+artifacts locally. Never store full incoming bodies or credentials in SQLite or
+logs. Clarify the storage ADR before introducing saved drafts; their text is
+user-owned work, not a mailbox-body cache. Credentials use the OS store.
+Local storage does not imply local AI processing.
+
+Provider identity changes require no migration; new actions, drafts and tracking
+state require tested additive migrations. Preserve Microsoft data and tests.
+Quality targets remain Ruff, strict mypy, 90% service coverage and 80% overall
+coverage, with packaged-app and live-mailbox checks.
+
+See [delivery sequence](mvp-plan.md) and the
+[detailed implementation plan](email-implementation-plan.md) for dependencies,
+file guidance and acceptance criteria. Planned features are not implemented yet.

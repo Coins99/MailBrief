@@ -2,6 +2,11 @@
 
 This is the verified change surface as of 2026-09-13.
 
+This map covers the provider switch. The expanded 2026-09-25
+[email implementation plan](email-implementation-plan.md) also proposes later
+schema/service changes for actions, drafts and follow-up. The no-migration
+statement below applies only to provider identity changes.
+
 ## Changed now
 
 | File | Reason |

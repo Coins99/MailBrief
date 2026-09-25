@@ -1,43 +1,30 @@
-# Gmail-first plan
+# Gmail-first delivery sequence
 
-Each phase should be a reviewable change. Keep the Microsoft suite passing.
+Updated: 2026-09-25. The detailed source of implementation work is
+[email-implementation-plan.md](email-implementation-plan.md), including file
+changes, dependencies, tests and acceptance gates.
 
-## 1. Provider seam
+Build for personal desktop use first. The website is a later server-hosted
+product, after completion of the desktop ecosystem.
 
-- Make Gmail the configured default and keep Microsoft selectable for diagnostics.
-- Add Gmail to domain/storage tests and reject unknown persisted providers.
-- Preserve the database schema and existing `microsoft` values.
+| Milestone | Outcome | Release |
+| --- | --- | --- |
+| M0 | Verify existing code/test baseline | Email MVP |
+| M1 | Gmail OAuth, secure restoration and diagnostic | Email MVP |
+| M2 | Inbox metadata sync, pagination and shortlist | Email MVP |
+| M3 | Selected-body decoding and minimization | Email MVP |
+| M4 | Consented structured analysis and saved brief | Email MVP |
+| M5 | Connected desktop workflow and Windows package | Email MVP gate |
+| M6 | Accepted actions, target dates and editable plans | Complete email |
+| M7 | Persistent local email/note/message drafts | Complete email |
+| M8 | Thread follow-up, history and daily operation | Complete email |
+| M9 | Backup, recovery and personal-use validation | Complete email gate |
+| M10 | Explicitly save reviewed drafts into Gmail | Optional extension |
 
-Exit: all existing tests pass with both provider identities understood.
+Proceed in order with reviewable changes and keep the Microsoft suite passing.
+Provider identity support already exists; Gmail implementation is still pending.
+No feature is marked implemented merely because it appears in this plan.
 
-## 2. Gmail authentication
-
-- Add Desktop OAuth using the system browser, PKCE, loopback callback, and
-  `gmail.readonly`.
-- Keep refresh credentials encrypted in the OS credential store.
-- Add safe `fetch`, `--silent-only`, and `disconnect` diagnostics.
-
-Exit: one real Gmail account connects, restores after restart, and disconnects.
-
-## 3. Gmail messages
-
-- List `INBOX` IDs using epoch boundaries; enforce the exact UTC window locally.
-- Fetch bounded metadata concurrently and map it to `NormalizedMessage`.
-- Follow page tokens, handle retries/cancellation, and build account-safe links.
-
-Exit: today's metadata reaches SQLite and the existing shortlist without body fetches.
-
-## 4. Shortlisted bodies
-
-- Fetch full payloads only for shortlisted IDs.
-- Decode MIME and charsets; prefer plain text and sanitize HTML-only messages.
-- Never download file attachments or persist full bodies.
-
-Exit: body fixtures and data-minimization integration tests pass.
-
-## 5. Finish the product
-
-- Complete AI analysis, digest assembly, UI wiring, consent, and packaging.
-- Run clean-machine and live-mailbox checks before releasing 0.1.
-
-Exit: connect -> sync -> rank -> analyze -> display -> open source works end to end.
+Next: baseline checks, then Gmail authentication and its live diagnostic.
+General tasks, calendar, analytics and website directions are intentionally rough
+in [ecosystem-roadmap.md](ecosystem-roadmap.md).
