@@ -10,7 +10,7 @@ from mailbrief.domain.digests import SyncProgress, SyncResult, SyncStage, SyncSt
 from mailbrief.domain.messages import ProviderKind, RankedMessage
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.services.calendar import local_day_window, resolve_timezone
-from mailbrief.services.ranking import rank_messages, select_shortlist
+from mailbrief.services.ranking import rank_messages, review_shortlist
 from mailbrief.services.sync import SyncService
 from mailbrief.storage.repositories import (
     AccountRepository,
@@ -60,6 +60,8 @@ class ApplicationService:
         now_utc: datetime | None = None,
         progress: Callable[[SyncProgress], None] | None = None,
         cancel: asyncio.Event | None = None,
+        include_ids: tuple[str, ...] = (),
+        exclude_ids: tuple[str, ...] = (),
     ) -> tuple[SyncResult, list[RankedMessage]]:
         """Run the Milestone 3 vertical slice: account -> window -> sync -> ranking -> shortlist.
 
@@ -92,6 +94,7 @@ class ApplicationService:
                     status=SyncStatus.CANCELLED,
                     page_count=sync_result.page_count,
                     message_count=sync_result.message_count,
+                    failed_message_count=sync_result.failed_message_count,
                 ),
                 [],
             )
@@ -101,9 +104,11 @@ class ApplicationService:
             account.id,
             window.start_utc,
             window.end_utc,
+            inbox_only=True,
         )
 
         if not rows:
+            review_shortlist([], include_ids=include_ids, exclude_ids=exclude_ids)
             return sync_result, []
 
         provider_kind = ProviderKind(account.provider)
@@ -135,7 +140,7 @@ class ApplicationService:
             await self._session.commit()
 
         # 5. Deterministic shortlist selection
-        shortlist = select_shortlist(ranked)
+        shortlist = review_shortlist(ranked, include_ids=include_ids, exclude_ids=exclude_ids)
         shortlist_keys = tuple(m.message.provider_message_id for m in shortlist)
 
         final_sync_result = SyncResult(
@@ -145,6 +150,7 @@ class ApplicationService:
             status=sync_result.status,
             page_count=sync_result.page_count,
             message_count=sync_result.message_count,
+            failed_message_count=sync_result.failed_message_count,
             shortlisted_message_keys=shortlist_keys,
             error_code=sync_result.error_code,
         )

@@ -87,6 +87,7 @@ class NormalizedMessage(DomainModel):
     to_recipients: tuple[EmailContact, ...] = ()
     received_at_utc: datetime
     is_read: bool
+    is_in_inbox: bool = True
     importance: MessageImportance = MessageImportance.NORMAL
     has_attachments: bool
     body_preview: str = Field(default="", max_length=2_048)
@@ -104,6 +105,7 @@ class MessagePage(DomainModel):
     page_number: int = Field(ge=1)
     messages: tuple[NormalizedMessage, ...]
     continuation: str | None = Field(default=None, min_length=1)
+    failed_message_count: int = Field(default=0, ge=0)
 
 
 class RankedMessage(DomainModel):

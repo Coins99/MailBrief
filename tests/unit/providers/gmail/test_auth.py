@@ -327,3 +327,26 @@ async def test_malformed_error_payload_is_safe(
     with pytest.raises(ProviderResponseError) as error:
         await auth.connect()
     assert "client-secret" not in str(error.value)
+
+
+async def test_refresh_cannot_switch_a_running_sync_to_another_account(
+    http: httpx.AsyncClient, respx_mock: respx.MockRouter
+) -> None:
+    auth, store, _ = make_auth(http)
+    route = respx_mock.post(TOKEN_URL).respond(json=token_json())
+    respx_mock.get(PROFILE_URL).respond(json={"emailAddress": "me@example.com"})
+    await auth.connect()
+    await auth.invalidate_access_token("different-token")
+    await auth.access_token()
+    assert route.call_count == 1
+    await auth.invalidate_access_token("access-secret")
+    store.save(
+        RefreshCredential(
+            client_id="client",
+            email_address="other@example.com",
+            refresh_token=SecretStr("other-refresh"),
+        )
+    )
+    with pytest.raises(AuthenticationRequiredError, match="account changed"):
+        await auth.access_token()
+    assert route.call_count == 1

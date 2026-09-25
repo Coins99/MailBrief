@@ -1,8 +1,9 @@
 # Personal Gmail setup and M1 diagnostic
 
-M1 implements read-only sign-in and secure session restoration. Message listing,
-daily summaries and UI wiring follow in later milestones. The `fetch` diagnostic
-currently verifies your Gmail profile; it does not retrieve mail or write SQLite.
+M1 implements read-only sign-in and secure session restoration. The `fetch`
+diagnostic verifies your Gmail profile; it does not retrieve mail or write SQLite.
+M2 adds a separate `sync` command for [metadata and ranking](gmail-metadata.md).
+Daily summaries and UI wiring follow in later milestones.
 
 ## 1. Create a Google Desktop OAuth client
 
@@ -112,12 +113,11 @@ that message sync or summaries have been implemented.
 
 ## Live acceptance checklist
 
-- [ ] Interactive sign-in succeeds for the intended personal account.
-- [ ] A new process restores with `--silent-only` without a browser.
+- [x] Interactive sign-in succeeds for the intended personal account (owner reported).
+- [x] A new process restores with `--silent-only` without a browser (owner reported).
 - [ ] Denying consent and cancelling return safely without creating a session.
-- [ ] Local disconnect is repeatable; subsequent silent fetch requires sign-in.
+- [x] Local disconnect and subsequent silent-fetch/reconnect behavior passed (owner reported).
 - [ ] Google-side revocation produces a reconnect state; interactive recovery works.
 
-These checks require a real Desktop OAuth client file and user sign-in. They are
-pending until that setup is available. Automated tests use synthetic credentials,
+Unchecked live checks remain pending. Automated tests use synthetic credentials,
 mock Google responses and local callback requests only.

@@ -61,6 +61,7 @@ class GmailAuth:
         self._token: SecretStr | None = None
         self._expires_at = 0.0
         self._account: AccountIdentity | None = None
+        self._expected_email: str | None = None
         self._lock = asyncio.Lock()
 
     async def connect(self, *, silent_only: bool = False) -> AccountIdentity:
@@ -81,8 +82,15 @@ class GmailAuth:
         async with self._lock:
             self._token = None
             self._account = None
+            self._expected_email = None
             self._expires_at = 0
             await asyncio.to_thread(self._store.clear)
+
+    async def invalidate_access_token(self, rejected_token: str) -> None:
+        """Invalidate only the rejected generation when concurrent requests see a 401."""
+        async with self._lock:
+            if self._token is not None and self._token.get_secret_value() == rejected_token:
+                self._expires_at = 0
 
     async def _connect(self, *, silent_only: bool) -> AccountIdentity:
         if self._account is not None and self._token and time.monotonic() < self._expires_at:
@@ -90,6 +98,14 @@ class GmailAuth:
         self._token = None
         self._account = None
         cached = await asyncio.to_thread(self._store.load)
+        if (
+            cached is not None
+            and self._expected_email is not None
+            and cached.email_address.casefold() != self._expected_email
+        ):
+            raise AuthenticationRequiredError(
+                "The saved Gmail account changed; disconnect and restart synchronization."
+            )
         if cached is not None and cached.client_id != self._client.client_id:
             raise GmailSetupError("Gmail OAuth client changed; disconnect before reconnecting.")
         tokens: TokenResponse | None = None
@@ -122,6 +138,13 @@ class GmailAuth:
             )
         account = await self._profile(tokens.access_token)
         if (
+            self._expected_email is not None
+            and account.email_address.casefold() != self._expected_email
+        ):
+            raise AuthenticationRequiredError(
+                "The Gmail session account changed; disconnect before switching accounts."
+            )
+        if (
             cached is not None
             and account.email_address.casefold() != cached.email_address.casefold()
         ):
@@ -140,6 +163,7 @@ class GmailAuth:
         self._token = tokens.access_token
         self._expires_at = time.monotonic() + max(0, tokens.expires_in - 60)
         self._account = account
+        self._expected_email = account.email_address.casefold()
         return account
 
     async def _exchange(self, fields: dict[str, str]) -> TokenResponse:

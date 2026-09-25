@@ -22,11 +22,12 @@ product, after completion of the desktop ecosystem.
 | M10 | Explicitly save reviewed drafts into Gmail | Optional extension |
 
 Proceed in order with reviewable changes and keep the Microsoft suite passing.
-Provider identity support already exists; Gmail message retrieval remains pending.
-Update: M1 authentication is now implemented and automatically tested; its
-real-account acceptance check is pending. See [M1 validation](m1-validation.md).
+M1 authentication is implemented; the owner verified sign-in, restoration and
+disconnect/reconnect. M2 metadata sync and ranking are implemented; see
+[metadata usage and acceptance](gmail-metadata.md). Google-side revocation/recovery
+remains an M1 live check. The [M1 validation](m1-validation.md) records its original baseline.
 No feature is marked implemented merely because it appears in this plan.
 
-Next: complete M1 real-account validation, then M2 metadata synchronization.
+Next: complete remaining live acceptance checks, then M3 shortlisted-body retrieval.
 General tasks, calendar, analytics and website directions are intentionally rough
 in [ecosystem-roadmap.md](ecosystem-roadmap.md).

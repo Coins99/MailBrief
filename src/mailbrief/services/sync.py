@@ -82,6 +82,8 @@ class SyncService:
         if self._session:
             await self._session.commit()
 
+        sync_run_id = sync_run.id
+
         def emit_progress(p: SyncProgress) -> None:
             if progress:
                 try:
@@ -93,6 +95,8 @@ class SyncService:
 
         pages_count = 0
         messages_count = 0
+        failed_count = 0
+        seen_ids: set[str] = set()
 
         try:
             pages_iter = self._provider.iter_message_pages(
@@ -103,10 +107,11 @@ class SyncService:
             async for page in pages_iter:
                 if cancel and cancel.is_set():
                     await self._sync_run_repo.update_sync_run(
-                        sync_run.id,
+                        sync_run_id,
                         status=SyncStatus.CANCELLED,
                         page_count=pages_count,
                         message_count=messages_count,
+                        failed_message_count=failed_count,
                         completed=True,
                     )
                     if self._session:
@@ -118,16 +123,20 @@ class SyncService:
                         status=SyncStatus.CANCELLED,
                         page_count=pages_count,
                         message_count=messages_count,
+                        failed_message_count=failed_count,
                     )
 
                 await self._message_repo.upsert_messages(account_id, page.messages)
                 pages_count += 1
                 messages_count += len(page.messages)
+                failed_count += page.failed_message_count
+                seen_ids.update(m.provider_message_id for m in page.messages if m.is_in_inbox)
 
                 await self._sync_run_repo.update_sync_run(
-                    sync_run.id,
+                    sync_run_id,
                     page_count=pages_count,
                     message_count=messages_count,
+                    failed_message_count=failed_count,
                 )
                 if self._session:
                     await self._session.commit()
@@ -137,16 +146,31 @@ class SyncService:
                         stage=SyncStage.FETCHING,
                         pages_fetched=pages_count,
                         messages_fetched=messages_count,
+                        failed_message_count=failed_count,
                     )
                 )
 
-            # Successfully retrieved and committed all pages
-            await self._account_repo.update_last_sync(account_id, datetime.now(UTC))
+            cancelled = cancel is not None and cancel.is_set()
+            final_status = (
+                SyncStatus.CANCELLED
+                if cancelled
+                else SyncStatus.PARTIAL
+                if failed_count
+                else SyncStatus.COMPLETE
+            )
+            error_code = "METADATA_ITEMS_FAILED" if failed_count else None
+            if not failed_count and not cancelled:
+                await self._message_repo.reconcile_inbox(
+                    account_id, window.start_utc, window.end_utc, seen_ids
+                )
+                await self._account_repo.update_last_sync(account_id, datetime.now(UTC))
             await self._sync_run_repo.update_sync_run(
-                sync_run.id,
-                status=SyncStatus.COMPLETE,
+                sync_run_id,
+                status=final_status,
+                error_code=error_code,
                 page_count=pages_count,
                 message_count=messages_count,
+                failed_message_count=failed_count,
                 completed=True,
             )
             if self._session:
@@ -156,17 +180,22 @@ class SyncService:
                 account_id=account_identity,
                 range_start_utc=window.start_utc,
                 range_end_utc=window.end_utc,
-                status=SyncStatus.COMPLETE,
+                status=final_status,
+                error_code=error_code,
                 page_count=pages_count,
                 message_count=messages_count,
+                failed_message_count=failed_count,
             )
 
         except asyncio.CancelledError:
+            if self._session:
+                await self._session.rollback()
             await self._sync_run_repo.update_sync_run(
-                sync_run.id,
+                sync_run_id,
                 status=SyncStatus.CANCELLED,
                 page_count=pages_count,
                 message_count=messages_count,
+                failed_message_count=failed_count,
                 completed=True,
             )
             if self._session:
@@ -174,15 +203,18 @@ class SyncService:
             raise
 
         except Exception as exc:
+            if self._session:
+                await self._session.rollback()
             error_code = _sanitize_error_code(exc)
             logger.error("Synchronization failed for account %s: %s", account_id, error_code)
             status = SyncStatus.PARTIAL if pages_count > 0 else SyncStatus.FAILED
 
             await self._sync_run_repo.update_sync_run(
-                sync_run.id,
+                sync_run_id,
                 status=status,
                 page_count=pages_count,
                 message_count=messages_count,
+                failed_message_count=failed_count,
                 error_code=error_code,
                 completed=True,
             )
@@ -196,5 +228,6 @@ class SyncService:
                 status=status,
                 page_count=pages_count,
                 message_count=messages_count,
+                failed_message_count=failed_count,
                 error_code=error_code,
             )

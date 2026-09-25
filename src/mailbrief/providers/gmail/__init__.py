@@ -1,1 +1,1 @@
-"""Gmail authentication; message retrieval is the next implementation milestone."""
+"""Gmail authentication and metadata-only Inbox synchronization."""

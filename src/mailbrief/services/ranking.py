@@ -204,3 +204,24 @@ def select_shortlist(
         return qualified[:max_size]
 
     return sorted_all[: min(min_size, len(sorted_all))]
+
+
+def review_shortlist(
+    ranked: Sequence[RankedMessage],
+    *,
+    include_ids: tuple[str, ...] = (),
+    exclude_ids: tuple[str, ...] = (),
+) -> list[RankedMessage]:
+    """Apply explicit choices only within this account/day; do not backfill exclusions."""
+    include, exclude = set(include_ids), set(exclude_ids)
+    available = {item.message.provider_message_id: item for item in ranked}
+    if include & exclude or (include | exclude) - available.keys():
+        raise ValueError("Review IDs must belong to this Inbox window and cannot overlap.")
+    if len(include) > MAX_SHORTLIST_SIZE:
+        raise ValueError("Too many manually included messages for one shortlist.")
+    automatic = select_shortlist(ranked)
+    selected = [available[key] for key in include]
+    selected.extend(
+        item for item in automatic if item.message.provider_message_id not in include | exclude
+    )
+    return sorted(selected[:MAX_SHORTLIST_SIZE], key=_sort_key)

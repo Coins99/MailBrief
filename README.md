@@ -9,8 +9,10 @@ later use after Microsoft Entra access is resolved.
 - Implemented: provider-neutral models, SQLite storage, daily sync, ranking, and
   a tested Microsoft Graph adapter.
 - Implemented for M1: Gmail OAuth, Windows credential storage, and an authentication
-  diagnostic. Real-account sign-in validation is pending.
-- Next: Gmail API message mapping and metadata synchronization (M2).
+  diagnostic. The owner verified sign-in, restoration, disconnect and reconnect.
+- Implemented for M2: Gmail Inbox metadata, pagination, safe reconciliation,
+  local ranking and a metadata sync/review diagnostic.
+- Next: shortlisted body retrieval (M3).
 - Pending: AI analysis, digest assembly, desktop workflow, and packaging.
 
 ## Start here
@@ -20,6 +22,7 @@ later use after Microsoft Entra access is resolved.
 - [Detailed email milestones and acceptance checks](docs/email-implementation-plan.md)
 - [Later desktop ecosystem and website guidelines](docs/ecosystem-roadmap.md)
 - [Gmail setup and authentication diagnostic](docs/gmail-setup.md)
+- [Gmail metadata synchronization and shortlist review](docs/gmail-metadata.md)
 - [File change map](docs/change-map.md)
 - [Microsoft work retained for later](docs/microsoft-setup.md)
 
