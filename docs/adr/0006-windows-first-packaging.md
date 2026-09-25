@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-31
+- Amended by: ADR 0008 (macOS is also a supported platform)
 
 ## Context
 

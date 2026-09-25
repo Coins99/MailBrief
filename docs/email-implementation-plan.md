@@ -2,7 +2,7 @@
 
 Updated: 2026-09-25. Status: proposed work, not implemented features.
 
-Build for one person, one Gmail account, and Windows first. Complete the desktop
+Build for one person and one Gmail account, on Windows and macOS. Complete the desktop
 product before beginning a server-hosted website. The email component should
 answer: What changed? What needs my attention? What should I do, by when, and
 what could I write in response?
@@ -231,7 +231,8 @@ refetch because incoming bodies are not cached.
   new source-body retrieval and cloud generation require connectivity.
 - Provide keyboard navigation, readable typography, scaling and restrained
   visual hierarchy. Verify Gmail links when several Google accounts are signed in.
-- Produce a Windows `onedir` package with safe migrations and correct data paths.
+- Produce a Windows `onedir` package and a macOS app bundle, each built on its own OS,
+  with safe migrations and correct data paths.
   Test on a machine/profile without the development environment.
 
 **Files:** `app.py`, UI modules, application composition and packaging config.

@@ -1,8 +1,8 @@
 # Personal desktop scope
 
 Updated: 2026-09-25. MailBrief is the email entry point for a future personal
-task/calendar/analytics ecosystem. Build for the owner, one Gmail account and
-Windows first. The server-hosted website comes after the desktop ecosystem.
+task/calendar/analytics ecosystem. Build for the owner and one Gmail account, on Windows and
+macOS. The server-hosted website comes after the desktop ecosystem.
 
 ## Email MVP: M0–M5
 
@@ -11,7 +11,8 @@ Windows first. The server-hosted website comes after the desktop ecosystem.
 - Reviewable shortlist and body retrieval only for selected messages.
 - Explicit cloud-AI consent, structured summaries/actions/deadlines, valid-result
   caching, saved briefs and Gmail source links.
-- Responsive, cancellable PySide6 workflow and Windows `onedir` package.
+- Responsive, cancellable PySide6 workflow, a Windows `onedir` package and a macOS app
+  bundle.
 - Existing Microsoft support retained but dormant.
 
 ## Complete personal email workspace: M6–M9

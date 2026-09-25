@@ -44,6 +44,19 @@ environment setting applies to this PowerShell process and its child commands.
 PowerShell accepts the assignment even if the file does not exist. Check it with
 `Test-Path -LiteralPath $env:MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH -PathType Leaf`;
 the result must be `True` before running the diagnostic.
+
+On macOS, in Terminal from the project directory:
+
+```bash
+uv sync --locked --all-groups
+export MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH="$HOME/private/mailbrief-google-desktop.json"
+test -f "$MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH" && echo found
+uv run mailbrief-gmail-diagnostic fetch
+```
+
+The `export` applies only to that Terminal window, and `found` must print before you
+continue.
+
 Sign in to the intended Gmail account in the browser and approve read-only access.
 The callback waits up to three minutes. Ctrl+C cancels and closes the listener.
 
@@ -58,7 +71,7 @@ account chooser lets you verify which account is being connected.
 
 ## 3. Check restoration
 
-Close the command, open another PowerShell session, set the same client-file path,
+Close the command, open another PowerShell or Terminal window, set the same client-file path,
 then run:
 
 ```powershell
@@ -66,9 +79,15 @@ uv run mailbrief-gmail-diagnostic fetch --silent-only
 ```
 
 It must succeed without opening a browser. Refresh credentials are stored in
-Windows Credential Manager under `MailBrief.Gmail`, not in SQLite or token files.
-Access tokens remain in process memory. This Windows-first implementation refuses
-plaintext/automatic keyring fallbacks and currently does not support other OSes.
+Windows Credential Manager or the macOS Keychain under `MailBrief.Gmail`, never in
+SQLite or token files. Access tokens remain in process memory. MailBrief chooses the
+vault explicitly and refuses plaintext or automatic keyring fallbacks; other operating
+systems are not supported.
+
+On macOS, the Keychain may ask whether Python can use `MailBrief.Gmail` (for example
+after Python is updated); choose Always Allow. To confirm the entry exists without
+revealing it, run `security find-generic-password -s MailBrief.Gmail >/dev/null && echo stored`.
+Each computer keeps its own sign-in, so sign in once on every machine you use.
 
 There is one stored Gmail account. Changing the OAuth client or choosing a
 different mailbox requires an explicit local disconnect first. A profile mismatch
@@ -104,7 +123,7 @@ application action, not a side effect of disconnect.
 | --- | --- | --- |
 | 0 | Profile verified or local disconnect completed | Continue |
 | 2 | Missing/expired authorization, denial, browser failure or callback timeout | Run interactive fetch; confirm the account and consent |
-| 3 | Invalid configuration or secure store unavailable | Check client JSON/path and Windows Credential Manager |
+| 3 | Invalid configuration or secure store unavailable | Check client JSON/path and Windows Credential Manager or the macOS Keychain |
 | 4 | Provider/network/permission failure | Check connection, enabled Gmail API and read-only consent; retry |
 | 130 | Cancelled with Ctrl+C | Run again when ready |
 
