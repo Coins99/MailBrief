@@ -87,3 +87,41 @@ def test_m2_upgrade_preserves_existing_provider_rows(tmp_path: Path) -> None:
             "ORDER BY accounts.provider"
         ).fetchall()
     assert rows == [("gmail", "kept", 1), ("microsoft", "kept", 1)]
+
+
+def _alembic_config(path: Path) -> Config:
+    root = Path(__file__).resolve().parents[3]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    config.set_main_option("sqlalchemy.url", sqlite_url(path))
+    return config
+
+
+def _account_columns(path: Path) -> set[str]:
+    with closing(sqlite3.connect(path)) as connection:
+        return {str(row[1]) for row in connection.execute("PRAGMA table_info(accounts)")}
+
+
+def test_account_addresses_added_to_m2_databases(tmp_path: Path) -> None:
+    path = tmp_path / "m2.sqlite3"
+    command.upgrade(_alembic_config(path), "20260925_0002")
+    assert "account_addresses" not in _account_columns(path)
+
+    upgrade_database(path)
+
+    assert "account_addresses" in _account_columns(path)
+
+
+def test_account_addresses_migration_tolerates_existing_column(tmp_path: Path) -> None:
+    path = tmp_path / "prefilled.sqlite3"
+    command.upgrade(_alembic_config(path), "20260925_0002")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("ALTER TABLE accounts ADD COLUMN account_addresses JSON")
+        connection.commit()
+
+    upgrade_database(path)
+
+    assert "account_addresses" in _account_columns(path)
+    with closing(sqlite3.connect(path)) as connection:
+        version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert version == ("20260925_0003",)
