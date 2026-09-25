@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from alembic.util import CommandError
 
 from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
@@ -54,3 +55,26 @@ def test_sync_cli(
 def test_bad_timezone_does_not_connect(capsys: pytest.CaptureFixture[str]) -> None:
     assert gmail.main(["sync", "--timezone", "not/a/timezone"]) == 3
     assert "Invalid timezone" in capsys.readouterr().out
+
+
+def test_alembic_failure_reports_database_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    @asynccontextmanager
+    async def factory(
+        settings: Settings, *, silent_only: bool = False
+    ) -> AsyncIterator[GmailProvider]:
+        async with httpx.AsyncClient() as http:
+            yield GmailProvider(
+                FakeSession(), GmailClient(http, FakeSession()), silent_only=silent_only
+            )
+
+    def broken_upgrade(path: Path) -> None:
+        raise CommandError("Can't locate revision identified by 'unknown'")
+
+    monkeypatch.setattr(gmail, "gmail_provider", factory)
+    monkeypatch.setattr(gmail, "upgrade_database", broken_upgrade)
+    args = ["sync", "--silent-only", "--database", str(tmp_path / "x.sqlite3"), "--timezone", "UTC"]
+
+    assert gmail.main(args) == 5
+    assert "Local database or file operation failed" in capsys.readouterr().out

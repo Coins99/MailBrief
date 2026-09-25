@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from alembic.util import CommandError
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -165,7 +166,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "IDs must belong to today's Inbox without overlap."
         )
         return 3
-    except (SQLAlchemyError, OSError):
+    except (SQLAlchemyError, OSError, CommandError):
         print(
             "Local database or file operation failed. "
             "Check access and retry; no mailbox changes made."
