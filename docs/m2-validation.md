@@ -17,9 +17,9 @@ are included. [Usage and limitations](gmail-metadata.md).
 
 ## Automated results
 
-- 341 tests passed, including the retained Microsoft suite.
-- Overall coverage: 95.26%; application, ranking and sync service coverage each exceed 90%.
-- Strict mypy passed for 98 source/test files.
+- 374 tests passed after the setup-diagnostic improvements, including the retained Microsoft suite.
+- Overall coverage: 95.35%; application, ranking and sync service coverage each exceed 90%.
+- Strict mypy passed for 99 source/test files.
 - Ruff lint and formatting passed, excluding generated `out/` artifacts.
 - Migration tests cover upgrade/downgrade/schema agreement and preservation of
   existing Gmail and Microsoft message rows.
@@ -36,8 +36,17 @@ cache write and a Ruff cache write. These did not fail the checks or tests.
 
 ## Live validation
 
-The initial silent attempt reported no restorable Gmail session, before any mail
-retrieval. Interactive reconnection and a subsequent silent metadata sync are
-pending the owner's execution. Do not treat the automated fixture counts as
-live-mailbox validation. Browser source-link and archive/refresh checks are also
-manual acceptance steps documented in the usage guide.
+The owner reported successful live metadata synchronization for Inbox date
+2026-09-25 in America/Toronto: status complete, one page, one message retrieved,
+zero failed items and one selected message. The reported last complete sync was
+2026-09-25 05:51:06.234949 UTC. Output confirmed metadata-only operation.
+
+The owner then reported that a subsequent `sync --silent-only` completed without
+opening a browser. The live synchronization and saved-session restoration checks
+have passed. Earlier setup failures are resolved for this tested path; their
+underlying Google-side cause was not confirmed.
+
+These results are owner-reported, not independently observed. Browser source-link,
+archive/refresh, persisted-row deduplication, manual include/exclude and cancellation
+checks remain manual acceptance steps in the usage guide; they are covered by
+automated tests where applicable but have not been reported as live checks.

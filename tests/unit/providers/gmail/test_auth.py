@@ -350,3 +350,41 @@ async def test_refresh_cannot_switch_a_running_sync_to_another_account(
     with pytest.raises(AuthenticationRequiredError, match="account changed"):
         await auth.access_token()
     assert route.call_count == 1
+
+
+@pytest.mark.parametrize("reason", ["invalid_client", "deleted_client", "unauthorized_client"])
+@pytest.mark.parametrize("status", [400, 401])
+async def test_client_rejection_gives_safe_setup_guidance(
+    http: httpx.AsyncClient, respx_mock: respx.MockRouter, reason: str, status: int
+) -> None:
+    auth, store, _ = make_auth(http)
+    respx_mock.post(TOKEN_URL).respond(
+        status, json={"error": reason, "error_description": "private-client-secret"}
+    )
+    with pytest.raises(ConfigurationError, match="Desktop app") as caught:
+        await auth.connect()
+    assert "private" not in str(caught.value)
+    assert store.load() is None
+
+
+@pytest.mark.parametrize("stage", ["token exchange", "token refresh", "Gmail profile check"])
+@pytest.mark.parametrize("status", [400, 502])
+async def test_failure_identifies_request_stage_without_payload(
+    http: httpx.AsyncClient, respx_mock: respx.MockRouter, stage: str, status: int
+) -> None:
+    auth, store, _ = make_auth(http)
+    if stage == "token refresh":
+        seed(store)
+    before = store.load()
+    if stage == "Gmail profile check":
+        respx_mock.post(TOKEN_URL).respond(json=token_json())
+        respx_mock.get(PROFILE_URL).respond(status, text="private-access-token")
+    else:
+        respx_mock.post(TOKEN_URL).respond(status, json={"error": "private-unknown-reason"})
+    with pytest.raises(ProviderResponseError) as caught:
+        await auth.connect()
+    message = str(caught.value)
+    assert stage in message
+    assert f"HTTP {status}" in message
+    assert "private" not in message
+    assert store.load() == before

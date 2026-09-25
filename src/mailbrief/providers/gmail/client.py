@@ -18,6 +18,7 @@ from mailbrief.ports.errors import (
     ProviderRateLimitError,
     ProviderResponseError,
 )
+from mailbrief.providers.gmail.errors import permission_guidance
 
 MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 MAX_RESPONSE_BYTES = 2_000_000
@@ -159,9 +160,7 @@ class GmailClient:
                 await self._sleep(delay)
                 continue
             if status == 403:
-                raise ProviderPermissionError(
-                    "Gmail metadata access denied; check read-only consent."
-                )
+                raise ProviderPermissionError(permission_guidance(payload))
             if status != 200 or not isinstance(payload, dict):
                 raise ProviderResponseError("Gmail returned an invalid metadata response.")
             return cast(dict[str, object], payload)

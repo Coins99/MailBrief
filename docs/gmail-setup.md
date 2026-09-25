@@ -102,6 +102,15 @@ application action, not a side effect of disconnect.
 | 130 | Cancelled with Ctrl+C | Run again when ready |
 
 If Google shows `access_denied`, check the test-user list and selected account.
+If the diagnostic reports that Gmail API is disabled, select the Google Cloud
+project that created your OAuth client, open **APIs & Services → Library → Gmail
+API**, and enable it. An OAuth client alone does not enable the API. Retry the
+interactive command after enabling it; a replacement client file is unnecessary.
+Permission diagnostics translate recognized Google error reasons into static
+guidance without displaying raw responses or account details.
+Other failed authentication requests report their stage (token exchange, token
+refresh, or Gmail profile check) and HTTP status. Include that diagnostic text
+when reporting a failure; do not share client JSON, tokens, or raw HTTP responses.
 If using an organizational account, administrator restrictions may apply.
 The HTTP client uses fixed HTTPS endpoints, finite request timeouts, no redirects
 and no environment-provided proxy configuration. A network requiring a proxy is

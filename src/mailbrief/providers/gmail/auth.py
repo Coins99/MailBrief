@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from typing import Protocol
+from typing import Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
@@ -15,7 +15,7 @@ from mailbrief.ports.errors import (
     ProviderResponseError,
 )
 from mailbrief.providers.gmail.cache import CredentialStore, RefreshCredential
-from mailbrief.providers.gmail.errors import GmailSetupError
+from mailbrief.providers.gmail.errors import GmailSetupError, permission_guidance
 from mailbrief.providers.gmail.oauth import (
     GMAIL_SCOPE,
     TOKEN_URL,
@@ -178,7 +178,7 @@ class GmailAuth:
             raise ProviderResponseError(
                 "Unable to contact Google authentication; retry later."
             ) from None
-        if response.status_code == 400:
+        if response.status_code in {400, 401}:
             try:
                 error = response.json()
             except ValueError:
@@ -187,7 +187,21 @@ class GmailAuth:
                 raise AuthenticationRequiredError(
                     "Gmail authorization expired or was revoked; reconnect."
                 )
-        self._check_status(response)
+            reason = error.get("error") if isinstance(error, dict) else None
+            if reason in ("invalid_client", "deleted_client"):
+                raise GmailSetupError(
+                    "Google rejected the OAuth client. Download the current Desktop app "
+                    "client JSON from Google Cloud and check MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH."
+                )
+            if reason == "unauthorized_client":
+                raise GmailSetupError(
+                    "Google does not authorize this OAuth client for desktop sign-in. "
+                    "Check that the client type is Desktop app."
+                )
+        stage: Literal["token refresh", "token exchange"] = (
+            "token refresh" if fields["grant_type"] == "refresh_token" else "token exchange"
+        )
+        self._check_status(response, stage=stage)
         try:
             tokens = TokenResponse.model_validate_json(response.content)
         except ValidationError:
@@ -209,7 +223,7 @@ class GmailAuth:
             raise ProviderResponseError(
                 "Unable to verify the Gmail account; retry later."
             ) from None
-        self._check_status(response)
+        self._check_status(response, stage="Gmail profile check")
         try:
             email = response.json()["emailAddress"]
             return AccountIdentity(
@@ -221,12 +235,27 @@ class GmailAuth:
             raise ProviderResponseError("Google returned an invalid Gmail identity.") from None
 
     @staticmethod
-    def _check_status(response: httpx.Response) -> None:
+    def _check_status(
+        response: httpx.Response,
+        *,
+        stage: Literal["token refresh", "token exchange", "Gmail profile check"] = "token exchange",
+    ) -> None:
         if response.status_code == 401:
             raise AuthenticationRequiredError("Gmail authorization was rejected; reconnect.")
         if response.status_code == 403:
-            raise ProviderPermissionError("Gmail access denied; check consent and Gmail API setup.")
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            raise ProviderPermissionError(permission_guidance(payload))
         if response.status_code == 429:
             raise ProviderRateLimitError("Google rate limit reached; retry later.")
         if response.status_code != 200:
-            raise ProviderResponseError("Google request failed; check setup or retry later.")
+            guidance = (
+                "Google is temporarily unavailable; retry shortly."
+                if response.status_code >= 500
+                else "Check OAuth and Gmail setup; report this status and stage if it persists."
+            )
+            raise ProviderResponseError(
+                f"Google {stage} failed (HTTP {response.status_code}). {guidance}"
+            )
