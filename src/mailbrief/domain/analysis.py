@@ -7,7 +7,7 @@ from typing import Self
 from pydantic import Field, field_validator, model_validator
 
 from mailbrief.domain.common import DomainModel, normalize_utc
-from mailbrief.domain.messages import EmailContact, RankReason
+from mailbrief.domain.messages import EmailContact
 
 
 class AnalysisCategory(StrEnum):
@@ -26,7 +26,6 @@ class AnalysisRequest(DomainModel):
     subject: str = Field(default="", max_length=998)
     sender: EmailContact
     received_at_utc: datetime
-    ranking_reasons: tuple[RankReason, ...] = ()
     body_text: str = Field(min_length=1, max_length=8_000)
 
     @field_validator("received_at_utc")

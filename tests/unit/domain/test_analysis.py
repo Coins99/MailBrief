@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from mailbrief.domain.analysis import AnalysisCategory, AnalysisRequest, MessageAnalysis
-from mailbrief.domain.messages import EmailContact, RankReason
+from mailbrief.domain.messages import EmailContact
 from tests.factories import make_analysis
 
 
@@ -47,7 +47,6 @@ def test_analysis_request_enforces_minimized_body_limit() -> None:
             subject="Subject",
             sender=EmailContact(address="alex@example.com"),
             received_at_utc=datetime(2026, 8, 31, 14, 30, tzinfo=UTC),
-            ranking_reasons=(RankReason.UNREAD,),
             body_text="x" * 8_001,
         )
 

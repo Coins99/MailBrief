@@ -12,6 +12,7 @@ from mailbrief.errors import ConfigurationError
 
 def configure_qt_identity() -> None:
     """Configure the identity Qt uses when resolving platform data paths."""
+    QCoreApplication.setOrganizationName("MailBrief")
     QCoreApplication.setApplicationName("MailBrief")
     QCoreApplication.setApplicationVersion(__version__)
 
