@@ -68,6 +68,22 @@ _HIDDEN_STYLE = re.compile(
     r"|opacity:0(?![.\d])|font-size:0(?![.\d])|max-height:0(?![.\d])"
 )
 _INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"))
+_DECIMAL_REF = re.compile(r"&#(\d+)(;?)")
+
+
+def _shorten_decimal_ref(match: re.Match[str]) -> str:
+    digits = match.group(1).lstrip("0") or "0"
+    return "\ufffd" if len(digits) > 7 else f"&#{digits}{match.group(2)}"
+
+
+def bound_numeric_refs(text: str) -> str:
+    """Shorten decimal character references so that unescaping them cannot fail.
+
+    Python refuses to convert more than 4,300 digits, so a crafted reference would make
+    ``html.unescape`` raise. Values that long are never valid characters and become U+FFFD,
+    as ``html.unescape`` does for any out-of-range reference.
+    """
+    return _DECIMAL_REF.sub(_shorten_decimal_ref, text)
 
 
 def _is_hidden(attrs: list[tuple[str, str | None]]) -> bool:
@@ -155,6 +171,6 @@ def html_to_text(markup: str) -> str:
     history can be recognized the same way as in plain-text replies.
     """
     builder = _TextBuilder()
-    builder.feed(markup)
+    builder.feed(bound_numeric_refs(markup))
     builder.close()
     return builder.text()

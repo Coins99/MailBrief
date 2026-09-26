@@ -74,3 +74,8 @@ def test_malformed_markup_is_tolerated() -> None:
     markup = "<div><p>Open para<div>nested</span></b> after</div></p><p>tail"
     assert html_to_text(markup) == "Open para\nnested after\n\ntail"
     assert html_to_text("") == ""
+
+
+def test_oversized_numeric_references_do_not_fail() -> None:
+    markup = "<p>A&#" + "9" * 5_000 + ";B &#" + "0" * 5_000 + "65;</p>"
+    assert html_to_text(markup) == "A�B A"
