@@ -1,7 +1,7 @@
 """The brief, ai-key and ai-consent commands end to end, with Gmail and OpenAI over respx."""
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+import time_machine
 
 from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
@@ -34,6 +35,14 @@ MARKER = "BRIEF-BODY-MARKER-31f7"
 BODY = f"Please approve the quarterly budget by Friday. {MARKER} must stay private."
 EVIDENCE = BODY[:40]
 Responder = Callable[[httpx.Request], httpx.Response]
+MIDDAY = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def midday() -> Iterator[None]:
+    """One fixed day for the messages and the CLI, so no test can straddle midnight."""
+    with time_machine.travel(MIDDAY, tick=True):
+        yield
 
 
 class Mailbox:
@@ -100,14 +109,23 @@ def openai_answers(
     return router.post(RESPONSES_URL).mock(side_effect=responder)
 
 
-def replies(monkeypatch: pytest.MonkeyPatch, *answers: str) -> None:
-    """Answer input() prompts in order; an unexpected prompt fails the test."""
+def replies(monkeypatch: pytest.MonkeyPatch, *answers: str | EOFError) -> list[str]:
+    """Answer input() prompts in order and return the prompts shown.
+
+    An EOFError answer closes input; an unexpected prompt fails the test.
+    """
     queue = list(answers)
+    prompts: list[str] = []
 
     def fake_input(prompt: str = "") -> str:
-        return queue.pop(0)
+        prompts.append(prompt)
+        answer = queue.pop(0)
+        if isinstance(answer, EOFError):
+            raise answer
+        return answer
 
     monkeypatch.setattr("builtins.input", fake_input)
+    return prompts
 
 
 def run_brief(path: Path, *options: str) -> int:
@@ -166,14 +184,16 @@ def test_a_repeat_brief_with_yes_reuses_everything(
     assert "MailBrief will send" not in output
 
 
-@pytest.mark.parametrize("answer", ["no", "", "y", "YES"])
+@pytest.mark.parametrize(
+    "answer", ["no", "", "y", "YES", EOFError()], ids=["no", "empty", "y", "YES", "eof"]
+)
 def test_first_use_needs_exactly_yes(
     tmp_path: Path,
     mailbox: Mailbox,
     respx_mock: respx.MockRouter,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    answer: str,
+    answer: str | EOFError,
 ) -> None:
     route = openai_answers(respx_mock)
     replies(monkeypatch, answer)
@@ -182,6 +202,38 @@ def test_first_use_needs_exactly_yes(
 
     assert route.call_count == 0
     assert "Nothing was sent. No brief saved." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("answer", "code", "sent"),
+    [("y", 0, 1), ("n", 6, 0), ("", 6, 0), (EOFError(), 6, 0)],
+    ids=["y", "n", "empty", "eof"],
+)
+def test_a_later_brief_asks_before_sending(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    answer: str | EOFError,
+    code: int,
+    sent: int,
+) -> None:
+    route = openai_answers(respx_mock)
+    prompts = replies(monkeypatch, "yes", answer)
+    path = tmp_path / "brief.sqlite3"
+    assert run_brief(path) == 0
+    capsys.readouterr()
+    mailbox.body = f"{BODY} A follow-up line arrived."
+
+    assert run_brief(path) == code
+
+    output = capsys.readouterr().out
+    assert prompts[1] == "Send? [y/N] "
+    assert route.call_count == 1 + sent
+    assert "MailBrief will send 1 message to OpenAI (test-model)" in output
+    if code == 6:
+        assert "Nothing was sent. No brief saved." in output
 
 
 def test_yes_never_grants_first_use_consent(

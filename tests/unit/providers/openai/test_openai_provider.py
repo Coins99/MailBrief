@@ -1,5 +1,6 @@
 """OpenAI adapter: strict request shape, response mapping, retries and error hygiene."""
 
+import hashlib
 import json
 import logging
 import re
@@ -31,6 +32,7 @@ from mailbrief.providers.openai.provider import (
     INSTRUCTIONS,
     PROMPT_VERSION,
     UNREADABLE_MESSAGE,
+    AnalysisWireBatch,
     OpenAIProvider,
 )
 from tests.unit.providers.openai.openai_fixtures import (
@@ -48,6 +50,9 @@ from tests.unit.providers.openai.openai_fixtures import (
 
 BODY = "Please approve the quarterly budget by Friday 5 PM."
 MARKER = "OPENAI-ERROR-MARKER-5d2e"
+REQUEST_KEYS = {"model", "instructions", "input", "text", "store", "max_output_tokens"}
+# SHA-256 of INSTRUCTIONS and AnalysisWireBatch's JSON schema for this PROMPT_VERSION.
+PINNED_PROMPT = ("2026-09-26.1", "e2bcbb78358a313a937e6f4f299ab682a8cf08492d18647097328ef1a10d43df")
 STEP_5_3_KEYS = {
     "message_key",
     "subject",
@@ -114,6 +119,7 @@ async def test_the_request_is_strict_minimized_and_unstored(
     sent = route.calls.last.request
     body = json.loads(sent.content)
     assert sent.url == RESPONSES_URL
+    assert set(body) == REQUEST_KEYS
     assert body["model"] == "test-model"
     assert body["store"] is False
     assert body["instructions"] == INSTRUCTIONS
@@ -131,6 +137,17 @@ async def test_the_request_is_strict_minimized_and_unstored(
     assert messages[0]["received_local"] == "2026-09-04 (Friday) 09:30"
     assert (messages[0]["time_zone"], messages[0]["body_truncated"]) == ("America/Toronto", True)
     assert re.fullmatch(r"[0-9a-f-]{36}", sent.headers["X-Client-Request-Id"])
+
+
+def test_the_prompt_version_changes_with_the_prompt_or_schema() -> None:
+    schema = json.dumps(
+        AnalysisWireBatch.model_json_schema(), sort_keys=True, separators=(",", ":")
+    )
+    fingerprint = hashlib.sha256(f"{INSTRUCTIONS}\n{schema}".encode()).hexdigest()
+
+    assert (PROMPT_VERSION, fingerprint) == PINNED_PROMPT, (
+        "prompt or schema changed: bump PROMPT_VERSION and this hash"
+    )
 
 
 async def test_a_valid_answer_becomes_candidates_with_usage(
