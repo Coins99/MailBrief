@@ -3,7 +3,7 @@
 from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 
-from mailbrief.domain.analysis import AnalysisRequest, MessageAnalysis
+from mailbrief.domain.analysis import AnalysisRequest, AnalysisResponse
 from mailbrief.domain.bodies import BodySource, MessageBody
 from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 from mailbrief.ports.ai_provider import AIProvider
@@ -56,12 +56,17 @@ class FakeAIProvider:
     def provider_name(self) -> str:
         return "fake"
 
-    async def analyze(
-        self,
-        requests: Sequence[AnalysisRequest],
-    ) -> tuple[MessageAnalysis, ...]:
+    @property
+    def model_name(self) -> str:
+        return "fake-model"
+
+    @property
+    def prompt_version(self) -> str:
+        return "fake-prompt-1"
+
+    async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
         del requests
-        return ()
+        return AnalysisResponse()
 
 
 def test_email_adapter_satisfies_runtime_protocol() -> None:
@@ -76,6 +81,8 @@ def test_ai_adapter_satisfies_runtime_protocol() -> None:
 
     assert isinstance(provider, AIProvider)
     assert provider.provider_name == "fake"
+    assert provider.model_name == "fake-model"
+    assert provider.prompt_version == "fake-prompt-1"
 
 
 def test_rate_limit_error_carries_retry_delay() -> None:
