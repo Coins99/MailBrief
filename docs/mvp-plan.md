@@ -31,9 +31,10 @@ No feature is marked implemented merely because it appears in this plan.
 Main was reconciled with the Gmail line on 2026-09-25 and is again the integration
 branch; new work branches from `main`.
 
-Current: M3 (shortlisted-body reading and preparation) and M4 (consented AI analysis and
-the saved daily brief) are implemented and awaiting live acceptance, with
-`docs/gmail-bodies.md` and [ai-analysis.md](ai-analysis.md). The owner approved starting M4
-before M3's acceptance. M5 follows.
+Current: M3 (shortlisted-body reading and preparation) is implemented, with
+`docs/gmail-bodies.md`, and its live acceptance is recorded in
+[m3-validation.md](m3-validation.md). M4 (consented AI analysis and the saved daily brief) is
+implemented and awaiting live acceptance, with [ai-analysis.md](ai-analysis.md). The owner
+approved starting M4 before M3's acceptance. M5 follows.
 General tasks, calendar, analytics and website directions are intentionally rough
 in [ecosystem-roadmap.md](ecosystem-roadmap.md).

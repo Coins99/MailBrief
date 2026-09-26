@@ -12,9 +12,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   compiling and its tests passing, but do not extend it unless a task says so.
 - Done: M1 Gmail OAuth and secure restore; M2 Inbox metadata sync, ranking and
   shortlist review (`mailbrief-gmail-diagnostic sync`).
-- Implemented, awaiting live acceptance: M3 shortlisted-body reading and preparation
-  (`mailbrief-gmail-diagnostic bodies`, `docs/gmail-bodies.md`); M4 consented AI analysis
-  and the saved daily brief (`mailbrief-gmail-diagnostic brief`, `docs/ai-analysis.md`).
+- Implemented, live acceptance recorded in `docs/m3-validation.md`: M3 shortlisted-body
+  reading and preparation (`mailbrief-gmail-diagnostic bodies`, `docs/gmail-bodies.md`).
+- Implemented, awaiting live acceptance: M4 consented AI analysis and the saved daily brief
+  (`mailbrief-gmail-diagnostic brief`, `docs/ai-analysis.md`).
 - Next: M5 desktop UI with Windows and macOS packages. See `docs/mvp-plan.md` and
   `docs/email-implementation-plan.md`.
 
