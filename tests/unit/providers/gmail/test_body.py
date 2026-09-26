@@ -6,6 +6,7 @@ import respx
 
 from mailbrief.domain.bodies import MAX_EXTRACTED_CHARS, BodySource
 from mailbrief.ports.errors import MessageUnavailableError, ProviderResponseError
+from mailbrief.providers.gmail import body as body_module
 from mailbrief.providers.gmail.body import MAX_SEPARATE_PART_BYTES, extract_body
 from mailbrief.providers.gmail.client import MESSAGES_URL, GmailClient
 from mailbrief.providers.gmail.provider import GmailProvider
@@ -174,6 +175,21 @@ async def test_extracted_text_is_capped() -> None:
     body = await extract_body(message(payload), "m1", PartStore())
     assert len(body.text) == MAX_EXTRACTED_CHARS
     assert body.extraction_truncated
+
+
+async def test_large_html_part_is_converted_whole() -> None:
+    markup = "<div>" + "<p><b>x</b> word</p>" * 20_000 + "<p>TAIL-MARKER</p></div>"
+    assert len(markup) > MAX_EXTRACTED_CHARS
+    body = await extract_body(message(part("text/html", markup)), "m1", PartStore())
+    assert body.source is BodySource.HTML
+    assert body.text.endswith("TAIL-MARKER")
+    assert not body.extraction_truncated
+
+
+async def test_cut_part_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(body_module, "MAX_PART_CHARS", 10)
+    body = await extract_body(message(part("text/plain", "0123456789ABCDEF")), "m1", PartStore())
+    assert (body.text, body.extraction_truncated) == ("0123456789", True)
 
 
 @pytest.mark.parametrize(

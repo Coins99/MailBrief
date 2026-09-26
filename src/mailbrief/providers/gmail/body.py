@@ -17,6 +17,9 @@ from mailbrief.ports.errors import ProviderResponseError
 from mailbrief.text.html_to_text import html_to_text
 
 MAX_SEPARATE_PART_BYTES = 1_000_000
+# Last-resort bound per decoded part. Responses are already capped at 2 MB and separately
+# stored parts at 1 MB, so this rarely applies; any cut sets extraction_truncated.
+MAX_PART_CHARS = 2_000_000
 MAX_PARTS = 200
 MAX_DEPTH = 20
 STUB_PLAIN_CHARS = 400
@@ -37,6 +40,7 @@ class _Counts:
     parts: int = 0
     attachments: int = 0
     unreadable: int = 0
+    truncated: bool = False
 
 
 def _header(part: dict[str, object], name: str) -> str:
@@ -146,7 +150,11 @@ async def _read(part: dict[str, object], counts: _Counts, fetch_part: PartFetche
     except (binascii.Error, ValueError):
         counts.unreadable += 1
         return ""
-    return _decode(raw, _charset(part))[: MAX_EXTRACTED_CHARS + 1]
+    text = _decode(raw, _charset(part))
+    if len(text) > MAX_PART_CHARS:
+        counts.truncated = True
+        text = text[:MAX_PART_CHARS]
+    return text
 
 
 async def _read_all(
@@ -182,7 +190,7 @@ async def extract_body(
             texts.append(text)
             used_html = used_html or from_html
     combined = "\n\n".join(texts).strip()
-    truncated = len(combined) > MAX_EXTRACTED_CHARS
+    truncated = counts.truncated or len(combined) > MAX_EXTRACTED_CHARS
     combined = combined[:MAX_EXTRACTED_CHARS].strip()
     source = BodySource.NONE
     if combined:
