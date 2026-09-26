@@ -58,7 +58,8 @@ mailbrief-gmail-diagnostic ai-key set", and cached items still make a brief.
 
 MailBrief enforces the request cap on each Groq provider connection, which is one `brief`
 run in the CLI. Batches, individual fallback calls and HTTP retries all share the same
-counter. Failed requests also count. Cached analyses consume no requests. At the cap,
+counter. When a message sent on its own gets an unusable answer, it is sent once more after
+every other message has had its first attempt; a message Groq rejects is not sent again. Failed requests also count. Cached analyses consume no requests. At the cap,
 MailBrief stops making requests, retains successful analyses and reports a partial brief
 (exit 4), or preserves the previous brief if nothing could be analyzed.
 

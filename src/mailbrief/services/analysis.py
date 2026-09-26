@@ -418,9 +418,12 @@ class AnalysisService:
     ) -> AnalysisRun:
         """Send unresolved messages in batches, cache valid results and retry misses alone.
 
-        Cancellation is checked before every provider call and leaves unsent messages
-        without an outcome. A rejected request is retried one message at a time, and a
-        rejected single message fails alone. Any other expected provider error stops all
+        No message gets more than two attempts. Messages missing from a batch's usable
+        answer are retried alone at once. A single-message call whose answer is unusable is
+        retried once more, after every message has had its first attempt. A rejected
+        request is retried one message at a time, and a rejected single message fails
+        without a retry. Cancellation is checked before every provider call and leaves
+        unsent messages without an outcome. Any other expected provider error stops all
         further calls and fails every message still without an outcome; other exceptions
         propagate.
         """
@@ -430,15 +433,18 @@ class AnalysisService:
         cancelled = False
         error_code: str | None = None
         detail: str | None = None
+        deferred: list[PlannedMessage] = []  # Single-message first attempts to try once more.
         try:
             for start in range(0, len(pending), self._batch_size):
                 batch = pending[start : start + self._batch_size]
                 retry = await self._call(batch, tally, cancel, progress)
                 if len(batch) == 1:
-                    _fail(retry)
+                    deferred.extend(retry)
                     continue
                 for item in retry:
                     _fail(await self._call([item], tally, cancel, progress))
+            for item in deferred:  # Second and last attempts, after every first attempt.
+                _fail(await self._call([item], tally, cancel, progress))
         except _Cancelled:
             cancelled = True
         except _ProviderStopped as stop:
@@ -489,11 +495,14 @@ class AnalysisService:
             logger.warning("AI provider call failed: %s", code)
             if code != REQUEST_REJECTED:
                 raise _ProviderStopped(code, provider_detail(exc)) from None
-            if len(batch) == 1:
-                tally.rejected += 1  # The caller fails a single message it cannot retry.
+            if len(batch) > 1:
+                retry = list(batch)  # Find the refused message by sending one at a time.
+            else:
+                tally.rejected += 1  # A refused single message is left out, never resent.
                 if tally.rejected_detail is None:
                     tally.rejected_detail = provider_detail(exc)
-            retry = list(batch)
+                _fail(batch)
+                retry = []
         else:
             tally.add(response.usage)
             retry = await self._persist(batch, response)

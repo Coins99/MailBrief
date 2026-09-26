@@ -40,6 +40,7 @@ from mailbrief.ports.errors import (
     ProviderResponseError,
     ProviderTimeoutError,
     ProviderUnavailableError,
+    ProviderUsageLimitError,
 )
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
@@ -274,14 +275,90 @@ async def test_a_missing_or_invalid_candidate_gets_one_retry_then_fails(
     assert outcomes(run) == [ANALYZED, FAILED]
 
 
-async def test_a_single_message_call_is_never_retried(session: AsyncSession) -> None:
+def unusable_answer(requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+    return AnalysisResponse(problem=AnalysisProblem.INVALID_OUTPUT)
+
+
+def missing_answer(requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+    return AnalysisResponse()
+
+
+def invalid_answer(requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+    unquoted = good_candidate(requests[0], evidence="Nothing like this was ever written.")
+    return AnalysisResponse(candidates=(unquoted,))
+
+
+BAD_SINGLE_ANSWERS = pytest.mark.parametrize(
+    "bad_answer",
+    [unusable_answer, missing_answer, invalid_answer],
+    ids=["unusable", "missing", "invalid"],
+)
+
+
+@BAD_SINGLE_ANSWERS
+async def test_a_bad_single_message_answer_is_retried_once(
+    session: AsyncSession, bad_answer: ScriptItem
+) -> None:
     account_id, shortlist = await seed(session, 1)
-    provider = FakeAIProvider([AnalysisResponse(problem=AnalysisProblem.REFUSED)])
+    provider = FakeAIProvider([bad_answer, answer_all()])
 
-    run = await analyze(session, provider, shortlist, account_id=account_id)
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
 
-    assert provider.calls == 1
+    assert outcomes(run) == [ANALYZED]
+    assert provider.calls == run.calls == 2
+    assert run.error_code is None
+
+
+@BAD_SINGLE_ANSWERS
+async def test_a_single_message_gets_no_third_attempt(
+    session: AsyncSession, bad_answer: ScriptItem
+) -> None:
+    account_id, shortlist = await seed(session, 1)
+    provider = FakeAIProvider([bad_answer, bad_answer])  # A third call would fail the fake.
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
     assert outcomes(run) == [FAILED]
+    assert provider.calls == run.calls == 2
+
+
+async def test_a_rejected_single_message_is_never_retried(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 1)
+    provider = FakeAIProvider([ProviderRequestRejectedError("no")])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [FAILED]
+    assert provider.calls == run.calls == 1
+    assert run.error_code == "AI_REQUEST_REJECTED"
+
+
+async def test_a_spent_budget_during_a_retry_stops_and_keeps_results(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 2)
+    provider = FakeAIProvider(
+        [unusable_answer, answer_all(), ProviderUsageLimitError("request limit reached")]
+    )
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [FAILED, ANALYZED]
+    assert run.error_code == "AI_USAGE_LIMIT"
+    assert provider.calls == 3
+
+
+async def test_a_single_message_retry_waits_for_every_first_attempt(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+    provider = FakeAIProvider([unusable_answer, answer_all(), answer_all(), answer_all()])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    first, second, third = (key_of(item) for item in run.messages)
+    assert [batch[0].message_key for batch in provider.batches] == [first, second, third, first]
+    assert outcomes(run) == [ANALYZED, ANALYZED, ANALYZED]
 
 
 async def test_a_provider_error_keeps_committed_results_and_fails_the_rest(tmp_path: Path) -> None:
