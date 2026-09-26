@@ -82,7 +82,7 @@ def candidate_values(**overrides: object) -> dict[str, object]:
 
 
 def test_schema_version_is_two() -> None:
-    assert ANALYSIS_SCHEMA_VERSION == "4"
+    assert ANALYSIS_SCHEMA_VERSION == "5"
 
 
 def test_message_analysis_round_trips_as_json() -> None:

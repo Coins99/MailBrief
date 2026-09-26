@@ -134,11 +134,16 @@ MailBrief checks that the phrase appears in the email and resolves it itself:
   "UTC+2" always stay date-only, because they are ambiguous in everyday use.
 - **Unresolved**: a phrase with no specific day, such as "ASAP".
 
-A zone counts only when the email's subject or body contains it. A zone the model supplied
-on its own keeps only the date. Your own zone is the exception: MailBrief sends it with
-each email, so a reported zone equal to it counts as no reported zone. When a time comes without a reported zone but the phrase
-names one (ET, PT, PST, CEST, UTC+2, GMT, Eastern, Pacific, 北京时间, 东八区 and similar),
-only the date is kept, rather than assuming your zone. Any upper-case word ending in T
+A zone the model reports is checked in this order:
+
+1. If the email's subject or body writes it, and it is UTC or a region zone, it is used.
+2. Otherwise, if it equals your own zone, it counts as no reported zone: MailBrief sends
+   your zone with each email, so the model may simply echo it.
+3. Any other reported zone keeps only the date.
+
+When a time comes without a reported zone but the phrase names one (ET, PT, PST, CEST,
+UTC+2, GMT, Eastern, Pacific, 北京时间, 东八区 and similar), only the date is kept, rather
+than assuming your zone. Any upper-case word ending in T
 counts, so "SUBMIT IT BY 5PM" also keeps only the date; such a false positive only drops
 the time.
 

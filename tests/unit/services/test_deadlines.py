@@ -255,7 +255,7 @@ def test_d6_abbreviated_offset_and_unknown_zones_keep_only_the_day(zone: str) ->
 
 
 def resolve_phrase(
-    body: str, phrase: str, *, stated_timezone: str | None = None
+    body: str, phrase: str, *, stated_timezone: str | None = None, owner_zone: str = ZONE
 ) -> ResolvedDeadline:
     """Resolve ``phrase`` due 4 September at 17:00 from an email whose body is ``body``."""
     return resolve_deadline(
@@ -265,8 +265,56 @@ def resolve_phrase(
             deadline_time="17:00",
             stated_timezone=stated_timezone,
         ),
-        request(body_text=body),
+        request(body_text=body, timezone_name=owner_zone),
     )
+
+
+FRIDAY = date(2026, 9, 4)
+FIVE_PM_TORONTO = datetime(2026, 9, 4, 21, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("owner", "body", "phrase", "expected"),
+    [
+        (
+            "UTC",
+            "Send it Friday 5pm UTC.",
+            "Friday 5pm UTC",
+            ResolvedDeadline(
+                "Friday 5pm UTC",
+                DeadlinePrecision.DATETIME,
+                FRIDAY,
+                datetime(2026, 9, 4, 17, 0, tzinfo=UTC),
+                "UTC",
+            ),
+        ),
+        (
+            ZONE,
+            "Send it by 5pm on Friday. All times are America/Toronto.",
+            "by 5pm",
+            ResolvedDeadline("by 5pm", DeadlinePrecision.DATETIME, FRIDAY, FIVE_PM_TORONTO, ZONE),
+        ),
+        (
+            ZONE,
+            "Send it by 5pm on Friday.",
+            "by 5pm",
+            ResolvedDeadline("by 5pm", DeadlinePrecision.DATETIME, FRIDAY, FIVE_PM_TORONTO, ZONE),
+        ),
+        (
+            ZONE,
+            "Send it by 5pm ET on Friday.",
+            "5pm ET",
+            ResolvedDeadline("5pm ET", DeadlinePrecision.DATE, FRIDAY, None, ZONE),
+        ),
+    ],
+    ids=["owner-utc-written", "owner-zone-written", "owner-zone-echoed", "echoed-with-et"],
+)
+def test_d6_an_owner_zone_the_email_writes_is_used_and_an_echo_counts_as_none(
+    owner: str, body: str, phrase: str, expected: ResolvedDeadline
+) -> None:
+    resolved = resolve_phrase(body, phrase, stated_timezone=owner, owner_zone=owner)
+
+    assert resolved == expected
 
 
 def test_d6_a_zone_the_email_never_writes_keeps_only_the_day() -> None:

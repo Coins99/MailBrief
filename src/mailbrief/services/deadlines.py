@@ -79,6 +79,26 @@ def _usable_stated_zone(value: str, request: AnalysisRequest) -> str | None:
     return value if _load_zone(value) is not None else None
 
 
+def _zone_for_time(phrase: str, stated_zone: str | None, request: AnalysisRequest) -> str | None:
+    """The zone to place a deadline time in, or None to keep only the day.
+
+    1. A stated zone that the name rules accept and the email writes is used.
+    2. Otherwise a stated zone equal to the owner's zone, which the request supplies, is a
+       model echo and counts as no stated zone.
+    3. Any other stated zone keeps only the day.
+    With no stated zone, the owner's zone is used unless the phrase names another zone.
+    """
+    if stated_zone is not None:
+        usable = _usable_stated_zone(stated_zone, request)
+        if usable is not None:
+            return usable
+        if stated_zone.casefold() != request.timezone_name.strip().casefold():
+            return None  # Not written in the email, or a zone we will not guess.
+    if ZONE_TOKEN_PATTERN.search(phrase):
+        return None  # The phrase names a zone the model did not report.
+    return request.timezone_name
+
+
 def _parse_date(value: str, received: dt.date) -> dt.date | None:
     """A real YYYY-MM-DD day in the plausible window around the received day, else None."""
     if _DATE_PATTERN.fullmatch(value) is None:
@@ -109,20 +129,14 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
 
     Raises InvalidDeadlineError, whose messages are static, when a date or time comes
     without a phrase or the phrase is not in the email. An unusable date keeps the phrase
-    as unresolved, and an unusable time keeps only the date. A time is placed in a stated
-    zone only when the email writes that zone, and in the owner's zone only when the
-    phrase names none; otherwise only the day is kept. The request supplies the owner's
-    zone, so a stated zone equal to it (ignoring case) counts as no stated zone. Offsets
-    are never guessed.
+    as unresolved, and an unusable time keeps only the date. The zone for a time is
+    chosen by _zone_for_time; when there is none, only the day is kept. Offsets are never
+    guessed.
     """
     text = _clean(candidate.deadline_text)
     raw_date = _clean(candidate.deadline_date)
     raw_time = _clean(candidate.deadline_time)
     stated_zone = _clean(candidate.stated_timezone)
-    if stated_zone is not None and (
-        stated_zone.casefold() == request.timezone_name.strip().casefold()
-    ):
-        stated_zone = None  # The model echoed the owner's zone from the request.
 
     if text is None:
         if raw_date is not None or raw_time is not None:
@@ -145,15 +159,9 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
     due_time = None if raw_time is None else _parse_time(raw_time)
     if due_time is None:
         return date_only
-    if stated_zone is None:
-        if ZONE_TOKEN_PATTERN.search(text):
-            return date_only  # The phrase names a zone the model did not report.
-        zone_name = request.timezone_name
-    else:
-        usable = _usable_stated_zone(stated_zone, request)
-        if usable is None:
-            return date_only  # Not written in the email, or a zone we will not guess.
-        zone_name = usable
+    zone_name = _zone_for_time(text, stated_zone, request)
+    if zone_name is None:
+        return date_only
     zone = ZoneInfo(zone_name)
     at_utc = dt.datetime.combine(due_date, due_time, tzinfo=zone).astimezone(dt.UTC)
     # Re-derive the day so a time inside a DST gap stays consistent with its instant.
