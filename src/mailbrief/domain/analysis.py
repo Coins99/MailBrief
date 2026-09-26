@@ -129,8 +129,8 @@ class MessageAnalysis(DomainModel):
     category: AnalysisCategory
     summary: str = Field(min_length=1, max_length=240)
     action_required: bool
-    action_text: str | None = Field(default=None, max_length=1_000)
-    deadline_text: str | None = Field(default=None, max_length=500)
+    action_text: str | None = Field(default=None, min_length=1, max_length=1_000)
+    deadline_text: str | None = Field(default=None, min_length=1, max_length=500)
     deadline_precision: DeadlinePrecision = DeadlinePrecision.NONE
     deadline_date: date | None = None
     deadline_at_utc: datetime | None = None

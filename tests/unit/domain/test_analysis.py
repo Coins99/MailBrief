@@ -263,3 +263,9 @@ def test_response_with_a_problem_has_no_candidates() -> None:
 def test_usage_counts_cannot_be_negative(field: str) -> None:
     with pytest.raises(ValidationError):
         AIUsage.model_validate({field: -1})
+
+
+@pytest.mark.parametrize("field", ["action_text", "deadline_text"])
+def test_blank_action_or_deadline_text_is_rejected(field: str) -> None:
+    with pytest.raises(ValidationError):
+        make_analysis(**{field: "   "})
