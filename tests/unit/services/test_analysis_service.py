@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import respx
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mailbrief.config import Settings
 from mailbrief.domain.analysis import (
     AIUsage,
     AnalysisProblem,
@@ -24,6 +26,7 @@ from mailbrief.domain.bodies import BodySource, BodyStatus, PreparedBody
 from mailbrief.domain.briefs import AnalysisOutcome
 from mailbrief.domain.digests import SyncProgress, SyncStage
 from mailbrief.domain.messages import AccountIdentity, EmailContact, ProviderKind, RankedMessage
+from mailbrief.ports.ai_provider import AIProvider
 from mailbrief.ports.errors import (
     AIAuthenticationError,
     AuthenticationRequiredError,
@@ -33,6 +36,8 @@ from mailbrief.ports.errors import (
     ProviderResponseError,
     ProviderTimeoutError,
 )
+from mailbrief.providers.openai.credentials import ENTRY, SERVICE, OpenAIKeyStore
+from mailbrief.providers.openai.factory import openai_provider
 from mailbrief.services.analysis import (
     AnalysisRun,
     AnalysisService,
@@ -44,6 +49,7 @@ from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
 from mailbrief.storage.tables import AnalysisTable
 from tests.factories import make_message
+from tests.unit.providers.openai.openai_fixtures import RESPONSES_URL, TEST_KEY, MemoryVault
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all, good_candidate
 
 ZONE = "America/Toronto"
@@ -106,7 +112,7 @@ def counting_keys() -> Callable[[], str]:
 
 async def analyze(
     session: AsyncSession,
-    provider: FakeAIProvider,
+    provider: AIProvider,
     shortlist: Sequence[RankedMessage],
     *,
     account_id: int,
@@ -313,6 +319,23 @@ async def test_provider_errors_stop_the_run_with_a_code(
     assert run.error_code == code
     assert outcomes(run) == [FAILED, FAILED]
     assert provider.calls == run.calls == 1
+
+
+async def test_an_unreadable_openai_reply_fails_every_sent_message(
+    session: AsyncSession, respx_mock: respx.MockRouter
+) -> None:
+    account_id, shortlist = await seed(session, 2)
+    respx_mock.post(RESPONSES_URL).respond(
+        200, text="<html>maintenance</html>", headers={"content-type": "text/html"}
+    )
+    key_store = OpenAIKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
+
+    async with openai_provider(Settings(openai_model="test-model"), key_store=key_store) as ai:
+        run = await analyze(session, ai, shortlist, account_id=account_id)
+
+    assert run.error_code == "AI_PROVIDER_ERROR"
+    assert outcomes(run) == [FAILED, FAILED]
+    assert run.calls == 1
 
 
 async def test_unexpected_errors_propagate(session: AsyncSession) -> None:

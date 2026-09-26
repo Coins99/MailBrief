@@ -49,6 +49,7 @@ PERMISSION_MESSAGE = "OpenAI denied access (permission, region or quota)."
 RATE_LIMIT_MESSAGE = "OpenAI rate limit reached; retry later."
 TIMEOUT_MESSAGE = "OpenAI did not respond in time."
 CONNECTION_MESSAGE = "Could not reach OpenAI."
+UNREADABLE_MESSAGE = "OpenAI returned an unreadable response."
 
 INSTRUCTIONS = (
     "You extract facts from emails for one person's private daily brief.\n"
@@ -291,9 +292,13 @@ class OpenAIProvider:
                 error, delay = _status_outcome(exc, attempt, request_id)
                 reason = f"HTTP {exc.status_code}"
             else:
-                body = raw.http_response.json()
-                envelope: dict[str, object] = body if isinstance(body, dict) else {}
-                return _to_response(envelope, raw.parse)
+                try:
+                    body = raw.http_response.json()
+                except ValueError:
+                    body = None
+                if not isinstance(body, dict):
+                    raise ProviderResponseError(UNREADABLE_MESSAGE, client_request_id=request_id)
+                return _to_response(body, raw.parse)
             if delay is None:
                 logger.warning("OpenAI call failed after %d attempts: %s", attempt + 1, reason)
                 raise error

@@ -28,6 +28,7 @@ from mailbrief.providers.openai.provider import (
     AUTH_MESSAGE,
     INSTRUCTIONS,
     PROMPT_VERSION,
+    UNREADABLE_MESSAGE,
     OpenAIProvider,
 )
 from tests.unit.providers.openai.openai_fixtures import (
@@ -253,6 +254,32 @@ async def test_terminal_errors_carry_static_messages_and_safe_codes(
     assert route.call_count == 1
     assert caught.value.provider_error_code == code
     assert caught.value.client_request_id is not None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        httpx.Response(200, text="<html>maintenance</html>", headers={"content-type": "text/html"}),
+        httpx.Response(200, json=["not", "an", "object"]),
+    ],
+    ids=["html", "json-array"],
+)
+async def test_an_unreadable_reply_is_a_provider_error_without_retry(
+    respx_mock: respx.MockRouter,
+    provider: OpenAIProvider,
+    sleeps: RecordedSleeps,
+    reply: httpx.Response,
+) -> None:
+    route = respx_mock.post(RESPONSES_URL).mock(return_value=reply)
+
+    with pytest.raises(ProviderResponseError) as caught:
+        await provider.analyze([make_request()])
+
+    assert type(caught.value) is ProviderResponseError
+    assert str(caught.value) == UNREADABLE_MESSAGE == "OpenAI returned an unreadable response."
+    assert caught.value.client_request_id is not None
+    assert route.call_count == 1
+    assert sleeps.delays == []
 
 
 async def test_an_unsafe_error_code_is_dropped(
