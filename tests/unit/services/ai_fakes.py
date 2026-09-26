@@ -18,10 +18,17 @@ class FakeAIProvider:
 
     created: ClassVar[list["FakeAIProvider"]] = []
 
-    def __init__(self, script: Sequence[ScriptItem] = (), *, credentials: bool = True) -> None:
+    def __init__(
+        self,
+        script: Sequence[ScriptItem] = (),
+        *,
+        credentials: bool = True,
+        attempts_per_call: int = 1,
+    ) -> None:
         self.script = list(script)
         self.batches: list[tuple[AnalysisRequest, ...]] = []
         self.credentials = credentials
+        self.attempts_per_call = attempts_per_call  # HTTP attempts each call simulates.
         self.credential_checks = 0
         FakeAIProvider.created.append(self)
 
@@ -40,6 +47,10 @@ class FakeAIProvider:
     @property
     def calls(self) -> int:
         return len(self.batches)
+
+    @property
+    def requests_sent(self) -> int:
+        return self.calls * self.attempts_per_call
 
     async def credentials_available(self) -> bool:
         self.credential_checks += 1

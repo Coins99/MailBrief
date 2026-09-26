@@ -479,7 +479,9 @@ async def test_request_budget_counts_retries_and_stops_before_an_extra_sleep(
     async with groq_provider(settings, key_store=store(), sleep=sleeps) as built:
         with pytest.raises(ProviderUsageLimitError):
             await built.analyze([make_request()])
-    assert route.call_count == 2
+        with pytest.raises(ProviderUsageLimitError):
+            await built.analyze([make_request()])  # Refused before sending: not counted.
+        assert built.requests_sent == route.call_count == 2
     assert sleeps.delays == [1.0]
 
 

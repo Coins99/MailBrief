@@ -454,6 +454,20 @@ async def test_cancel_before_the_first_call_sends_nothing(session: AsyncSession)
     assert outcomes(run) == [None, None]
 
 
+async def test_requests_sent_counts_every_http_attempt_of_this_run(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 2)
+    provider = FakeAIProvider([answer_all(), answer_all()], attempts_per_call=3)
+
+    first = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+    rerun = await analyze(session, provider, shortlist, account_id=account_id)
+
+    assert (first.calls, first.requests_sent) == (2, 6)
+    assert (rerun.calls, rerun.requests_sent) == (0, 0)  # Only this run's attempts count.
+    assert provider.requests_sent == 6
+
+
 async def test_usage_is_summed_across_calls(session: AsyncSession) -> None:
     account_id, shortlist = await seed(session, 2)
     provider = FakeAIProvider(

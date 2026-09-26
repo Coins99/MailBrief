@@ -64,6 +64,10 @@ class FakeAIProvider:
     def prompt_version(self) -> str:
         return "fake-prompt-1"
 
+    @property
+    def requests_sent(self) -> int:
+        return 0
+
     async def credentials_available(self) -> bool:
         return True
 

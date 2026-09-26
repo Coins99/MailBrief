@@ -147,7 +147,9 @@ class BriefService:
                 return BriefRunResult(status=BriefStatus.CONSENT_DECLINED, sync=sync)
             run = await self._analysis.execute(plan, cancel=cancel, progress=progress)
             if run.cancelled:
-                return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync, ai_calls=run.calls)
+                return BriefRunResult(
+                    status=BriefStatus.CANCELLED, sync=sync, ai_calls=run.requests_sent
+                )
 
         coverage = self._coverage(sync, len(shortlist), run)
         emit_progress(progress, SyncProgress(stage=SyncStage.ASSEMBLING))
@@ -164,7 +166,7 @@ class BriefService:
                 sync=sync,
                 coverage=coverage,
                 error_code=run.error_code or "ANALYSIS_FAILED",
-                ai_calls=run.calls,
+                ai_calls=run.requests_sent,
             )
         return BriefRunResult(
             status=BriefStatus.SAVED,
@@ -172,7 +174,7 @@ class BriefService:
             digest=digest,
             coverage=coverage,
             error_code=run.error_code,
-            ai_calls=run.calls,
+            ai_calls=run.requests_sent,
         )
 
     async def _consented(self, account_id: int, plan: AnalysisPlan, now: datetime) -> bool:

@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +16,8 @@ from mailbrief.diagnostics import gmail
 from mailbrief.providers.gmail.client import MESSAGES_URL, GmailClient
 from mailbrief.providers.gmail.provider import GmailProvider
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE
+from mailbrief.providers.groq.factory import groq_provider
+from mailbrief.providers.groq.provider import GroqProvider
 from tests.unit.providers.gmail.body_fixtures import message, part
 from tests.unit.providers.gmail.metadata_fixtures import FakeSession, metadata
 from tests.unit.providers.groq.groq_fixtures import (
@@ -206,6 +208,7 @@ def test_usage_limit_saves_partial_results_and_cached_results_use_no_budget(
     output = capsys.readouterr().out
     assert route.call_count == 1
     assert "Brief: saved (partial); items: 1" in output
+    assert "requests: 1;" in output  # The refused second call sent nothing.
     assert "AI request limit for this run was reached" in output
 
     assert run_brief(path, "--yes") == 0
@@ -216,6 +219,40 @@ def test_usage_limit_saves_partial_results_and_cached_results_use_no_budget(
     assert run_brief(path, "--yes") == 0
     assert route.call_count == 2
     assert "AI: nothing sent this run" in capsys.readouterr().out
+
+
+def test_requests_count_every_http_attempt_within_the_budget(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("MAILBRIEF_AI_MAX_REQUESTS_PER_RUN", "2")
+
+    async def no_wait(seconds: float) -> None:
+        del seconds
+
+    def groq_without_waits(settings: Settings) -> AbstractAsyncContextManager[GroqProvider]:
+        return groq_provider(settings, sleep=no_wait)
+
+    attempts: list[httpx.Request] = []
+
+    def fail_once(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) == 1:
+            return httpx.Response(500, json=error_body("server_error"))
+        return answer_every_message(request)
+
+    monkeypatch.setattr(gmail, "groq_provider", groq_without_waits)
+    route = groq_answers(respx_mock, fail_once)
+    replies(monkeypatch, "yes")
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 0
+
+    output = capsys.readouterr().out
+    assert route.call_count == 2
+    assert "AI: Groq / test-model; requests: 2; tokens in/out: 1200 / 300" in output
 
 
 @pytest.mark.parametrize(

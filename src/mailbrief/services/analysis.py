@@ -162,10 +162,12 @@ class AnalysisPlan:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisRun:
-    """The executed plan with usage, call count, cancellation and an error code.
+    """The executed plan with usage, call counts, cancellation and an error code.
 
-    ``error_code`` is the code of the error that stopped the run; otherwise
-    AI_REQUEST_REJECTED when a rejected request left a message out; otherwise None.
+    ``calls`` counts logical provider calls; ``requests_sent`` counts the HTTP attempts they
+    made, including failed and retried ones. ``error_code`` is the code of the error that
+    stopped the run; otherwise AI_REQUEST_REJECTED when a rejected request left a message
+    out; otherwise None.
     """
 
     messages: tuple[PlannedMessage, ...]
@@ -173,6 +175,7 @@ class AnalysisRun:
     calls: int
     cancelled: bool
     error_code: str | None
+    requests_sent: int = 0
 
 
 @dataclass(slots=True)
@@ -389,6 +392,7 @@ class AnalysisService:
         propagate.
         """
         pending = plan.to_send
+        requests_before = self._provider.requests_sent
         tally = _Tally()
         cancelled = False
         error_code: str | None = None
@@ -410,9 +414,11 @@ class AnalysisService:
             error_code = REQUEST_REJECTED
         analyzed = sum(item.outcome is AnalysisOutcome.ANALYZED for item in plan.messages)
         failed = sum(item.outcome is AnalysisOutcome.FAILED for item in plan.messages)
+        requests_sent = self._provider.requests_sent - requests_before
         logger.info(
-            "AI analysis: %d calls, %d analyzed, %d failed, cancelled=%s, error=%s",
+            "AI analysis: %d calls, %d requests, %d analyzed, %d failed, cancelled=%s, error=%s",
             tally.calls,
+            requests_sent,
             analyzed,
             failed,
             cancelled,
@@ -424,6 +430,7 @@ class AnalysisService:
             calls=tally.calls,
             cancelled=cancelled,
             error_code=error_code,
+            requests_sent=requests_sent,
         )
 
     async def _call(

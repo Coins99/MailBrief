@@ -272,6 +272,7 @@ class GroqProvider:
         self._max_output_tokens = max_output_tokens
         self._sleep = sleep
         self._remaining_requests = max_requests
+        self._requests_sent = 0
         self._pace_delay = 0.0
 
     async def _api_key(self) -> SecretStr | None:
@@ -308,6 +309,10 @@ class GroqProvider:
     def prompt_version(self) -> str:
         return PROMPT_VERSION
 
+    @property
+    def requests_sent(self) -> int:
+        return self._requests_sent
+
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
         """One logical chat completion for 1-10 requests, retrying transient failures."""
         keys = [request.message_key for request in requests]
@@ -328,8 +333,9 @@ class GroqProvider:
             await self._sleep(delay_before_call)
         while True:
             self._check_budget()
-            # Reserve before the first await, including failed attempts and retries.
+            # Reserve and count before the first await, including failed attempts and retries.
             self._remaining_requests -= 1
+            self._requests_sent += 1
             error: ProviderError
             delay: float | None
             try:

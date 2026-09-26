@@ -25,6 +25,11 @@ class AIProvider(Protocol):
         """Return the prompt version recorded in cache keys."""
         ...
 
+    @property
+    def requests_sent(self) -> int:
+        """Return the HTTP attempts made so far, including failed and retried ones."""
+        ...
+
     async def credentials_available(self) -> bool:
         """Whether a usable API key can be loaded; never raises for a missing or unreadable key."""
         ...
