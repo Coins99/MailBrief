@@ -31,7 +31,8 @@ them. The text exists in memory only, for the current run.
    - Gmail's HTML quote blocks.
 
    Forwards are never trimmed. They are recognized by the subject ("Fwd:", "FW:", "WG:",
-   "转发:") or by a forwarded-message marker. If trimming would leave nothing, the text is kept.
+   "转发:") or by a forwarded-message marker above the quoted history; a marker further down,
+   inside a reply's history, doesn't count. If trimming would leave nothing, the text is kept.
 3. The text is limited to 8,000 characters, cut at a line or word break.
    `MAILBRIEF_AI_BODY_CHARACTER_LIMIT` can lower this limit, but never raise it.
 

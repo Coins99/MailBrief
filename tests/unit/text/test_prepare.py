@@ -159,3 +159,21 @@ def test_bracketed_links_are_removed_without_leftover_brackets() -> None:
     raw = "GET STARTED\n[https://x.example.test/a]\nSee [ https://x.example.test/b ] now\n"
     raw += "Visit https://x.example.test/c], then (https://x.example.test/d)."
     assert normalize_text(raw) == "GET STARTED\nSee now\nVisit [link]], then ."
+
+
+def test_forward_inside_quoted_history_does_not_block_trimming() -> None:
+    text = (
+        "Thanks, it was delicious\n________________________________\n"
+        "From: Sam <sam@example.com>\nSent: Friday\nTo: Alex\nSubject: Re: Lunch\n\nnice\n\n"
+        "On Fri, 25 Sept 2026 at 21:26, Sam wrote:\n\n---------- Forwarded message ---------\n"
+        "From: Alex\nDate: Fri\nSubject: Lunch\n\nI am having a burger"
+    )
+    assert trim_quoted_history(text) == ("Thanks, it was delicious", True)
+
+
+def test_quoted_apple_forward_is_never_trimmed() -> None:
+    text = (
+        "FYI, see below.\n\nBegin forwarded message:\n\n> From: Pat <pat@example.com>\n"
+        "> Date: 21 September 2026 at 09:00\n> Subject: Budget\n>\n> The budget is approved."
+    )
+    assert trim_quoted_history(text) == (text, False)

@@ -152,11 +152,14 @@ def _outlook_header_start(lines: list[str]) -> int | None:
 def trim_quoted_history(text: str, *, is_forward: bool = False) -> tuple[str, bool]:
     """Remove quoted history that follows a reply; forwards are never trimmed.
 
+    A forwarded-message marker above the quoted history makes the email a forward. One
+    inside the quoted history (a reply in a thread that once contained a forward) does not.
+
     Returns the text and whether anything was removed. Nothing is removed when that would
     leave no text, so an email that is entirely quoted keeps its content.
     """
     lines = text.split("\n")
-    if is_forward or any(_FORWARD_MARKER.match(line) for line in lines):
+    if is_forward:
         return text, False
     cut: int | None = None
     quote_start = _trailing_quote_start(lines)
@@ -165,7 +168,9 @@ def trim_quoted_history(text: str, *, is_forward: bool = False) -> tuple[str, bo
     outlook = _outlook_header_start(lines)
     if outlook is not None and (cut is None or outlook < cut):
         cut = outlook
-    if cut is None:
+    # The cut line itself counts: Apple Mail's "Begin forwarded message:" sits directly above
+    # the quoted forward and is taken for an "On ... wrote:" line.
+    if cut is None or any(_FORWARD_MARKER.match(line) for line in lines[: cut + 1]):
         return text, False
     kept = "\n".join(lines[:cut]).strip()
     if not kept:
