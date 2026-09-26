@@ -5,7 +5,8 @@ Implementation: PR #11, merged at `83e8536`. Usage and checklist: [Gmail bodies]
 ## Scope
 
 - Live checks of the code at `83e8536` on the owner's Mac, 25 September 2026, with real mail.
-- Synthetic re-checks on 26 September 2026 on `feat/m4-analysis-digest`.
+- Re-checks on 26 September 2026 on `feat/m4-analysis-digest`: three synthetic test emails
+  (reply, forward, Chinese) and two real long emails (row 6).
 
 Results are owner-reported. To keep this public record free of private data, it gives
 generic descriptions and character counts only: no senders, subjects, addresses or email
