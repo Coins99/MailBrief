@@ -148,7 +148,13 @@ class BriefService:
                 coverage=coverage,
                 error_code=run.error_code or "ANALYSIS_FAILED",
             )
-        return BriefRunResult(status=BriefStatus.SAVED, sync=sync, digest=digest, coverage=coverage)
+        return BriefRunResult(
+            status=BriefStatus.SAVED,
+            sync=sync,
+            digest=digest,
+            coverage=coverage,
+            error_code=run.error_code,
+        )
 
     async def _consented(self, account_id: int, plan: AnalysisPlan, now: datetime) -> bool:
         """Ask the gate; record first-use consent before any provider call."""

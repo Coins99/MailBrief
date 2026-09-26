@@ -317,6 +317,10 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
                 f"{_count(coverage.input_tokens)} / {_count(coverage.output_tokens)}"
             )
     print(_outcome(result))
+    # A partial brief still explains why the new messages failed (e.g. a wrong API key).
+    partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")
+    if result.status is BriefStatus.SAVED and partial_reason is not None:
+        print(partial_reason)
 
 
 def _deadline(item: DigestItem, zone: ZoneInfo) -> str | None:

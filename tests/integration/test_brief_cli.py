@@ -37,19 +37,31 @@ Responder = Callable[[httpx.Request], httpx.Response]
 
 
 class Mailbox:
-    """One synthetic Inbox message over respx; a test can change its body between runs."""
+    """Synthetic Inbox messages over respx; a test can change the body or add a message."""
 
     def __init__(self, router: respx.MockRouter) -> None:
         self.body = BODY
-        received = datetime.now(UTC)
-        router.get(MESSAGES_URL + "/a1", params__contains={"format": "full"}).mock(
-            side_effect=self._full_message
-        )
-        router.get(MESSAGES_URL).respond(json={"messages": [{"id": "a1"}]})
-        router.get(MESSAGES_URL + "/a1").respond(json=metadata(received=received))
+        self._router = router
+        self._identifiers: list[str] = []
+        router.get(MESSAGES_URL).mock(side_effect=self._list)
+        self.add("a1")
 
-    def _full_message(self, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=message(part("text/plain", self.body), identifier="a1"))
+    def add(self, identifier: str) -> None:
+        received = datetime.now(UTC)
+        self._identifiers.append(identifier)
+        self._router.get(f"{MESSAGES_URL}/{identifier}", params__contains={"format": "full"}).mock(
+            side_effect=lambda request: self._full_message(identifier)
+        )
+        self._router.get(f"{MESSAGES_URL}/{identifier}").respond(
+            json=metadata(identifier, received=received)
+        )
+
+    def _list(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"messages": [{"id": id_} for id_ in self._identifiers]})
+
+    def _full_message(self, identifier: str) -> httpx.Response:
+        body = message(part("text/plain", self.body), identifier=identifier)
+        return httpx.Response(200, json=body)
 
 
 @pytest.fixture
@@ -226,6 +238,33 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
         "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set "
         "Your last saved brief for today is unchanged."
     ) in output
+
+
+def test_a_partial_brief_names_the_provider_error(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = openai_answers(respx_mock)
+    replies(monkeypatch, "yes")
+    path = tmp_path / "brief.sqlite3"
+    assert run_brief(path) == 0
+    capsys.readouterr()
+    mailbox.add("a2")
+    route.mock(return_value=httpx.Response(401, json=error_body("invalid_api_key")))
+
+    assert run_brief(path, "--yes") == 4
+
+    lines = capsys.readouterr().out.splitlines()
+    assert route.call_count == 2
+    assert "Brief: saved (partial); items: 1" in lines
+    assert any("analyzed 0, reused 1, failed 1" in line for line in lines)
+    outcome = lines.index("Saved. Bodies were not stored.")
+    assert lines[outcome + 1] == (
+        "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
+    )
 
 
 def test_show_prints_the_items_but_never_evidence(

@@ -273,6 +273,26 @@ async def test_a_total_analysis_failure_keeps_the_earlier_brief(session: AsyncSe
     )
 
 
+async def test_a_partial_brief_reports_the_provider_error(session: AsyncSession) -> None:
+    messages = inbox(2)
+    await build(
+        session, FakeAIProvider([answer_all()]), RecordingGate(answer=True), messages=messages[:1]
+    ).generate(tz_key=ZONE)
+    provider = FakeAIProvider([AIAuthenticationError("bad key")])
+
+    result = await build(session, provider, RecordingGate(answer=True), messages=messages).generate(
+        tz_key=ZONE
+    )
+
+    assert result.status is BriefStatus.SAVED
+    assert result.digest is not None
+    assert result.digest.status is DigestStatus.PARTIAL
+    assert result.error_code == "AI_AUTH_FAILED"
+    assert result.coverage is not None
+    assert (result.coverage.reused, result.coverage.failed) == (1, 1)
+    assert provider.calls == 1
+
+
 async def test_cancel_during_analysis_keeps_results_but_writes_no_brief(
     session: AsyncSession,
 ) -> None:
