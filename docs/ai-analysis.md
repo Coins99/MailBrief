@@ -135,7 +135,8 @@ MailBrief checks that the phrase appears in the email and resolves it itself:
 - **Unresolved**: a phrase with no specific day, such as "ASAP".
 
 A zone counts only when the email's subject or body contains it. A zone the model supplied
-on its own keeps only the date. When a time comes without a reported zone but the phrase
+on its own keeps only the date. Your own zone is the exception: MailBrief sends it with
+each email, so a reported zone equal to it counts as no reported zone. When a time comes without a reported zone but the phrase
 names one (ET, PT, PST, CEST, UTC+2, GMT, Eastern, Pacific, 北京时间, 东八区 and similar),
 only the date is kept, rather than assuming your zone. Any upper-case word ending in T
 counts, so "SUBMIT IT BY 5PM" also keeps only the date; such a false positive only drops

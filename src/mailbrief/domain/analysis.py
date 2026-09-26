@@ -11,7 +11,7 @@ from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS
 from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.messages import EmailContact
 
-ANALYSIS_SCHEMA_VERSION: Final = "3"  # Bump when validation changes what may be cached.
+ANALYSIS_SCHEMA_VERSION: Final = "4"  # Bump when validation changes what may be cached.
 
 # Limits shared by the analysis contract, the brief and storage.
 SUMMARY_MAX_CHARS: Final = 240

@@ -111,12 +111,18 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
     without a phrase or the phrase is not in the email. An unusable date keeps the phrase
     as unresolved, and an unusable time keeps only the date. A time is placed in a stated
     zone only when the email writes that zone, and in the owner's zone only when the
-    phrase names none; otherwise only the day is kept. Offsets are never guessed.
+    phrase names none; otherwise only the day is kept. The request supplies the owner's
+    zone, so a stated zone equal to it (ignoring case) counts as no stated zone. Offsets
+    are never guessed.
     """
     text = _clean(candidate.deadline_text)
     raw_date = _clean(candidate.deadline_date)
     raw_time = _clean(candidate.deadline_time)
     stated_zone = _clean(candidate.stated_timezone)
+    if stated_zone is not None and (
+        stated_zone.casefold() == request.timezone_name.strip().casefold()
+    ):
+        stated_zone = None  # The model echoed the owner's zone from the request.
 
     if text is None:
         if raw_date is not None or raw_time is not None:

@@ -292,6 +292,28 @@ def test_d6_a_zone_the_email_writes_resolves_exactly() -> None:
 
 
 @pytest.mark.parametrize(
+    ("body", "phrase", "stated", "precision"),
+    [
+        ("Send it by 5pm on Friday.", "by 5pm", "America/Toronto", DeadlinePrecision.DATETIME),
+        ("Send it by 5pm on Friday.", "by 5pm", "america/toronto", DeadlinePrecision.DATETIME),
+        ("Send it by 5pm PT on Friday.", "by 5pm PT", "America/Toronto", DeadlinePrecision.DATE),
+        ("Send it by 5pm on Friday.", "by 5pm", "America/Vancouver", DeadlinePrecision.DATE),
+    ],
+    ids=["echoed", "echoed-lowercase", "echoed-with-pt-phrase", "other-zone-not-written"],
+)
+def test_d6_an_echoed_owner_zone_counts_as_no_stated_zone(
+    body: str, phrase: str, stated: str, precision: DeadlinePrecision
+) -> None:
+    resolved = resolve_phrase(body, phrase, stated_timezone=stated)
+
+    at_utc = datetime(2026, 9, 4, 21, 0, tzinfo=UTC)
+    exact = precision is DeadlinePrecision.DATETIME
+    assert resolved == ResolvedDeadline(
+        phrase, precision, date(2026, 9, 4), at_utc if exact else None, ZONE
+    )
+
+
+@pytest.mark.parametrize(
     ("body", "phrase"),
     [
         ("Please send it by Friday 5pm PT.", "by Friday 5pm PT"),
