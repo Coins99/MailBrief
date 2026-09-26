@@ -15,6 +15,7 @@ from enum import StrEnum
 import httpx
 
 from mailbrief.ports.errors import (
+    NETWORK_BLOCKED_CODE,
     AIAuthenticationError,
     ProviderError,
     ProviderPermissionError,
@@ -29,6 +30,8 @@ _DURATION_RE = re.compile(
     r"^(?=[0-9])(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m(?!s))?(?:(?P<seconds>\d+(?:\.\d+)?)s)?(?:(?P<ms>\d+(?:\.\d+)?)ms)?$"
 )
 _DELTA_SECONDS_RE = re.compile(r"^\d+(\.\d+)?$")
+# Groq's 403 text for a blocked network, matched case-insensitively (see classify_groq_response).
+_GROQ_NETWORK_BLOCK = "check your network settings"
 MAX_REASONABLE_DELAY_SECONDS = 86400.0  # 24 hours ceiling to reject absurd inputs
 
 
@@ -82,8 +85,8 @@ def parse_retry_delay(header_value: str | None) -> float | None:
     return None
 
 
-def parse_openai_ratelimit_reset(headers: Mapping[str, str]) -> float | None:
-    """Determine retry delay from OpenAI rate limit headers.
+def parse_ai_ratelimit_reset(headers: Mapping[str, str]) -> float | None:
+    """Determine retry delay from OpenAI-compatible rate limit headers.
 
     Prefers Retry-After if present. Otherwise evaluates remaining requests vs tokens
     to select the binding constraint's reset duration.
@@ -148,114 +151,47 @@ class ResponseVerdict:
     retry_delay: float | None = None
 
 
-def classify_openai_response(
-    response: httpx.Response,
-    client_request_id: str,
-) -> ResponseVerdict:
-    """Classify an HTTP response from the OpenAI API into a retry or failure verdict."""
+def classify_groq_response(response: httpx.Response, client_request_id: str) -> ResponseVerdict:
+    """Classify Groq failures without propagating provider text or malformed error fields."""
     status = response.status_code
-    if 200 <= status < 300:
+    if response.is_success:
         return ResponseVerdict(VerdictKind.SUCCESS)
-
-    error_message: str | None = None
-    error_code: str | None = None
-    error_type: str | None = None
-
-    # Note: If streaming responses are ever used in the future, response.json()
-    # would raise on an unread response body. MailBrief uses non-streaming responses today.
+    code: str | None = None
     try:
-        data = response.json()
-        if isinstance(data, dict):
-            err = data.get("error")
-            if isinstance(err, dict):
-                error_message = err.get("message")
-                error_code = err.get("code")
-                error_type = err.get("type")
-    except Exception as exc:
-        logger.debug(
-            "Failed to parse JSON error envelope from OpenAI response (status %d): %s",
-            status,
-            exc,
-        )
-
-    # 401 Unauthorized -> AIAuthenticationError (directly inherits from ProviderError)
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        candidate = body["error"].get("code")
+        if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", candidate):
+            code = candidate
+        message = body["error"].get("message")
+        # Groq's edge blocks many VPN, proxy and data-centre networks with a 403 that carries
+        # no code, before the key is checked. Its text is only matched here, never kept.
+        if status == 403 and isinstance(message, str) and _GROQ_NETWORK_BLOCK in message.casefold():
+            code = NETWORK_BLOCKED_CODE
+    kind: type[ProviderError] = ProviderResponseError
+    retry = False
+    delay = None
     if status == 401:
-        return ResponseVerdict(
-            VerdictKind.FAIL,
-            exception=AIAuthenticationError(
-                error_message or "OpenAI authentication failed; check your API key in settings.",
-                client_request_id=client_request_id,
-                provider_error_code=error_code,
-            ),
-        )
-
-    # 403 Forbidden -> Permission or regional restriction
-    if status == 403:
-        return ResponseVerdict(
-            VerdictKind.FAIL,
-            exception=ProviderPermissionError(
-                error_message or "OpenAI permission denied or unsupported country/region.",
-                client_request_id=client_request_id,
-                provider_error_code=error_code or error_type,
-            ),
-        )
-
-    # 429 Rate Limit / Quota
-    if status == 429:
-        if error_code == "insufficient_quota" or error_type == "insufficient_quota":
-            return ResponseVerdict(
-                VerdictKind.FAIL,
-                exception=ProviderPermissionError(
-                    error_message or "OpenAI account quota exceeded; check billing plan.",
-                    client_request_id=client_request_id,
-                    provider_error_code="insufficient_quota",
-                ),
-            )
-        delay = parse_openai_ratelimit_reset(response.headers)
-        return ResponseVerdict(
-            VerdictKind.RETRY,
-            retry_delay=delay,
-            exception=ProviderRateLimitError(
-                error_message or "OpenAI rate limit exceeded.",
-                retry_after_seconds=delay,
-                client_request_id=client_request_id,
-                provider_error_code=error_code,
-            ),
-        )
-
-    # 408 Request Timeout & 409 Conflict are retryable
-    if status in {408, 409}:
-        return ResponseVerdict(
-            VerdictKind.RETRY,
-            retry_delay=None,
-            exception=ProviderError(
-                error_message or f"OpenAI transient HTTP {status}.",
-                client_request_id=client_request_id,
-                provider_error_code=error_code,
-            ),
-        )
-
-    # 500, 502, 503, 504 are retryable server errors
-    if status in {500, 502, 503, 504}:
-        delay = parse_retry_delay(response.headers.get("retry-after")) if status == 503 else None
-        return ResponseVerdict(
-            VerdictKind.RETRY,
-            retry_delay=delay,
-            exception=ProviderError(
-                error_message or f"OpenAI server error ({status}).",
-                client_request_id=client_request_id,
-                provider_error_code=error_code,
-            ),
-        )
-
-    # All other 4xx / unhandled responses are terminal failures
+        kind = AIAuthenticationError
+    elif status == 403 or code in {"blocked_api_access", "insufficient_quota"}:
+        kind = ProviderPermissionError
+    elif status == 429:
+        kind = ProviderRateLimitError
+        retry = True
+        delay = parse_ai_ratelimit_reset(response.headers)
+    elif status in {408, 409, 500, 502, 503, 504}:
+        retry = True
+        delay = parse_retry_delay(response.headers.get("retry-after"))
     return ResponseVerdict(
-        VerdictKind.FAIL,
-        exception=ProviderResponseError(
-            error_message or f"OpenAI request failed with status {status}.",
+        VerdictKind.RETRY if retry else VerdictKind.FAIL,
+        exception=kind(
+            f"Groq request failed (HTTP {status}).",
             client_request_id=client_request_id,
-            provider_error_code=error_code,
+            provider_error_code=code,
         ),
+        retry_delay=delay,
     )
 
 

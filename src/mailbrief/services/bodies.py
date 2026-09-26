@@ -74,6 +74,11 @@ class BodyService:
         self._limit = limit
         self._slots = asyncio.Semaphore(concurrency)
 
+    @property
+    def limit(self) -> int:
+        """The most prepared body characters kept per message."""
+        return self._limit
+
     async def prepare(self, shortlist: Sequence[RankedMessage]) -> tuple[PreparedBody, ...]:
         """Prepared bodies in shortlist order.
 

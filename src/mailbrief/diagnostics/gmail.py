@@ -1,31 +1,98 @@
-"""Gmail connection checks, daily metadata sync and in-memory review of shortlisted bodies."""
+"""Gmail connection checks, daily sync, body review and the consented AI daily brief."""
 
 import argparse
 import asyncio
+import contextlib
+import getpass
 import logging
+import threading
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from alembic.util import CommandError
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from mailbrief.config import Settings
+from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.bodies import BodyStatus, PreparedBody
-from mailbrief.domain.digests import SyncStatus
+from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
+from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncStatus
 from mailbrief.errors import ConfigurationError
 from mailbrief.paths import AppPaths
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.providers.gmail.cache import GmailCredentialStore
 from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
+from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
+from mailbrief.providers.groq.factory import groq_provider
+from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PROVIDER_NAME
+from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
-from mailbrief.services.calendar import local_day_window, resolve_timezone
+from mailbrief.services.brief import (
+    CONSENT_DISCLOSURE_VERSION,
+    BriefService,
+    disclosure_lines,
+    provider_display_name,
+)
+from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
+from mailbrief.services.digest import DigestService
+from mailbrief.services.ranking import ShortlistReviewError
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
-from mailbrief.storage.repositories import AccountRepository, MessageRepository, SyncRunRepository
+from mailbrief.storage.repositories import (
+    AccountRepository,
+    ConsentRepository,
+    MessageRepository,
+    SyncRunRepository,
+)
+
+_AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
+_SETUP_UNAVAILABLE = (
+    "Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md."
+)
+_AI_ERROR_MESSAGES = {
+    "AI_USAGE_LIMIT": (
+        "MailBrief's AI request limit for this run was reached. "
+        "Review MAILBRIEF_AI_MAX_REQUESTS_PER_RUN before running again."
+    ),
+    "AI_KEY_MISSING": KEY_MISSING_MESSAGE,
+    "AI_AUTH_FAILED": "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set",
+    "AI_NETWORK_BLOCKED": (
+        "Groq refused this network. Groq blocks many VPN, proxy and data-centre connections; "
+        "try your usual home or mobile connection."
+    ),
+    "AI_PERMISSION_DENIED": "Groq denied access (network, region, permission or quota).",
+    "AI_RATE_LIMITED": "Groq rate limit reached; retry later.",
+    "AI_TIMEOUT": "Groq did not respond in time.",
+    "AI_SERVER_ERROR": "Groq had a server problem or sent an unreadable reply; retry later.",
+    "AI_REQUEST_REJECTED": (
+        "Groq rejected some messages, so they were left out. If every message is rejected, "
+        "check that MAILBRIEF_GROQ_MODEL supports Structured Outputs."
+    ),
+    "AI_NETWORK_ERROR": "Could not reach Groq; check your connection and retry.",
+    "AI_PROVIDER_ERROR": "Groq request failed; check MAILBRIEF_GROQ_MODEL.",
+    "ANALYSIS_FAILED": "No message could be analyzed.",
+}
+
+
+class SettingsError(ConfigurationError):
+    """A MailBrief setting is invalid. Messages name the settings, never their values."""
+
+
+def _load_settings() -> Settings:
+    """Build Settings, naming each invalid MAILBRIEF_* variable without its value."""
+    try:
+        return Settings()
+    except ValidationError as exc:
+        names = sorted(
+            {f"MAILBRIEF_{str(error['loc'][0]).upper()}" for error in exc.errors() if error["loc"]}
+        )
+        listed = ", ".join(names) or "MAILBRIEF_* settings"
+        raise SettingsError(f"Invalid setting: {listed}. See docs/ai-analysis.md.") from None
 
 
 async def run(command: str, *, silent_only: bool) -> int:
@@ -35,7 +102,7 @@ async def run(command: str, *, silent_only: bool) -> int:
         print("Local Gmail credentials removed. Google access and local app data are unchanged.")
         return 0
 
-    async with gmail_auth(Settings()) as auth:
+    async with gmail_auth(_load_settings()) as auth:
         await auth.connect(silent_only=silent_only)
         print("Gmail read-only connection verified. No messages downloaded (M1).")
         return 0
@@ -55,7 +122,7 @@ async def sync(
     now = datetime.now(UTC)
     window = local_day_window(now, tz)
     path = database_path or AppPaths.from_qt().database_path
-    async with gmail_provider(Settings(), silent_only=silent_only) as provider:
+    async with gmail_provider(_load_settings(), silent_only=silent_only) as provider:
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
         database = Database.from_path(path)
@@ -134,7 +201,7 @@ async def bodies(
     show_text: bool,
 ) -> int:
     """Sync today's metadata, then read and prepare the shortlist in memory only."""
-    settings = Settings()
+    settings = _load_settings()
     tz = resolve_timezone(timezone)
     now = datetime.now(UTC)
     path = database_path or AppPaths.from_qt().database_path
@@ -169,6 +236,260 @@ async def bodies(
             print(body.text or f"({body.status.value}: no text)")
     failed = any(body.status is BodyStatus.FAILED for body in prepared)
     return 0 if result.status is SyncStatus.COMPLETE and not failed else 4
+
+
+def ai_key(action: str) -> int:
+    """Save, check or remove the Groq API key; no part of the key is ever printed."""
+    store = GroqKeyStore()
+    if action == "set":
+        try:
+            raw = getpass.getpass("Groq API key (input hidden): ")
+        except EOFError:
+            raw = ""
+        store.save(parse_api_key(raw))
+        print("Groq API key saved in the OS credential store.")
+    elif action == "status":
+        print("Groq API key: saved" if store.load() is not None else "Groq API key: not saved")
+    else:
+        store.clear()
+        print("Groq API key removed from the OS credential store.")
+    return 0
+
+
+async def ai_consent(action: str, *, database_path: Path | None) -> int:
+    """Show or revoke recorded Groq consent for every account; needs no Gmail connection."""
+    path = database_path or AppPaths.from_qt().database_path
+    await asyncio.to_thread(upgrade_database, path)
+    database = Database.from_path(path)
+    try:
+        async with database.session() as session:
+            accounts = await AccountRepository(session).list_all()
+            consents = ConsentRepository(session)
+            if action == "status":
+                if not accounts:
+                    print("No accounts in this database.")
+                for account in accounts:
+                    active = await consents.get_active(
+                        account.id, PROVIDER_NAME, CONSENT_DISCLOSURE_VERSION
+                    )
+                    state = (
+                        f"granted {active.granted_at_utc:%Y-%m-%d %H:%M} UTC"
+                        if active is not None
+                        else "not granted"
+                    )
+                    print(f"Account {account.id}: Groq consent {state}")
+                return 0
+            now = datetime.now(UTC)
+            revoked = 0
+            for account in accounts:
+                revoked += await consents.revoke_all(account.id, PROVIDER_NAME, now)
+            await session.commit()
+            print(f"Groq consent revoked: {revoked}")
+            return 0
+    finally:
+        await database.dispose()
+
+
+async def _ask(prompt: str) -> str:
+    """Read one answer in a daemon thread, so Ctrl+C never waits for Enter; EOF answers ""."""
+    loop = asyncio.get_running_loop()
+    answer: asyncio.Future[str] = loop.create_future()
+
+    def settle(result: str | Exception) -> None:
+        if answer.done():
+            return
+        if isinstance(result, Exception):
+            answer.set_exception(result)
+        else:
+            answer.set_result(result)
+
+    def read() -> None:
+        result: str | Exception
+        try:
+            result = input(prompt)
+        except EOFError:
+            result = ""
+        except Exception as exc:
+            result = exc
+        # After Ctrl+C the loop may be closed; nobody is waiting for this answer then.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(settle, result)
+
+    threading.Thread(target=read, name="mailbrief-prompt", daemon=True).start()
+    return (await answer).strip()
+
+
+class CliConsentGate:
+    """Terminal consent: first use needs a typed "yes"; --yes covers only recorded consent."""
+
+    def __init__(self, *, assume_yes: bool) -> None:
+        self._assume_yes = assume_yes
+
+    async def confirm(self, preview: TransmissionPreview) -> bool:
+        for line in disclosure_lines(preview):
+            print(line)
+        if preview.first_use:
+            if self._assume_yes:
+                print("First use needs your interactive consent; run brief without --yes.")
+                return False
+            return await _ask('Type "yes" to consent and send: ') == "yes"
+        if self._assume_yes:
+            return True
+        return (await _ask("Send? [y/N] ")).lower() in {"y", "yes"}
+
+
+def _count(value: int | None) -> str:
+    return "?" if value is None else str(value)
+
+
+def _outcome(result: BriefRunResult) -> str:
+    if result.status is BriefStatus.SAVED:
+        return "Saved. Bodies were not stored."
+    if result.status is BriefStatus.CONSENT_DECLINED:
+        return "Nothing was sent. No brief saved."
+    if result.status is BriefStatus.ANALYSIS_FAILED:
+        return _AI_ERROR_MESSAGES.get(
+            result.error_code or "", _AI_ERROR_MESSAGES["ANALYSIS_FAILED"]
+        )
+    if result.status is BriefStatus.SYNC_FAILED:
+        return f"Sync failed ({result.error_code or 'unknown'}). Nothing was sent."
+    return "Cancelled. No brief saved."
+
+
+def _ai_line(result: BriefRunResult, *, model: str) -> str:
+    """Say nothing was sent only when no provider request was made, even a failed one."""
+    if result.ai_calls == 0:
+        return "AI: nothing sent this run"
+    coverage = result.coverage
+    tokens_in = coverage.input_tokens if coverage is not None else None
+    tokens_out = coverage.output_tokens if coverage is not None else None
+    used_model = (coverage.ai_model if coverage is not None else None) or model
+    return (
+        f"AI: {provider_display_name(PROVIDER_NAME)} / {used_model}; "
+        f"requests: {result.ai_calls}; "
+        f"tokens in/out: {_count(tokens_in)} / {_count(tokens_out)}"
+    )
+
+
+def _print_result(result: BriefRunResult, *, model: str) -> None:
+    """Counts only: never subjects, senders or text."""
+    digest = result.digest
+    status = result.status.value + (f" ({digest.status.value})" if digest is not None else "")
+    print(f"Brief: {status}; items: {len(digest.items) if digest is not None else 0}")
+    coverage = result.coverage
+    if coverage is not None:
+        print(
+            f"Coverage: shortlisted {coverage.shortlisted}, analyzed {coverage.analyzed}, "
+            f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}; "
+            f"sync complete: {'yes' if coverage.sync_complete else 'no'}"
+        )
+    if coverage is not None or result.ai_calls > 0:
+        print(_ai_line(result, model=model))
+    print(_outcome(result))
+    # A partial brief still explains why the new messages failed (e.g. a wrong API key).
+    partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")
+    if result.status is BriefStatus.SAVED and partial_reason is not None:
+        print(partial_reason)
+    if result.provider_detail:
+        print(f"{provider_display_name(PROVIDER_NAME)} detail: {result.provider_detail}")
+    if result.status is BriefStatus.ANALYSIS_FAILED:
+        # Its own line: some messages end in a command, which must not run into this note.
+        print("Your last saved brief for today is unchanged.")
+    if _sync_incomplete(result):
+        print("Inbox sync was incomplete, so this brief may be missing messages.")
+
+
+def _sync_incomplete(result: BriefRunResult) -> bool:
+    return result.coverage is not None and not result.coverage.sync_complete
+
+
+def _deadline(item: DigestItem, zone: ZoneInfo) -> str | None:
+    if item.deadline_precision is DeadlinePrecision.DATETIME and item.deadline_at_utc is not None:
+        return f"{item.deadline_at_utc.astimezone(zone):%Y-%m-%d %H:%M} ({zone.key})"
+    if item.deadline_precision is DeadlinePrecision.DATE and item.deadline_date is not None:
+        return item.deadline_date.isoformat()
+    if item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
+        return f'"{item.deadline_text}"'
+    return None
+
+
+def _print_items(digest: DailyDigest) -> None:
+    """Derived brief content, shown only on request; never evidence or bodies."""
+    zone = ZoneInfo(digest.timezone_name)
+    for item in digest.items:
+        print(f"{item.position + 1}. [{item.section.value}] {item.sender.address}: {item.subject}")
+        print(f"   {item.summary}")
+        if item.action_text:
+            print(f"   Action: {item.action_text}")
+        deadline = _deadline(item, zone)
+        if deadline is not None:
+            print(f"   Deadline: {deadline}")
+        print(f"   {item.source_url}")
+
+
+def _brief_exit_code(result: BriefRunResult) -> int:
+    """0 only for a complete brief, or an empty one after a complete sync."""
+    if result.status is BriefStatus.SAVED:
+        complete = (DigestStatus.COMPLETE, DigestStatus.EMPTY)
+        finished = result.digest is not None and result.digest.status in complete
+        return 0 if finished and not _sync_incomplete(result) else 4
+    if result.status is BriefStatus.CONSENT_DECLINED:
+        return 6
+    if result.status is BriefStatus.CANCELLED:
+        return 130
+    return 4
+
+
+async def brief(
+    *,
+    silent_only: bool,
+    database_path: Path | None,
+    timezone: str | None,
+    include_ids: tuple[str, ...],
+    exclude_ids: tuple[str, ...],
+    assume_yes: bool,
+    show: bool,
+) -> int:
+    """Sync, ask consent, analyze the shortlist with Groq and save today's brief."""
+    settings = _load_settings()
+    tz = resolve_timezone(timezone)
+    now = datetime.now(UTC)
+    window = local_day_window(now, tz)
+    path = database_path or AppPaths.from_qt().database_path
+    async with (
+        gmail_provider(settings, silent_only=silent_only) as provider,
+        groq_provider(settings) as ai,
+    ):
+        await provider.connect()
+        await asyncio.to_thread(upgrade_database, path)
+        database = Database.from_path(path)
+        try:
+            async with database.session() as session:
+                service = BriefService(
+                    session=session,
+                    application=ApplicationService(
+                        provider,
+                        MessageRepository(session),
+                        SyncRunRepository(session),
+                        AccountRepository(session),
+                    ),
+                    bodies=BodyService(provider, limit=settings.ai_body_character_limit),
+                    analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),
+                    digests=DigestService(session),
+                    consent_gate=CliConsentGate(assume_yes=assume_yes),
+                    clock=lambda: now,
+                )
+                result = await service.generate(
+                    tz_key=tz.key, include_ids=include_ids, exclude_ids=exclude_ids
+                )
+        finally:
+            await database.dispose()
+        model = ai.model_name
+    print(f"Inbox date: {window.local_date} ({window.timezone_name})")
+    _print_result(result, model=model)
+    if show and result.digest is not None:
+        _print_items(result.digest)
+    return _brief_exit_code(result)
 
 
 def _add_day_options(parser: argparse.ArgumentParser) -> None:
@@ -208,11 +529,59 @@ def main(arguments: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print the prepared text in this terminal for review (never saved or logged).",
     )
+    brief_parser = commands.add_parser(
+        "brief",
+        help="Sync today's Inbox, analyze the shortlist with Groq after consent, save the brief.",
+    )
+    _add_day_options(brief_parser)
+    brief_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Send without asking when consent is already recorded; first use still asks.",
+    )
+    brief_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Print the saved items: sender, subject, summary, action, deadline and link.",
+    )
+    key_parser = commands.add_parser(
+        "ai-key", help="Save, check or remove the Groq API key in the OS credential store."
+    )
+    key_parser.add_argument(
+        "action",
+        choices=("set", "status", "clear"),
+        help="set prompts without echoing; status never shows the key; clear is safe to repeat.",
+    )
+    consent_parser = commands.add_parser(
+        "ai-consent", help="Show or revoke your recorded consent to send email to Groq."
+    )
+    consent_parser.add_argument(
+        "action", choices=("status", "revoke"), help="Show or revoke consent for every account."
+    )
+    consent_parser.add_argument(
+        "--database", type=Path, help="Optional SQLite path; defaults to app data."
+    )
     args = parser.parse_args(arguments)
-    # Wire/debug logging can expose authorization headers and loopback URLs.
-    for name in ("httpx", "httpcore"):
+    # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
+    for name in ("httpx", "httpcore", "groq"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
     try:
+        if args.command == "brief":
+            return asyncio.run(
+                brief(
+                    silent_only=args.silent_only,
+                    database_path=args.database,
+                    timezone=args.timezone,
+                    include_ids=tuple(args.include),
+                    exclude_ids=tuple(args.exclude),
+                    assume_yes=args.yes,
+                    show=args.show,
+                )
+            )
+        if args.command == "ai-key":
+            return ai_key(args.action)
+        if args.command == "ai-consent":
+            return asyncio.run(ai_consent(args.action, database_path=args.database))
         if args.command == "sync":
             return asyncio.run(
                 sync(
@@ -242,18 +611,32 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except GmailSetupError as exc:
         print(str(exc))
         return 3
-    except (ConfigurationError, ValidationError):
-        print("Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md.")
+    except SettingsError as exc:
+        print(str(exc))
+        return 3
+    except ConfigurationError as exc:
+        # AI setup errors (model, key, vault) carry static, actionable messages.
+        print(str(exc) if args.command in _AI_COMMANDS else _SETUP_UNAVAILABLE)
+        return 3
+    except ValidationError as exc:
+        if args.command in _AI_COMMANDS:
+            # Settings errors arrive as SettingsError, so this is an internal validation error.
+            print(f"Unexpected error ({type(exc).__name__}).")
+            return 1
+        print(_SETUP_UNAVAILABLE)
         return 3
     except ProviderError as exc:
         print(str(exc))
         return 4
-    except ValueError:
+    except (InvalidTimezoneError, ShortlistReviewError):
         print(
             "Invalid timezone or shortlist choices; "
             "IDs must belong to today's Inbox without overlap."
         )
         return 3
+    except ValueError as exc:
+        print(f"Unexpected error ({type(exc).__name__}).")
+        return 1
     except (SQLAlchemyError, OSError, CommandError):
         print(
             "Local database or file operation failed. "
@@ -261,7 +644,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         return 5
     except KeyboardInterrupt:
-        print("Gmail diagnostic cancelled.")
+        print("Cancelled.")
         return 130
 
 

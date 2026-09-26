@@ -129,13 +129,19 @@ class AnalysisTable(Base):
         UniqueConstraint(
             "message_id",
             "input_hash",
+            "provider",
             "model",
             "prompt_version",
-            name="uq_analyses_cache_key",
+            "schema_version",
+            name="uq_analyses_cache_identity",
         ),
         CheckConstraint(
             "confidence >= 0 AND confidence <= 1",
             name="confidence_range",
+        ),
+        CheckConstraint(
+            "deadline_precision IN ('none','unresolved','date','datetime')",
+            name="deadline_precision_known",
         ),
         Index("ix_analyses_message_id", "message_id"),
     )
@@ -161,6 +167,14 @@ class AnalysisTable(Base):
     action_text: Mapped[str | None] = mapped_column(Text)
     deadline_text: Mapped[str | None] = mapped_column(Text)
     deadline_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    deadline_precision: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="none",
+        server_default="none",
+    )
+    deadline_date: Mapped[date | None] = mapped_column(Date)
+    deadline_timezone: Mapped[str | None] = mapped_column(String(128))
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False)
     analyzed_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
@@ -183,6 +197,41 @@ class DigestTable(Base):
     timezone_name: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     generated_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    # Brief coverage; every column is NULL for briefs saved before M4.
+    sync_complete: Mapped[bool | None] = mapped_column(Boolean)
+    shortlisted_count: Mapped[int | None] = mapped_column(Integer)
+    analyzed_count: Mapped[int | None] = mapped_column(Integer)
+    reused_count: Mapped[int | None] = mapped_column(Integer)
+    failed_count: Mapped[int | None] = mapped_column(Integer)
+    skipped_count: Mapped[int | None] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    ai_provider: Mapped[str | None] = mapped_column(String(64))
+    ai_model: Mapped[str | None] = mapped_column(String(128))
+
+
+class AIConsentTable(Base):
+    """Per-account consent to send minimized email content to one AI provider."""
+
+    __tablename__ = "ai_consents"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "provider",
+            "disclosure_version",
+            name="uq_ai_consents_scope",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    disclosure_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    granted_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    revoked_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class DigestItemTable(Base):

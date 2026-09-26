@@ -12,10 +12,9 @@ from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     ProviderPermissionError,
     ProviderRateLimitError,
-    ProviderResponseError,
 )
 from mailbrief.providers.gmail.cache import CredentialStore, RefreshCredential
-from mailbrief.providers.gmail.errors import GmailSetupError, permission_guidance
+from mailbrief.providers.gmail.errors import GmailSetupError, permission_guidance, response_error
 from mailbrief.providers.gmail.oauth import (
     GMAIL_SCOPE,
     TOKEN_URL,
@@ -175,9 +174,7 @@ class GmailAuth:
         try:
             response = await self._http.post(TOKEN_URL, data=fields, follow_redirects=False)
         except httpx.HTTPError:
-            raise ProviderResponseError(
-                "Unable to contact Google authentication; retry later."
-            ) from None
+            raise response_error("Unable to contact Google authentication; retry later.") from None
         if response.status_code in {400, 401}:
             try:
                 error = response.json()
@@ -205,9 +202,9 @@ class GmailAuth:
         try:
             tokens = TokenResponse.model_validate_json(response.content)
         except ValidationError:
-            raise ProviderResponseError("Google returned an invalid token response.") from None
+            raise response_error("Google returned an invalid token response.") from None
         if tokens.token_type.casefold() != "bearer":
-            raise ProviderResponseError("Google returned an unsupported token type.")
+            raise response_error("Google returned an unsupported token type.")
         if tokens.scope is not None and GMAIL_SCOPE not in tokens.scope.split():
             raise ProviderPermissionError("Gmail read-only access was not granted.")
         return tokens
@@ -220,9 +217,7 @@ class GmailAuth:
                 follow_redirects=False,
             )
         except httpx.HTTPError:
-            raise ProviderResponseError(
-                "Unable to verify the Gmail account; retry later."
-            ) from None
+            raise response_error("Unable to verify the Gmail account; retry later.") from None
         self._check_status(response, stage="Gmail profile check")
         try:
             email = response.json()["emailAddress"]
@@ -232,7 +227,7 @@ class GmailAuth:
                 email_address=email,
             )
         except (ValueError, KeyError, TypeError):
-            raise ProviderResponseError("Google returned an invalid Gmail identity.") from None
+            raise response_error("Google returned an invalid Gmail identity.") from None
 
     @staticmethod
     def _check_status(
@@ -256,6 +251,4 @@ class GmailAuth:
                 if response.status_code >= 500
                 else "Check OAuth and Gmail setup; report this status and stage if it persists."
             )
-            raise ProviderResponseError(
-                f"Google {stage} failed (HTTP {response.status_code}). {guidance}"
-            )
+            raise response_error(f"Google {stage} failed (HTTP {response.status_code}). {guidance}")

@@ -1,6 +1,21 @@
 """Safe, application-authored Gmail setup errors suitable for diagnostic output."""
 
+import logging
+
 from mailbrief.errors import ConfigurationError
+from mailbrief.ports.errors import ProviderResponseError
+
+logger = logging.getLogger(__name__)
+
+
+def response_error(message: str) -> ProviderResponseError:
+    """Log application-authored guidance before sync reduces the error to an audit code.
+
+    Callers must use only static messages and numeric HTTP statuses, never server text,
+    URLs, identifiers, credentials or exception strings.
+    """
+    logger.warning("Gmail diagnostic: %s", message)
+    return ProviderResponseError(message)
 
 
 class GmailSetupError(ConfigurationError):
