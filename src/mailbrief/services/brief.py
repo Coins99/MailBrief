@@ -191,6 +191,7 @@ class BriefService:
             ),
             reused_count=sum(item.outcome is AnalysisOutcome.REUSED for item in plan.messages),
             first_use=active is None,
+            body_character_limit=self._bodies.limit,
         )
         if not await self._consent_gate.confirm(preview):
             logger.info("AI consent declined for %d messages", preview.message_count)

@@ -19,12 +19,13 @@ class AnalysisOutcome(StrEnum):
     SKIPPED = "skipped"  # An empty or unavailable body; never sent.
 
 
+# Sent for each message before the body; TransmissionPreview.fields adds the body with the
+# limit actually applied.
 SENT_FIELDS: Final = (
     "subject",
     "sender name and address",
     "received time",
     "your time zone",
-    f"plain-text body, cut to at most {MAX_ANALYSIS_CHARS:,} characters",
 )
 
 
@@ -37,7 +38,13 @@ class TransmissionPreview(DomainModel):
     truncated_count: int = Field(ge=0)
     reused_count: int = Field(ge=0)
     first_use: bool
-    fields: tuple[str, ...] = SENT_FIELDS
+    body_character_limit: int = Field(ge=1, le=MAX_ANALYSIS_CHARS)  # The limit applied.
+
+    @property
+    def fields(self) -> tuple[str, ...]:
+        """What is sent for each message, stating the body limit actually applied."""
+        body = f"plain-text body, cut to at most {self.body_character_limit:,} characters"
+        return (*SENT_FIELDS, body)
 
     @model_validator(mode="after")
     def validate_truncated_count(self) -> Self:

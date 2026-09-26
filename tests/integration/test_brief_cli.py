@@ -154,6 +154,8 @@ def test_first_brief_asks_then_saves_and_prints_counts_only(
 
     output = capsys.readouterr().out
     assert "MailBrief will send 1 message to Groq (test-model)" in output
+    assert "plain-text body, cut to at most 4,000 characters" in output  # The default limit.
+    assert "8,000" not in output
     assert "Brief: saved (complete); items: 1" in output
     assert (
         "Coverage: shortlisted 1, analyzed 1, reused 0, failed 0, skipped 0; sync complete: yes"

@@ -45,6 +45,7 @@ def preview(**overrides: object) -> TransmissionPreview:
         "truncated_count": 1,
         "reused_count": 2,
         "first_use": True,
+        "body_character_limit": 4_000,
     }
     values.update(overrides)
     return TransmissionPreview.model_validate(values)
@@ -59,15 +60,31 @@ def test_outcome_values_are_lowercase() -> None:
     ]
 
 
-def test_preview_lists_the_sent_fields_by_default() -> None:
-    assert preview().fields == SENT_FIELDS
-    assert "8,000 characters" in SENT_FIELDS[-1]
+def test_preview_fields_state_the_applied_body_limit() -> None:
+    assert preview().fields == (
+        *SENT_FIELDS,
+        "plain-text body, cut to at most 4,000 characters",
+    )
 
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"message_count": 0}, {"truncated_count": 4}, {"reused_count": -1}, {"provider_name": ""}],
-    ids=["nothing-to-send", "too-many-cut", "negative-reuse", "no-provider"],
+    [
+        {"message_count": 0},
+        {"truncated_count": 4},
+        {"reused_count": -1},
+        {"provider_name": ""},
+        {"body_character_limit": 0},
+        {"body_character_limit": 8_001},
+    ],
+    ids=[
+        "nothing-to-send",
+        "too-many-cut",
+        "negative-reuse",
+        "no-provider",
+        "no-body",
+        "body-over-limit",
+    ],
 )
 def test_invalid_previews_are_rejected(overrides: dict[str, object]) -> None:
     with pytest.raises(ValidationError):

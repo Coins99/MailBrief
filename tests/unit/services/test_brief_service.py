@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.analysis import AIUsage, AnalysisRequest, AnalysisResponse
-from mailbrief.domain.bodies import BodySource, MessageBody
+from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS, BodySource, MessageBody
 from mailbrief.domain.briefs import SENT_FIELDS, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DigestStatus, SyncProgress, SyncStage
 from mailbrief.domain.messages import NormalizedMessage
@@ -111,6 +111,7 @@ def build(
     texts: dict[str, str] | None = None,
     email: FakeEmailProvider | None = None,
     batch_size: int = 5,
+    body_limit: int = MAX_ANALYSIS_CHARS,
 ) -> BriefService:
     mailbox = list(inbox() if messages is None else messages)
     email = email or FakeEmailProvider(pages=[mailbox])
@@ -124,7 +125,9 @@ def build(
     return BriefService(
         session=session,
         application=application,
-        bodies=BodyService(FakeBodyReader(texts_for(mailbox) if texts is None else texts)),
+        bodies=BodyService(
+            FakeBodyReader(texts_for(mailbox) if texts is None else texts), limit=body_limit
+        ),
         analysis=AnalysisService(session, provider, batch_size=batch_size),
         digests=DigestService(session),
         consent_gate=gate,
@@ -406,6 +409,22 @@ async def test_cancel_during_analysis_keeps_results_but_writes_no_brief(
     assert len(stored) == 1
 
 
+async def test_the_preview_states_the_body_limit_the_body_service_applies(
+    session: AsyncSession,
+) -> None:
+    gate = RecordingGate(answer=True)
+
+    await build(session, FakeAIProvider([answer_all()]), gate, body_limit=4_000).generate(
+        tz_key=ZONE
+    )
+
+    (preview,) = gate.previews
+    assert preview.body_character_limit == 4_000
+    text = "\n".join(disclosure_lines(preview))
+    assert "4,000" in text
+    assert "8,000" not in text
+
+
 async def test_nothing_to_send_never_calls_the_gate(session: AsyncSession) -> None:
     gate = RecordingGate(answer=False)
 
@@ -442,6 +461,7 @@ def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
         truncated_count=1,
         reused_count=2,
         first_use=True,
+        body_character_limit=4_000,
     )
 
     text = "\n".join(disclosure_lines(preview))
@@ -449,6 +469,8 @@ def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
     assert "send 3 messages to Groq (model-1)" in text
     assert "1 message is cut" in text
     assert all(sent_field in text for sent_field in SENT_FIELDS)
+    assert "plain-text body, cut to at most 4,000 characters" in text
+    assert "8,000" not in text
     assert "attachments, recipients, message IDs, links, account IDs or credentials" in text
     assert "Zero Data Retention" in text
     assert "cannot verify" in text
@@ -464,6 +486,7 @@ def test_disclosure_lines_for_a_returning_user_without_truncation() -> None:
         truncated_count=0,
         reused_count=0,
         first_use=False,
+        body_character_limit=8_000,
     )
 
     text = "\n".join(disclosure_lines(preview))
