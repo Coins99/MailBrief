@@ -69,3 +69,11 @@ class ProviderResponseError(ProviderError):
 
 class MessageUnavailableError(ProviderResponseError):
     """The message no longer exists or can no longer be read, for example after deletion."""
+
+
+class ProviderRequestRejectedError(ProviderResponseError):
+    """The provider refused this particular request; other requests may still succeed."""
+
+
+class ProviderUnavailableError(ProviderResponseError):
+    """The provider failed, or answered unreadably, after retries."""

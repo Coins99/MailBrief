@@ -32,7 +32,10 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
+    ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from mailbrief.services.deadlines import resolve_deadline
 from mailbrief.storage.repositories import AnalysisRepository, MessageRepository
@@ -44,6 +47,7 @@ MAX_BATCH_SIZE = 10
 _KEY_ATTEMPTS = 64
 _QUOTES = "\"'‘’“”"
 _ELLIPSES = ("...", "…")
+REQUEST_REJECTED = "AI_REQUEST_REJECTED"
 
 
 def _random_key() -> str:
@@ -141,7 +145,11 @@ class AnalysisPlan:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisRun:
-    """The executed plan with usage, call count, cancellation and the first error code."""
+    """The executed plan with usage, call count, cancellation and an error code.
+
+    ``error_code`` is the code of the error that stopped the run; otherwise
+    AI_REQUEST_REJECTED when a rejected request left a message out; otherwise None.
+    """
 
     messages: tuple[PlannedMessage, ...]
     usage: AIUsage | None
@@ -153,6 +161,7 @@ class AnalysisRun:
 @dataclass(slots=True)
 class _Tally:
     calls: int = 0
+    rejected: int = 0  # Messages left out because the provider rejected their request.
     reported: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -193,7 +202,13 @@ def _error_code(exc: ProviderError) -> str:
         return "AI_RATE_LIMITED"
     if isinstance(exc, ProviderTimeoutError):
         return "AI_TIMEOUT"
-    return "AI_PROVIDER_ERROR"
+    if isinstance(exc, ProviderUnavailableError):
+        return "AI_SERVER_ERROR"
+    if isinstance(exc, ProviderRequestRejectedError):
+        return REQUEST_REJECTED
+    if isinstance(exc, ProviderResponseError):
+        return "AI_PROVIDER_ERROR"
+    return "AI_NETWORK_ERROR"
 
 
 def _request(item: PlannedMessage) -> AnalysisRequest:
@@ -330,8 +345,10 @@ class AnalysisService:
         """Send unresolved messages in batches, cache valid results and retry misses alone.
 
         Cancellation is checked before every provider call and leaves unsent messages
-        without an outcome. An expected provider error stops all further calls and fails
-        every message still without an outcome; other exceptions propagate.
+        without an outcome. A rejected request is retried one message at a time, and a
+        rejected single message fails alone. Any other expected provider error stops all
+        further calls and fails every message still without an outcome; other exceptions
+        propagate.
         """
         pending = plan.to_send
         tally = _Tally()
@@ -351,6 +368,8 @@ class AnalysisService:
         except _ProviderStopped as stop:
             error_code = stop.error_code
             _fail(item for item in plan.messages if item.outcome is None)
+        if error_code is None and tally.rejected:
+            error_code = REQUEST_REJECTED
         analyzed = sum(item.outcome is AnalysisOutcome.ANALYZED for item in plan.messages)
         failed = sum(item.outcome is AnalysisOutcome.FAILED for item in plan.messages)
         logger.info(
@@ -386,10 +405,15 @@ class AnalysisService:
         except ProviderError as exc:
             code = _error_code(exc)
             logger.warning("AI provider call failed: %s", code)
-            raise _ProviderStopped(code) from None
-        tally.add(response.usage)
-        retry = await self._persist(batch, response)
-        await self._session.commit()
+            if code != REQUEST_REJECTED:
+                raise _ProviderStopped(code) from None
+            if len(batch) == 1:
+                tally.rejected += 1  # The caller fails a single message it cannot retry.
+            retry = list(batch)
+        else:
+            tally.add(response.usage)
+            retry = await self._persist(batch, response)
+            await self._session.commit()
         emit_progress(
             progress, SyncProgress(stage=SyncStage.ANALYZING, ai_batches_completed=tally.calls)
         )

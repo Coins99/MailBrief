@@ -32,8 +32,10 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,16 @@ INSTRUCTIONS = (
 
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _ERROR_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+# Statuses that reject this particular request; other requests may still succeed.
+_REJECTED_STATUSES = frozenset({400, 413, 422})
+# Failures parsing an envelope whose shape is not a Responses object.
+_PARSE_FAILURES = (
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    openai.APIResponseValidationError,
+)
 
 
 class AnalysisWireResult(BaseModel):
@@ -165,7 +177,7 @@ def _to_response(
         return AnalysisResponse(problem=AnalysisProblem.REFUSED, usage=usage)
     try:
         batch = parse().output_parsed
-    except (ValueError, openai.APIResponseValidationError):
+    except _PARSE_FAILURES:
         batch = None
     if batch is None:
         return AnalysisResponse(problem=AnalysisProblem.INVALID_OUTPUT, usage=usage)
@@ -194,6 +206,8 @@ def _failure(
         message = RATE_LIMIT_MESSAGE
     elif issubclass(kind, ProviderTimeoutError):
         message = TIMEOUT_MESSAGE
+    elif issubclass(kind, ProviderUnavailableError):
+        message = f"OpenAI is unavailable (HTTP {status}); retry later."
     elif issubclass(kind, ProviderResponseError):
         message = f"OpenAI rejected the request (HTTP {status})."
     else:
@@ -212,6 +226,8 @@ def _status_outcome(
     if verdict.kind is not VerdictKind.RETRY:
         failure = verdict.exception
         kind = type(failure) if isinstance(failure, ProviderError) else ProviderResponseError
+        if status in _REJECTED_STATUSES:
+            kind = ProviderRequestRejectedError
         return _failure(kind, status, request_id, code), None
     delay = verdict.retry_delay
     if delay is None:
@@ -225,7 +241,7 @@ def _status_outcome(
             provider_error_code=code,
         )
     else:
-        error = _failure(ProviderResponseError, status, request_id, code)
+        error = _failure(ProviderUnavailableError, status, request_id, code)
     if attempt >= MAX_RETRIES or delay > MAX_RETRY_DELAY_SECONDS:
         return error, None
     return error, delay
@@ -296,8 +312,8 @@ class OpenAIProvider:
                     body = raw.http_response.json()
                 except ValueError:
                     body = None
-                if not isinstance(body, dict):
-                    raise ProviderResponseError(UNREADABLE_MESSAGE, client_request_id=request_id)
+                if not isinstance(body, dict) or not isinstance(body.get("output"), list):
+                    raise ProviderUnavailableError(UNREADABLE_MESSAGE, client_request_id=request_id)
                 return _to_response(body, raw.parse)
             if delay is None:
                 logger.warning("OpenAI call failed after %d attempts: %s", attempt + 1, reason)

@@ -51,6 +51,12 @@ _AI_ERROR_MESSAGES = {
     "AI_PERMISSION_DENIED": "OpenAI denied access (permission, region or quota).",
     "AI_RATE_LIMITED": "OpenAI rate limit reached; retry later.",
     "AI_TIMEOUT": "OpenAI did not respond in time.",
+    "AI_SERVER_ERROR": "OpenAI had a server problem or sent an unreadable reply; retry later.",
+    "AI_REQUEST_REJECTED": (
+        "OpenAI rejected some messages, so they were left out. If every message is rejected, "
+        "check that MAILBRIEF_OPENAI_MODEL supports Structured Outputs."
+    ),
+    "AI_NETWORK_ERROR": "Could not reach OpenAI; check your connection and retry.",
     "AI_PROVIDER_ERROR": "OpenAI request failed; check MAILBRIEF_OPENAI_MODEL.",
     "ANALYSIS_FAILED": "No message could be analyzed.",
 }

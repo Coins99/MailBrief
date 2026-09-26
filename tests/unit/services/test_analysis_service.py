@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import update
@@ -33,8 +34,10 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from mailbrief.providers.openai.credentials import ENTRY, SERVICE, OpenAIKeyStore
 from mailbrief.providers.openai.factory import openai_provider
@@ -49,7 +52,14 @@ from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
 from mailbrief.storage.tables import AnalysisTable
 from tests.factories import make_message
-from tests.unit.providers.openai.openai_fixtures import RESPONSES_URL, TEST_KEY, MemoryVault
+from tests.unit.providers.openai.openai_fixtures import (
+    RESPONSES_URL,
+    TEST_KEY,
+    MemoryVault,
+    answer_every_message,
+    error_body,
+    sent_messages,
+)
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all, good_candidate
 
 ZONE = "America/Toronto"
@@ -306,6 +316,8 @@ async def test_a_provider_error_keeps_committed_results_and_fails_the_rest(tmp_p
         (ProviderRateLimitError("slow down"), "AI_RATE_LIMITED"),
         (ProviderTimeoutError("too slow"), "AI_TIMEOUT"),
         (ProviderResponseError("odd reply"), "AI_PROVIDER_ERROR"),
+        (ProviderUnavailableError("down"), "AI_SERVER_ERROR"),
+        (ProviderError("unreachable"), "AI_NETWORK_ERROR"),
     ],
 )
 async def test_provider_errors_stop_the_run_with_a_code(
@@ -328,14 +340,79 @@ async def test_an_unreadable_openai_reply_fails_every_sent_message(
     respx_mock.post(RESPONSES_URL).respond(
         200, text="<html>maintenance</html>", headers={"content-type": "text/html"}
     )
-    key_store = OpenAIKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
 
-    async with openai_provider(Settings(openai_model="test-model"), key_store=key_store) as ai:
+    async with openai_provider(
+        Settings(openai_model="test-model"), key_store=openai_key_store()
+    ) as ai:
         run = await analyze(session, ai, shortlist, account_id=account_id)
 
-    assert run.error_code == "AI_PROVIDER_ERROR"
+    assert run.error_code == "AI_SERVER_ERROR"
     assert outcomes(run) == [FAILED, FAILED]
     assert run.calls == 1
+
+
+def openai_key_store() -> OpenAIKeyStore:
+    return OpenAIKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
+
+
+@pytest.mark.parametrize(
+    ("rejected_single", "expected", "error_code"),
+    [
+        (None, [ANALYZED, ANALYZED, ANALYZED], None),
+        (1, [ANALYZED, FAILED, ANALYZED], "AI_REQUEST_REJECTED"),
+    ],
+    ids=["all-singles-pass", "one-single-rejected"],
+)
+async def test_a_rejected_batch_is_retried_one_message_at_a_time(
+    session: AsyncSession,
+    respx_mock: respx.MockRouter,
+    rejected_single: int | None,
+    expected: list[AnalysisOutcome],
+    error_code: str | None,
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+
+    def reject_batches(request: httpx.Request) -> httpx.Response:
+        sent = sent_messages(request)
+        rejected = len(sent) > 1 or (
+            rejected_single is not None and f"Reference {rejected_single}." in sent[0]["body"]
+        )
+        if rejected:
+            return httpx.Response(400, json=error_body("invalid_prompt"))
+        return answer_every_message(request)
+
+    route = respx_mock.post(RESPONSES_URL).mock(side_effect=reject_batches)
+
+    async with openai_provider(
+        Settings(openai_model="test-model"), key_store=openai_key_store()
+    ) as ai:
+        run = await analyze(session, ai, shortlist, account_id=account_id)
+
+    assert outcomes(run) == expected
+    assert run.error_code == error_code
+    assert run.calls == route.call_count == 4
+
+
+async def test_a_rejected_single_message_fails_alone(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 2)
+    provider = FakeAIProvider([ProviderRequestRejectedError("no"), answer_all()])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [FAILED, ANALYZED]
+    assert run.error_code == "AI_REQUEST_REJECTED"
+    assert provider.calls == run.calls == 2
+
+
+async def test_a_stopping_error_wins_over_an_earlier_rejection(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 3)
+    provider = FakeAIProvider([ProviderRequestRejectedError("no"), ProviderTimeoutError("slow")])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [FAILED, FAILED, FAILED]
+    assert run.error_code == "AI_TIMEOUT"
+    assert provider.calls == 2
 
 
 async def test_unexpected_errors_propagate(session: AsyncSession) -> None:

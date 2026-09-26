@@ -19,8 +19,10 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from mailbrief.providers.openai.credentials import ENTRY, SERVICE, OpenAIKeyStore
 from mailbrief.providers.openai.factory import openai_provider
@@ -185,6 +187,26 @@ async def test_problem_responses_keep_their_usage(
     assert response.usage == AIUsage(input_tokens=1_200, output_tokens=300)
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        [{"type": "message", "role": "assistant", "content": None}],
+        [{"type": "message", "role": "assistant", "content": ["just text"]}],
+    ],
+    ids=["content-not-a-list", "content-item-not-an-object"],
+)
+async def test_a_malformed_output_list_is_invalid_output(
+    respx_mock: respx.MockRouter, provider: OpenAIProvider, output: list[dict[str, Any]]
+) -> None:
+    payload = {**response_body([]), "output": output}
+    respx_mock.post(RESPONSES_URL).respond(json=payload)
+
+    response = await provider.analyze([make_request()])
+
+    assert response.problem is AnalysisProblem.INVALID_OUTPUT
+    assert response.usage == AIUsage(input_tokens=1_200, output_tokens=300)
+
+
 async def test_a_response_without_usage_reports_none(
     respx_mock: respx.MockRouter, provider: OpenAIProvider
 ) -> None:
@@ -235,7 +257,10 @@ async def test_a_long_rate_limit_fails_at_once(
         (429, "insufficient_quota", ProviderPermissionError, "OpenAI denied access"),
         (401, "invalid_api_key", AIAuthenticationError, AUTH_MESSAGE),
         (403, "unsupported_country_region_territory", ProviderPermissionError, "denied access"),
-        (400, "invalid_json_schema", ProviderResponseError, "rejected the request (HTTP 400)"),
+        (400, "invalid_prompt", ProviderRequestRejectedError, "rejected the request (HTTP 400)"),
+        (413, "request_too_large", ProviderRequestRejectedError, "rejected the request (HTTP 413)"),
+        (422, "unprocessable", ProviderRequestRejectedError, "rejected the request (HTTP 422)"),
+        (404, "model_not_found", ProviderResponseError, "rejected the request (HTTP 404)"),
     ],
 )
 async def test_terminal_errors_carry_static_messages_and_safe_codes(
@@ -251,6 +276,7 @@ async def test_terminal_errors_carry_static_messages_and_safe_codes(
     with pytest.raises(error_type, match=re.escape(message)) as caught:
         await provider.analyze([make_request()])
 
+    assert type(caught.value) is error_type
     assert route.call_count == 1
     assert caught.value.provider_error_code == code
     assert caught.value.client_request_id is not None
@@ -261,10 +287,11 @@ async def test_terminal_errors_carry_static_messages_and_safe_codes(
     [
         httpx.Response(200, text="<html>maintenance</html>", headers={"content-type": "text/html"}),
         httpx.Response(200, json=["not", "an", "object"]),
+        httpx.Response(200, json={"error": {"message": "Something went wrong."}}),
     ],
-    ids=["html", "json-array"],
+    ids=["html", "json-array", "no-output-list"],
 )
-async def test_an_unreadable_reply_is_a_provider_error_without_retry(
+async def test_an_unreadable_reply_is_unavailable_without_retry(
     respx_mock: respx.MockRouter,
     provider: OpenAIProvider,
     sleeps: RecordedSleeps,
@@ -272,10 +299,9 @@ async def test_an_unreadable_reply_is_a_provider_error_without_retry(
 ) -> None:
     route = respx_mock.post(RESPONSES_URL).mock(return_value=reply)
 
-    with pytest.raises(ProviderResponseError) as caught:
+    with pytest.raises(ProviderUnavailableError) as caught:
         await provider.analyze([make_request()])
 
-    assert type(caught.value) is ProviderResponseError
     assert str(caught.value) == UNREADABLE_MESSAGE == "OpenAI returned an unreadable response."
     assert caught.value.client_request_id is not None
     assert route.call_count == 1
@@ -293,14 +319,16 @@ async def test_an_unsafe_error_code_is_dropped(
     assert caught.value.provider_error_code is None
 
 
-async def test_server_errors_are_retried_three_times(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider, sleeps: RecordedSleeps
+@pytest.mark.parametrize("status", [500, 503, 408])
+async def test_server_errors_are_retried_three_times_then_unavailable(
+    respx_mock: respx.MockRouter, provider: OpenAIProvider, sleeps: RecordedSleeps, status: int
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).respond(500, json=error_body("server_error"))
+    route = respx_mock.post(RESPONSES_URL).respond(status, json=error_body("server_error"))
 
-    with pytest.raises(ProviderResponseError, match=re.escape("(HTTP 500)")):
+    with pytest.raises(ProviderUnavailableError) as caught:
         await provider.analyze([make_request()])
 
+    assert str(caught.value) == f"OpenAI is unavailable (HTTP {status}); retry later."
     assert route.call_count == 4
     assert sleeps.delays == [1.0, 2.0, 4.0]
 
