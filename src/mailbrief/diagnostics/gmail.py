@@ -297,6 +297,20 @@ def _outcome(result: BriefRunResult) -> str:
     return "Cancelled. No brief saved."
 
 
+def _ai_line(result: BriefRunResult, *, model: str) -> str:
+    """Say nothing was sent only when no provider request was made, even a failed one."""
+    if result.ai_calls == 0:
+        return "AI: nothing sent this run"
+    coverage = result.coverage
+    tokens_in = coverage.input_tokens if coverage is not None else None
+    tokens_out = coverage.output_tokens if coverage is not None else None
+    used_model = (coverage.ai_model if coverage is not None else None) or model
+    return (
+        f"AI: OpenAI / {used_model}; requests: {result.ai_calls}; "
+        f"tokens in/out: {_count(tokens_in)} / {_count(tokens_out)}"
+    )
+
+
 def _print_result(result: BriefRunResult, *, model: str) -> None:
     """Counts only: never subjects, senders or text."""
     digest = result.digest
@@ -309,13 +323,8 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
             f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}; "
             f"sync complete: {'yes' if coverage.sync_complete else 'no'}"
         )
-        if coverage.analyzed == 0 and coverage.input_tokens is None:
-            print("AI: nothing sent this run")
-        else:
-            print(
-                f"AI: {OPENAI} / {coverage.ai_model or model}; tokens in/out: "
-                f"{_count(coverage.input_tokens)} / {_count(coverage.output_tokens)}"
-            )
+    if coverage is not None or result.ai_calls > 0:
+        print(_ai_line(result, model=model))
     print(_outcome(result))
     # A partial brief still explains why the new messages failed (e.g. a wrong API key).
     partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")

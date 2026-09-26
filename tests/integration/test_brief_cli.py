@@ -130,7 +130,7 @@ def test_first_brief_asks_then_saves_and_prints_counts_only(
         "Coverage: shortlisted 1, analyzed 1, reused 0, failed 0, skipped 0; sync complete: yes"
         in output
     )
-    assert "AI: openai / test-model; tokens in/out: 1200 / 300" in output
+    assert "AI: OpenAI / test-model; requests: 1; tokens in/out: 1200 / 300" in output
     assert "Saved. Bodies were not stored." in output
     for private in ("Approval needed", "sender@example.com", EVIDENCE, MARKER):
         assert private not in output
@@ -234,6 +234,8 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
     output = capsys.readouterr().out
     assert route.call_count == 1
     assert "Brief: analysis_failed; items: 0" in output
+    assert "AI: OpenAI / test-model; requests: 1; tokens in/out: ? / ?" in output
+    assert "nothing sent" not in output
     assert (
         "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set "
         "Your last saved brief for today is unchanged."
@@ -261,6 +263,8 @@ def test_a_partial_brief_names_the_provider_error(
     assert route.call_count == 2
     assert "Brief: saved (partial); items: 1" in lines
     assert any("analyzed 0, reused 1, failed 1" in line for line in lines)
+    assert "AI: OpenAI / test-model; requests: 1; tokens in/out: ? / ?" in lines
+    assert not any("nothing sent" in line for line in lines)
     outcome = lines.index("Saved. Bodies were not stored.")
     assert lines[outcome + 1] == (
         "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
