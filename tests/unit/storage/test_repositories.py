@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
 from mailbrief.domain.digests import DigestCoverage, DigestSection, DigestStatus, SyncStatus
@@ -25,7 +25,7 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     SyncRunRepository,
 )
-from mailbrief.storage.tables import MessageTable
+from mailbrief.storage.tables import AnalysisTable, MessageTable
 from tests.factories import make_analysis, make_message
 
 
@@ -587,6 +587,68 @@ async def test_analysis_cache_identity_separates_provider_and_schema(database: D
     assert updated.deadline_precision is DeadlinePrecision.UNRESOLVED
     assert updated.deadline_date is None
     assert updated.deadline_timezone is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_deadline_rows_still_show_their_deadline(database: Database) -> None:
+    account_id, (first_id, second_id) = await _account_and_messages(database, "msg-1", "msg-2")
+    due = datetime(2026, 9, 4, 21, 0, tzinfo=UTC)
+
+    async with database.transaction() as session:
+        analyses = AnalysisRepository(session)
+        rows = [
+            await analyses.upsert_analysis(
+                message_id=message_id,
+                input_hash=f"hash-{message_id}",
+                provider="openai",
+                model="model-1",
+                prompt_version="prompt-1",
+                schema_version="1",
+                analysis=make_analysis(),
+            )
+            for message_id in (first_id, second_id)
+        ]
+        # Shape both rows as migration 0004 left rows saved before it: precision "none".
+        legacy = {"deadline_precision": "none", "deadline_date": None, "deadline_timezone": None}
+        await session.execute(
+            update(AnalysisTable).where(AnalysisTable.id == rows[0].id).values(**legacy)
+        )
+        await session.execute(
+            update(AnalysisTable)
+            .where(AnalysisTable.id == rows[1].id)
+            .values(**legacy, deadline_text=None)
+        )
+        digest = await DigestRepository(session).save_digest(
+            account_id=account_id,
+            local_date=date(2026, 9, 4),
+            timezone_name="America/Toronto",
+            status=DigestStatus.COMPLETE,
+            items=[
+                (first_id, rows[0].id, 0, DigestSection.ACTIONS),
+                (second_id, rows[1].id, 1, DigestSection.ACTIONS),
+            ],
+        )
+        digest_id = digest.id
+
+    async with database.session() as session:
+        repo = DigestRepository(session)
+        row = await repo.get_by_id(digest_id)
+        assert row is not None
+        items = await repo.get_digest_items(digest_id)
+        restored = DigestRepository.to_domain(row, items, "ms-1")
+        stored = [analysis for _, _, analysis in items if analysis is not None]
+        loaded = [AnalysisRepository.to_domain(item, message_key="local-1") for item in stored]
+
+    with_text, without_text = restored.items
+    assert with_text.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert with_text.deadline_text == "Friday 5 PM"
+    assert without_text.deadline_precision is DeadlinePrecision.DATETIME
+    assert without_text.deadline_at_utc == due
+    phrase_only, instant_only = loaded
+    assert phrase_only.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert (phrase_only.deadline_text, phrase_only.deadline_at_utc) == ("Friday 5 PM", None)
+    assert instant_only.deadline_precision is DeadlinePrecision.NONE
+    assert (instant_only.deadline_text, instant_only.deadline_at_utc) == (None, None)
 
 
 @pytest.mark.asyncio

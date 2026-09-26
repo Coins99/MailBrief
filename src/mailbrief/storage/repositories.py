@@ -479,18 +479,34 @@ class AnalysisRepository:
 
     @staticmethod
     def to_domain(row: AnalysisTable, message_key: str) -> MessageAnalysis:
-        """Map an AnalysisTable ORM entity to a MessageAnalysis domain model."""
+        """Map an AnalysisTable ORM entity to a MessageAnalysis domain model.
+
+        Rows saved before migration 0004 read precision "none" even when they kept a
+        deadline. A kept phrase becomes unresolved, and an instant without its phrase is
+        dropped, so these rows still validate.
+        """
+        precision = DeadlinePrecision(row.deadline_precision)
+        deadline_text = row.deadline_text or None
+        deadline_date, deadline_at_utc, deadline_timezone = (
+            row.deadline_date,
+            row.deadline_at_utc,
+            row.deadline_timezone,
+        )
+        if precision is DeadlinePrecision.NONE:
+            if deadline_text is not None:
+                precision = DeadlinePrecision.UNRESOLVED
+            deadline_date = deadline_at_utc = deadline_timezone = None
         return MessageAnalysis(
             message_key=message_key,
             category=AnalysisCategory(row.category),
             summary=row.summary,
             action_required=row.action_required,
             action_text=row.action_text,
-            deadline_text=row.deadline_text,
-            deadline_precision=DeadlinePrecision(row.deadline_precision),
-            deadline_date=row.deadline_date,
-            deadline_at_utc=row.deadline_at_utc,
-            deadline_timezone=row.deadline_timezone,
+            deadline_text=deadline_text,
+            deadline_precision=precision,
+            deadline_date=deadline_date,
+            deadline_at_utc=deadline_at_utc,
+            deadline_timezone=deadline_timezone,
             confidence=row.confidence,
             evidence=row.evidence,
         )
@@ -535,6 +551,20 @@ def _fallback_summary(preview: str, subject: str) -> str:
             # Previews (up to 255 characters in Outlook) can exceed the summary limit.
             return truncate_at_boundary(text, SUMMARY_MAX_CHARS)[0]
     return _NO_SUMMARY
+
+
+def _displayed_precision(analysis: AnalysisTable) -> DeadlinePrecision:
+    """The precision to show; rows saved before migration 0004 read "none" even with a deadline.
+
+    A legacy phrase shows as unresolved, and a legacy instant without a phrase as exact.
+    """
+    precision = DeadlinePrecision(analysis.deadline_precision)
+    if precision is DeadlinePrecision.NONE:
+        if analysis.deadline_text:
+            return DeadlinePrecision.UNRESOLVED
+        if analysis.deadline_at_utc is not None:
+            return DeadlinePrecision.DATETIME
+    return precision
 
 
 def _coverage_from_row(digest: DigestTable) -> DigestCoverage | None:
@@ -681,7 +711,7 @@ class DigestRepository:
                     action_text=analysis_table.action_text if analysis_table else None,
                     deadline_text=analysis_table.deadline_text if analysis_table else None,
                     deadline_precision=(
-                        DeadlinePrecision(analysis_table.deadline_precision)
+                        _displayed_precision(analysis_table)
                         if analysis_table
                         else DeadlinePrecision.NONE
                     ),

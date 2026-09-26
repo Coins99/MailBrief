@@ -569,7 +569,8 @@ async def test_plan_rejects_bodies_that_do_not_match_the_shortlist(
 async def test_a_cached_row_that_no_longer_validates_is_a_miss(session: AsyncSession) -> None:
     account_id, shortlist = await seed(session, 1)
     await analyze(session, FakeAIProvider([answer_all()]), shortlist, account_id=account_id)
-    await session.execute(update(AnalysisTable).values(deadline_text="Friday"))
+    # Over the summary limit; a legacy deadline shape would still load (as unresolved).
+    await session.execute(update(AnalysisTable).values(summary="x" * 241))
     await session.commit()
     provider = FakeAIProvider([answer_all()])
 
