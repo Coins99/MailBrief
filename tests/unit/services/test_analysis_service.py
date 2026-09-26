@@ -30,6 +30,7 @@ from mailbrief.domain.messages import AccountIdentity, EmailContact, ProviderKin
 from mailbrief.ports.ai_provider import AIProvider
 from mailbrief.ports.errors import (
     AIAuthenticationError,
+    AICredentialsMissingError,
     AuthenticationRequiredError,
     ProviderError,
     ProviderPermissionError,
@@ -318,6 +319,7 @@ async def test_a_provider_error_keeps_committed_results_and_fails_the_rest(tmp_p
         (ProviderResponseError("odd reply"), "AI_PROVIDER_ERROR"),
         (ProviderUnavailableError("down"), "AI_SERVER_ERROR"),
         (ProviderError("unreachable"), "AI_NETWORK_ERROR"),
+        (AICredentialsMissingError("no key"), "AI_KEY_MISSING"),
     ],
 )
 async def test_provider_errors_stop_the_run_with_a_code(

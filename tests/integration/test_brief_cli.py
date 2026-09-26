@@ -66,6 +66,10 @@ class Mailbox:
             json=metadata(identifier, received=received)
         )
 
+    def empty(self) -> None:
+        """Leave today's Inbox with no messages."""
+        self._identifiers.clear()
+
     def break_metadata(self, identifier: str) -> None:
         """Serve another message's metadata, which the sync counts as a failed item."""
         self._metadata[identifier].respond(json=metadata("mismatched"))
@@ -457,22 +461,92 @@ def test_an_invalid_key_is_rejected_without_echo(
     assert backend.entries == {}
 
 
-def test_a_missing_key_or_model_is_a_setup_error(
+def test_a_missing_model_is_a_setup_error(
     tmp_path: Path,
     mailbox: Mailbox,
-    vault: MemoryVault,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    vault.entries.clear()
-    assert run_brief(tmp_path / "brief.sqlite3") == 3
-    assert "No Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set" in (
-        capsys.readouterr().out
-    )
     monkeypatch.delenv("MAILBRIEF_GROQ_MODEL")
 
     assert run_brief(tmp_path / "brief.sqlite3") == 3
     assert "Set MAILBRIEF_GROQ_MODEL" in capsys.readouterr().out
+
+
+class BrokenVault(MemoryVault):
+    """A vault whose reads fail, like a locked or unavailable OS credential store."""
+
+    def get_password(self, service: str, username: str) -> str | None:
+        raise OSError("vault unavailable")
+
+
+def test_a_cached_rerun_needs_no_key(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    vault: MemoryVault,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = groq_answers(respx_mock)
+    prompts = replies(monkeypatch, "yes")
+    path = tmp_path / "brief.sqlite3"
+    assert run_brief(path) == 0
+    capsys.readouterr()
+    vault.entries.clear()
+
+    assert run_brief(path) == 0
+
+    output = capsys.readouterr().out
+    assert route.call_count == 1
+    assert len(prompts) == 1
+    assert "Brief: saved (complete); items: 1" in output
+    assert "AI: nothing sent this run" in output
+
+
+def test_an_empty_inbox_needs_no_key(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    vault: MemoryVault,
+    respx_mock: respx.MockRouter,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = groq_answers(respx_mock)
+    vault.entries.clear()
+    mailbox.empty()
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 0
+
+    assert route.call_count == 0
+    assert "Brief: saved (empty); items: 0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("broken", [False, True], ids=["missing", "vault-error"])
+def test_without_a_usable_key_nothing_is_asked_or_sent(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    vault: MemoryVault,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    broken: bool,
+) -> None:
+    route = groq_answers(respx_mock)
+    prompts = replies(monkeypatch)
+    vault.entries.clear()
+    if broken:
+        broken_vault = BrokenVault()
+        monkeypatch.setattr("mailbrief.providers.groq.credentials.os_vault", lambda: broken_vault)
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 4
+
+    output = capsys.readouterr().out
+    assert route.call_count == 0
+    assert prompts == []
+    assert "MailBrief will send" not in output
+    assert "Brief: analysis_failed; items: 0" in output
+    assert "AI: nothing sent this run" in output
+    assert "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set" in output
 
 
 def test_consent_status_on_an_empty_database(

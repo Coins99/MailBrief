@@ -14,7 +14,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 from mailbrief.domain.analysis import (
     MAX_ANALYSIS_BATCH,
@@ -24,9 +24,11 @@ from mailbrief.domain.analysis import (
     AnalysisRequest,
     AnalysisResponse,
 )
+from mailbrief.errors import ConfigurationError
 from mailbrief.infra.http_retry import VerdictKind, classify_groq_response, parse_retry_delay
 from mailbrief.ports.errors import (
     AIAuthenticationError,
+    AICredentialsMissingError,
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
@@ -52,6 +54,8 @@ RATE_LIMIT_MESSAGE = "Groq rate limit reached; retry later."
 TIMEOUT_MESSAGE = "Groq did not respond in time."
 CONNECTION_MESSAGE = "Could not reach Groq."
 UNREADABLE_MESSAGE = "Groq returned an unreadable response."
+KEY_MISSING_MESSAGE = "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set"
+_VAULT_WARNING = "The Groq API key could not be read from the OS credential store."
 
 INSTRUCTIONS = (
     "You extract facts from emails for one person's private daily brief.\n"
@@ -252,6 +256,7 @@ class GroqProvider:
         client: httpx.AsyncClient,
         *,
         model: str,
+        key_loader: Callable[[], Awaitable[SecretStr | None]],
         max_output_tokens: int,
         max_requests: int = 10,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -260,10 +265,29 @@ class GroqProvider:
             raise ValueError("max_requests must be between 1 and 1000")
         self._client = client
         self._model = model
+        self._key_loader = key_loader
+        self._key: SecretStr | None = None
+        self._key_loaded = False
+        self._key_lock = asyncio.Lock()
         self._max_output_tokens = max_output_tokens
         self._sleep = sleep
         self._remaining_requests = max_requests
         self._pace_delay = 0.0
+
+    async def _api_key(self) -> SecretStr | None:
+        """Load the key at most once per provider and keep it only in memory."""
+        async with self._key_lock:
+            if not self._key_loaded:
+                try:
+                    self._key = await self._key_loader()
+                except ConfigurationError:
+                    logger.warning(_VAULT_WARNING)
+                    self._key = None
+                self._key_loaded = True
+        return self._key
+
+    async def credentials_available(self) -> bool:
+        return await self._api_key() is not None
 
     def _check_budget(self) -> None:
         if self._remaining_requests == 0:
@@ -289,6 +313,9 @@ class GroqProvider:
         keys = [request.message_key for request in requests]
         if not 1 <= len(keys) <= MAX_ANALYSIS_BATCH or len(set(keys)) != len(keys):
             raise ValueError("a Groq call needs 1 to 10 requests with unique message keys")
+        key = await self._api_key()
+        if key is None:
+            raise AICredentialsMissingError(KEY_MISSING_MESSAGE)
         request_id = str(uuid.uuid4())
         payload = _request_input(requests)
         attempt = 0
@@ -324,7 +351,10 @@ class GroqProvider:
                         },
                         "max_completion_tokens": self._max_output_tokens,
                     },
-                    headers={"X-Client-Request-Id": request_id},
+                    headers={
+                        "Authorization": f"Bearer {key.get_secret_value()}",
+                        "X-Client-Request-Id": request_id,
+                    },
                     follow_redirects=False,
                 )
             except httpx.TimeoutException:

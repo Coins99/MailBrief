@@ -5,9 +5,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import httpx
+from pydantic import SecretStr
 
 from mailbrief.config import Settings
-from mailbrief.providers.groq.credentials import GroqKeyError, GroqKeyStore
+from mailbrief.providers.groq.credentials import GroqKeyStore
 from mailbrief.providers.groq.provider import GroqProvider
 
 
@@ -18,14 +19,21 @@ async def groq_provider(
     key_store: GroqKeyStore | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> AsyncIterator[GroqProvider]:
-    """Keep one request budget and close the HTTP client even on failure/cancellation."""
+    """Keep one request budget and close the HTTP client even on failure/cancellation.
+
+    The model is required now because it is part of the cache identity. The API key is read
+    from the vault only when a request is needed, and travels only on those requests.
+    """
     model = settings.require_groq_model()
-    store = key_store if key_store is not None else GroqKeyStore()
-    key = await asyncio.to_thread(store.load)
-    if key is None:
-        raise GroqKeyError("No Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set")
+
+    def read_key() -> SecretStr | None:
+        store = key_store if key_store is not None else GroqKeyStore()
+        return store.load()
+
+    async def load_key() -> SecretStr | None:
+        return await asyncio.to_thread(read_key)
+
     async with httpx.AsyncClient(
-        headers={"Authorization": f"Bearer {key.get_secret_value()}"},
         timeout=httpx.Timeout(settings.ai_timeout_seconds, connect=10.0),
         follow_redirects=False,
         trust_env=False,
@@ -33,6 +41,7 @@ async def groq_provider(
         yield GroqProvider(
             http,
             model=model,
+            key_loader=load_key,
             max_output_tokens=settings.ai_max_output_tokens,
             max_requests=settings.ai_max_requests_per_run,
             sleep=sleep,

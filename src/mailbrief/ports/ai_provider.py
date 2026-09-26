@@ -25,6 +25,10 @@ class AIProvider(Protocol):
         """Return the prompt version recorded in cache keys."""
         ...
 
+    async def credentials_available(self) -> bool:
+        """Whether a usable API key can be loaded; never raises for a missing or unreadable key."""
+        ...
+
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
         """Analyze one bounded batch with one logical request per call (the adapter may retry it).
 

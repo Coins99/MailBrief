@@ -64,6 +64,9 @@ class FakeAIProvider:
     def prompt_version(self) -> str:
         return "fake-prompt-1"
 
+    async def credentials_available(self) -> bool:
+        return True
+
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
         del requests
         return AnalysisResponse()

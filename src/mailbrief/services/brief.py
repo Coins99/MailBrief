@@ -17,7 +17,13 @@ from mailbrief.domain.briefs import (
     TransmissionPreview,
 )
 from mailbrief.domain.digests import DigestCoverage, SyncProgress, SyncResult, SyncStage, SyncStatus
-from mailbrief.services.analysis import AnalysisPlan, AnalysisRun, AnalysisService, emit_progress
+from mailbrief.services.analysis import (
+    KEY_MISSING,
+    AnalysisPlan,
+    AnalysisRun,
+    AnalysisService,
+    emit_progress,
+)
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.calendar import local_day_window, resolve_timezone
@@ -132,12 +138,16 @@ class BriefService:
             bodies=prepared,
             timezone_name=window.timezone_name,
         )
-        if plan.to_send and not await self._consented(account.id, plan, now):
-            return BriefRunResult(status=BriefStatus.CONSENT_DECLINED, sync=sync)
-
-        run = await self._analysis.execute(plan, cancel=cancel, progress=progress)
-        if run.cancelled:
-            return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync, ai_calls=run.calls)
+        if plan.to_send and not await self._analysis.credentials_available():
+            # Nothing can be sent, so there is nothing to consent to; cached and skipped
+            # messages still make a brief.
+            run = self._analysis.fail_unsent(plan, KEY_MISSING)
+        else:
+            if plan.to_send and not await self._consented(account.id, plan, now):
+                return BriefRunResult(status=BriefStatus.CONSENT_DECLINED, sync=sync)
+            run = await self._analysis.execute(plan, cancel=cancel, progress=progress)
+            if run.cancelled:
+                return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync, ai_calls=run.calls)
 
         coverage = self._coverage(sync, len(shortlist), run)
         emit_progress(progress, SyncProgress(stage=SyncStage.ASSEMBLING))

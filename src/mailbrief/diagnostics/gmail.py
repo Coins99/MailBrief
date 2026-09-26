@@ -28,7 +28,7 @@ from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
 from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
 from mailbrief.providers.groq.factory import groq_provider
-from mailbrief.providers.groq.provider import PROVIDER_NAME
+from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PROVIDER_NAME
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
@@ -59,6 +59,7 @@ _AI_ERROR_MESSAGES = {
         "MailBrief's AI request limit for this run was reached. "
         "Review MAILBRIEF_AI_MAX_REQUESTS_PER_RUN before running again."
     ),
+    "AI_KEY_MISSING": KEY_MISSING_MESSAGE,
     "AI_AUTH_FAILED": "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set",
     "AI_PERMISSION_DENIED": "Groq denied access (permission, region or quota).",
     "AI_RATE_LIMITED": "Groq rate limit reached; retry later.",

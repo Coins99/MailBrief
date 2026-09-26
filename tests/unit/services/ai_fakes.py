@@ -18,9 +18,11 @@ class FakeAIProvider:
 
     created: ClassVar[list["FakeAIProvider"]] = []
 
-    def __init__(self, script: Sequence[ScriptItem] = ()) -> None:
+    def __init__(self, script: Sequence[ScriptItem] = (), *, credentials: bool = True) -> None:
         self.script = list(script)
         self.batches: list[tuple[AnalysisRequest, ...]] = []
+        self.credentials = credentials
+        self.credential_checks = 0
         FakeAIProvider.created.append(self)
 
     @property
@@ -38,6 +40,10 @@ class FakeAIProvider:
     @property
     def calls(self) -> int:
         return len(self.batches)
+
+    async def credentials_available(self) -> bool:
+        self.credential_checks += 1
+        return self.credentials
 
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
         self.batches.append(tuple(requests))

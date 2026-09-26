@@ -31,6 +31,7 @@ from mailbrief.domain.messages import RankedMessage
 from mailbrief.ports.ai_provider import AIProvider
 from mailbrief.ports.errors import (
     AIAuthenticationError,
+    AICredentialsMissingError,
     AuthenticationRequiredError,
     ProviderError,
     ProviderPermissionError,
@@ -52,6 +53,7 @@ _KEY_ATTEMPTS = 64
 _QUOTES = "\"'‘’“”"
 _ELLIPSES = ("...", "…")
 REQUEST_REJECTED = "AI_REQUEST_REJECTED"
+KEY_MISSING = "AI_KEY_MISSING"
 
 
 def _random_key() -> str:
@@ -211,6 +213,8 @@ class _ProviderStopped(Exception):
 def _error_code(exc: ProviderError) -> str:
     if isinstance(exc, ProviderUsageLimitError):
         return "AI_USAGE_LIMIT"
+    if isinstance(exc, AICredentialsMissingError):
+        return KEY_MISSING
     if isinstance(exc, AIAuthenticationError | AuthenticationRequiredError):
         return "AI_AUTH_FAILED"
     if isinstance(exc, ProviderPermissionError):
@@ -351,6 +355,23 @@ class AnalysisService:
                 used_keys.add(key)
                 return key
         raise RuntimeError("could not generate a unique message key")
+
+    async def credentials_available(self) -> bool:
+        """Whether the provider has a usable API key; loading it sends nothing."""
+        return await self._provider.credentials_available()
+
+    def fail_unsent(self, plan: AnalysisPlan, error_code: str) -> AnalysisRun:
+        """Fail every message still waiting for a result without calling the provider."""
+        unsent = plan.to_send
+        _fail(unsent)
+        logger.info("AI analysis skipped for %d messages: %s", len(unsent), error_code)
+        return AnalysisRun(
+            messages=tuple(plan.messages),
+            usage=None,
+            calls=0,
+            cancelled=False,
+            error_code=error_code,
+        )
 
     async def execute(
         self,

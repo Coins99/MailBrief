@@ -36,6 +36,10 @@ class AIAuthenticationError(ProviderError):
     """The AI provider rejected credentials or configuration (e.g. invalid API key)."""
 
 
+class AICredentialsMissingError(AIAuthenticationError):
+    """No usable AI API key is available, so nothing was sent."""
+
+
 class AuthenticationCancelledError(AuthenticationRequiredError):
     """The user cancelled or denied an interactive authentication prompt."""
 

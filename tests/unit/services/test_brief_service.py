@@ -340,6 +340,44 @@ async def test_a_partial_brief_reports_the_provider_error(session: AsyncSession)
     assert provider.calls == result.ai_calls == 1
 
 
+async def test_without_credentials_new_messages_fail_and_cached_ones_still_brief(
+    session: AsyncSession,
+) -> None:
+    messages = inbox(2)
+    await build(
+        session, FakeAIProvider([answer_all()]), RecordingGate(answer=True), messages=messages[:1]
+    ).generate(tz_key=ZONE)
+    provider = FakeAIProvider(credentials=False)
+    gate = RecordingGate(answer=True)
+
+    result = await build(session, provider, gate, messages=messages).generate(tz_key=ZONE)
+
+    assert result.status is BriefStatus.SAVED
+    assert result.digest is not None
+    assert result.digest.status is DigestStatus.PARTIAL
+    assert len(result.digest.items) == 1
+    assert result.error_code == "AI_KEY_MISSING"
+    assert result.ai_calls == provider.calls == 0
+    assert gate.previews == []
+    assert result.coverage is not None
+    assert (result.coverage.reused, result.coverage.failed) == (1, 1)
+
+
+async def test_credentials_are_checked_only_when_something_must_be_sent(
+    session: AsyncSession,
+) -> None:
+    await build(session, FakeAIProvider([answer_all()]), RecordingGate(answer=True)).generate(
+        tz_key=ZONE
+    )
+    provider = FakeAIProvider(credentials=False)
+
+    result = await build(session, provider, RecordingGate(answer=True)).generate(tz_key=ZONE)
+
+    assert result.status is BriefStatus.SAVED
+    assert result.error_code is None
+    assert provider.credential_checks == 0
+
+
 async def test_cancel_during_analysis_keeps_results_but_writes_no_brief(
     session: AsyncSession,
 ) -> None:
