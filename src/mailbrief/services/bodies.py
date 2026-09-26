@@ -36,9 +36,16 @@ def prepare_body(
     text = normalize_text(body.text)
     trimmed, removed = trim_quoted_history(text, is_forward=looks_like_forward(subject))
     bounded, cut = truncate_at_boundary(trimmed, limit)
+    if bounded:
+        status = BodyStatus.READY
+    elif body.unreadable_parts:
+        # Text parts existed but couldn't be read: that is a failure, not an empty email.
+        status = BodyStatus.FAILED
+    else:
+        status = BodyStatus.EMPTY
     return PreparedBody(
         provider_message_id=body.provider_message_id,
-        status=BodyStatus.READY if bounded else BodyStatus.EMPTY,
+        status=status,
         text=bounded,
         source=body.source if bounded else BodySource.NONE,
         original_chars=len(body.text),

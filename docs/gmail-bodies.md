@@ -36,8 +36,8 @@ them. The text exists in memory only, for the current run.
    `MAILBRIEF_AI_BODY_CHARACTER_LIMIT` can lower this limit, but never raise it.
 
 Each email gets a status and flags:
-- **Statuses:** `ready`, `empty` (no readable text), `unavailable` (deleted) or `failed`
-  (unreadable).
+- **Statuses:** `ready`, `empty` (no text at all), `unavailable` (deleted) or `failed`
+  (the message, or every text part in it, couldn't be read).
 - **Flags:** quoted history removed, truncated, attachments skipped, and unreadable parts.
 
 ## Review command

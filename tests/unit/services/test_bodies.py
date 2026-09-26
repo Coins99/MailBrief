@@ -130,3 +130,15 @@ async def test_body_text_never_reaches_logs_or_repr(caplog: pytest.LogCaptureFix
     assert MARKER in prepared[0].text
     assert MARKER not in caplog.text
     assert MARKER not in repr(prepared)
+
+
+def test_unreadable_message_is_failed_not_empty() -> None:
+    unreadable = MessageBody(provider_message_id="m1", source=BodySource.NONE, unreadable_parts=1)
+    assert prepare_body(unreadable, subject=None).status is BodyStatus.FAILED
+    empty = MessageBody(provider_message_id="m2", source=BodySource.NONE)
+    assert prepare_body(empty, subject=None).status is BodyStatus.EMPTY
+    partial = MessageBody(
+        provider_message_id="m3", text="Kept", source=BodySource.PLAIN, unreadable_parts=1
+    )
+    prepared = prepare_body(partial, subject=None)
+    assert (prepared.status, prepared.unreadable_parts) == (BodyStatus.READY, 1)
