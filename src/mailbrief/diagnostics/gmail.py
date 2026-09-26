@@ -618,7 +618,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         # AI setup errors (model, key, vault) carry static, actionable messages.
         print(str(exc) if args.command in _AI_COMMANDS else _SETUP_UNAVAILABLE)
         return 3
-    except ValidationError:
+    except ValidationError as exc:
+        if args.command in _AI_COMMANDS:
+            # Settings errors arrive as SettingsError, so this is an internal validation error.
+            print(f"Unexpected error ({type(exc).__name__}).")
+            return 1
         print(_SETUP_UNAVAILABLE)
         return 3
     except ProviderError as exc:

@@ -5,6 +5,7 @@ import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -178,3 +179,27 @@ def test_a_key_missing_failure_keeps_the_saved_brief_note_on_its_own_line(
         "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set",
         "Your last saved brief for today is unchanged.",
     ]
+
+
+@pytest.mark.parametrize(
+    ("command", "code", "message"),
+    [
+        ("brief", 1, "Unexpected error (ValidationError)."),
+        ("sync", 3, "Gmail configuration or secure storage is unavailable."),
+    ],
+)
+def test_an_internal_validation_error_is_unexpected_only_in_ai_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    code: int,
+    message: str,
+) -> None:
+    async def fail_validation(**options: Any) -> int:
+        SyncResult.model_validate({})  # Raises pydantic's ValidationError.
+        return 0
+
+    monkeypatch.setattr(gmail, command, fail_validation)
+
+    assert gmail.main([command]) == code
+    assert capsys.readouterr().out.startswith(message)
