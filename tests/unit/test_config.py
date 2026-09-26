@@ -74,3 +74,35 @@ def test_body_limit_cannot_exceed_the_analysis_limit() -> None:
     assert Settings().ai_body_character_limit == 8_000
     with pytest.raises(ValidationError):
         Settings(ai_body_character_limit=8_001)
+
+
+@pytest.mark.parametrize("model", [None, "", "   "])
+def test_openai_model_is_required_only_on_demand(model: str | None) -> None:
+    with pytest.raises(ConfigurationError, match="MAILBRIEF_OPENAI_MODEL"):
+        Settings(openai_model=model).require_openai_model()
+
+
+def test_openai_model_is_returned_stripped() -> None:
+    assert Settings(openai_model=" gpt-test ").require_openai_model() == "gpt-test"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"ai_max_output_tokens": 255},
+        {"ai_max_output_tokens": 64_001},
+        {"ai_timeout_seconds": 9.9},
+        {"ai_timeout_seconds": 600.1},
+    ],
+)
+def test_ai_limits_are_bounded(values: dict[str, float]) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate(values)
+
+
+def test_ai_limits_accept_their_bounds() -> None:
+    low = Settings(ai_max_output_tokens=256, ai_timeout_seconds=10)
+    high = Settings(ai_max_output_tokens=64_000, ai_timeout_seconds=600)
+
+    assert (low.ai_max_output_tokens, low.ai_timeout_seconds) == (256, 10)
+    assert (high.ai_max_output_tokens, high.ai_timeout_seconds) == (64_000, 600)
