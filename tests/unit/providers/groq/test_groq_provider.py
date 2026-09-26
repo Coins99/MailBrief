@@ -47,6 +47,7 @@ from tests.unit.providers.groq.groq_fixtures import (
     response_body,
     results_body,
     sent_messages,
+    usage,
     wire_result,
 )
 
@@ -502,6 +503,49 @@ async def test_exhausted_quota_paces_the_next_call(
     await provider.analyze([make_request()])
     assert sleeps.delays == [2.0]
     assert route.call_count == 2
+
+
+def low_window_answer(remaining: str, reset: str) -> httpx.Response:
+    """A good answer whose call used 1,800 tokens, with the token window it left."""
+    payload = results_body([wire_result("0000abcd", BODY[:40])])
+    payload["usage"] = usage(input_tokens=1_500, output_tokens=300)
+    headers = {"x-ratelimit-remaining-tokens": remaining, "x-ratelimit-reset-tokens": reset}
+    return httpx.Response(200, json=payload, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("remaining", "delays"), [("1000", [7.5]), ("5000", [])], ids=["too-low", "enough"]
+)
+async def test_a_token_window_smaller_than_the_last_call_paces_the_next_call(
+    respx_mock: respx.MockRouter,
+    provider: GroqProvider,
+    sleeps: RecordedSleeps,
+    remaining: str,
+    delays: list[float],
+) -> None:
+    route = respx_mock.post(CHAT_URL).mock(
+        side_effect=[low_window_answer(remaining, "7.5s"), good_answer()]
+    )
+
+    await provider.analyze([make_request()])
+    assert sleeps.delays == []
+    await provider.analyze([make_request()])
+
+    assert sleeps.delays == delays
+    assert route.call_count == 2
+
+
+async def test_a_token_window_reset_beyond_the_ceiling_stops_before_sending(
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
+) -> None:
+    route = respx_mock.post(CHAT_URL).mock(return_value=low_window_answer("1000", "45s"))
+
+    await provider.analyze([make_request()])
+    with pytest.raises(ProviderRateLimitError):
+        await provider.analyze([make_request()])
+
+    assert route.call_count == 1
+    assert sleeps.delays == []
 
 
 @pytest.mark.parametrize("reset", ["1h", "nonsense", ""])

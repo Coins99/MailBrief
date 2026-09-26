@@ -355,6 +355,28 @@ def groq_key_store() -> GroqKeyStore:
     return GroqKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
 
 
+async def test_a_long_token_window_reset_stops_the_run_and_keeps_results(
+    session: AsyncSession, respx_mock: respx.MockRouter
+) -> None:
+    account_id, shortlist = await seed(session, 2)
+
+    def answer_with_a_low_window(request: httpx.Request) -> httpx.Response:
+        answer = answer_every_message(request)
+        answer.headers.update(
+            {"x-ratelimit-remaining-tokens": "100", "x-ratelimit-reset-tokens": "45s"}
+        )
+        return answer
+
+    route = respx_mock.post(CHAT_URL).mock(side_effect=answer_with_a_low_window)
+
+    async with groq_provider(Settings(groq_model="test-model"), key_store=groq_key_store()) as ai:
+        run = await analyze(session, ai, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [ANALYZED, FAILED]
+    assert run.error_code == "AI_RATE_LIMITED"
+    assert route.call_count == run.requests_sent == 1
+
+
 @pytest.mark.parametrize(
     ("rejected_single", "expected", "error_code"),
     [

@@ -248,6 +248,26 @@ def _exhausted_reset(headers: httpx.Headers) -> float:
     return max(delays, default=0.0)
 
 
+def _token_pace(headers: httpx.Headers, usage: AIUsage | None) -> float:
+    """Wait for the token window to reset when the last call would no longer fit in it.
+
+    A call as large as the last one would likely be refused with HTTP 429, so the next call
+    first waits for x-ratelimit-reset-tokens. Without usable counts or a reset time, the
+    429 handling still applies.
+    """
+    if usage is None:
+        return 0.0
+    last_call_tokens = (usage.input_tokens or 0) + (usage.output_tokens or 0)
+    try:
+        remaining = int(headers.get("x-ratelimit-remaining-tokens", ""))
+    except ValueError:
+        return 0.0
+    if not 0 < remaining < last_call_tokens:
+        return 0.0  # Enough room, or exhausted (handled by _exhausted_reset).
+    reset = parse_retry_delay(headers.get("x-ratelimit-reset-tokens"))
+    return reset if reset is not None else 0.0
+
+
 class GroqProvider:
     """AIProvider over the Groq Chat Completions API with Structured Outputs."""
 
@@ -382,7 +402,11 @@ class GroqProvider:
                         raise ProviderUnavailableError(
                             UNREADABLE_MESSAGE, client_request_id=request_id
                         )
-                    return _to_response(body)
+                    response = _to_response(body)
+                    self._pace_delay = max(
+                        self._pace_delay, _token_pace(raw.headers, response.usage)
+                    )
+                    return response
                 error, delay = _status_outcome(raw, attempt, request_id)
                 reason = f"HTTP {raw.status_code}"
             if delay is None:
