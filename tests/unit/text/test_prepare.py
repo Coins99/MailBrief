@@ -12,7 +12,57 @@ from mailbrief.text.prepare import (
 
 def test_normalize_removes_invisible_and_control_characters() -> None:
     raw = "Hi\u200b there\r\n\r\n\r\n\r\nLine\x07 two  \n\tIndented\ufeff"
-    assert normalize_text(raw) == "Hi there\n\nLine two\n\tIndented"
+    assert normalize_text(raw) == "Hi there\n\nLine two\nIndented"
+
+
+def test_invisible_padding_and_format_characters_are_removed() -> None:
+    raw = "Offer inside\n\n \u034f \u034f \u034f\n\u034f \u034f\n\u200eReal text\u202a here\u2800"
+    assert normalize_text(raw) == "Offer inside\n\nReal text here"
+
+
+def test_entities_comments_and_office_markup_are_removed() -> None:
+    raw = (
+        "Don\u2019t miss out.&nbsp;&zwnj;&zwnj;&zwnj;\n<!--[if !mso]><!-->\nOpen 24&zwj;/&zwj;7\n"
+        '<!--<![endif]-->\n<!--[if mso]>\n<v:roundrect href="x">\n<w:anchorlock/>\n'
+        "<![endif]-->\n</v:roundrect>\nSuite 400<br>Toronto"
+    )
+    assert normalize_text(raw) == "Don\u2019t miss out.\nOpen 24/7\nSuite 400\nToronto"
+
+
+def test_link_addresses_are_removed() -> None:
+    raw = (
+        "Read the report\n( https://clicks.example.test/a~~/b~~ )\n"
+        "Join the call: https://meet.example.test/j/123\n"
+        "<https://c.example.test/x>Claude\nhttps://track.example.test/only\n"
+        "Call us: 555-0100 (\ntel:555-0100 )"
+    )
+    assert normalize_text(raw) == (
+        "Read the report\nJoin the call: [link]\nClaude\nCall us: 555-0100"
+    )
+
+
+def test_oversized_numeric_reference_does_not_fail() -> None:
+    assert normalize_text("A&#" + "9" * 5_000 + ";B") == "A�B"
+
+
+@pytest.mark.parametrize("unclosed", ["<!--", "<https:", "(https:", "<v:shape"])
+def test_unclosed_markup_is_kept_without_rescanning(unclosed: str) -> None:
+    raw = unclosed * 20_000
+    assert normalize_text(raw) == raw
+
+
+def test_repeated_long_paragraphs_are_kept_once() -> None:
+    long = "This email summarises the info that you shared with the app."
+    raw = f"{long}\n\nShort\n\n{long}\n\nShort"
+    assert normalize_text(raw) == f"{long}\n\nShort\n\nShort"
+
+
+def test_normal_text_is_preserved() -> None:
+    text = (
+        "Caf\u00e9 d\u00e9j\u00e0 vu \u2014 \u9884\u7b97\u5df2\u6279\u51c6 \u2705\n\n"
+        "- Item one\n- Item two"
+    )
+    assert normalize_text(text) == text
 
 
 @pytest.mark.parametrize(

@@ -41,7 +41,7 @@ def prepare_body(
         status=BodyStatus.READY if bounded else BodyStatus.EMPTY,
         text=bounded,
         source=body.source if bounded else BodySource.NONE,
-        original_chars=len(text),
+        original_chars=len(body.text),
         quoted_history_removed=removed,
         truncated=cut or body.extraction_truncated,
         attachments_skipped=body.attachments_skipped,

@@ -17,7 +17,13 @@ them. The text exists in memory only, for the current run.
 
 ## How the text is prepared
 
-1. Invisible and control characters are removed, and runs of blank lines collapsed.
+1. The text is cleaned:
+   - Link addresses are removed, because tracking links often identify you. A link inside a
+     sentence becomes `[link]`.
+   - HTML entities, comments and stray markup that some senders leave in plain-text versions
+     are removed.
+   - So are invisible padding, control characters, repeated long paragraphs and extra blank
+     lines.
 2. Quoted history after a reply is removed:
    - the trailing `>` block, with the "On ... wrote:" line above it, in any language;
    - Outlook's "-----Original Message-----" or its "From:" / "Sent:" / "Subject:" reply
