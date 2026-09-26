@@ -36,9 +36,13 @@ from mailbrief.storage.tables import (
     MessageTable,
     SyncRunTable,
 )
+from mailbrief.text.prepare import truncate_at_boundary
 
 # Batch size limit for bulk SQLite inserts to safeguard parameter limits
 MAX_SQLITE_BATCH_SIZE = 100
+# DigestItem.summary max_length; previews (up to 255 characters in Outlook) can exceed it.
+_SUMMARY_LIMIT = 240
+_NO_SUMMARY = "No summary available"
 
 
 class AccountRepository:
@@ -521,6 +525,14 @@ def _coverage_columns(coverage: DigestCoverage | None) -> dict[str, bool | int |
     }
 
 
+def _fallback_summary(preview: str, subject: str) -> str:
+    """Summarize an unanalyzed item from its preview, else its subject, within the item limit."""
+    for text in (preview.strip(), subject.strip()):
+        if text:
+            return truncate_at_boundary(text, _SUMMARY_LIMIT)[0]
+    return _NO_SUMMARY
+
+
 def _coverage_from_row(digest: DigestTable) -> DigestCoverage | None:
     """Rebuild brief coverage; briefs saved before M4 have none."""
     if digest.shortlisted_count is None:
@@ -642,7 +654,10 @@ class DigestRepository:
         """Map a DigestTable and its joined item records to a DailyDigest domain model."""
         domain_items: list[DigestItem] = []
         for item_table, msg_table, analysis_table in items_with_relations:
-            summary_val = analysis_table.summary if analysis_table else msg_table.body_preview
+            if analysis_table is None:
+                summary_val = _fallback_summary(msg_table.body_preview, msg_table.subject)
+            else:
+                summary_val = analysis_table.summary or _NO_SUMMARY
             domain_items.append(
                 DigestItem(
                     message_key=msg_table.provider_message_id,
@@ -653,7 +668,7 @@ class DigestRepository:
                         name=msg_table.sender_name,
                         address=msg_table.sender_address,
                     ),
-                    summary=summary_val or "No summary available",
+                    summary=summary_val,
                     action_text=analysis_table.action_text if analysis_table else None,
                     deadline_text=analysis_table.deadline_text if analysis_table else None,
                     deadline_precision=(

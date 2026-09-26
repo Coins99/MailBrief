@@ -689,3 +689,51 @@ async def test_consent_grant_revoke_and_reactivate(database: Database) -> None:
         active = await ConsentRepository(session).get_active(account_id, "openai", "disclosure-1")
         assert active is not None
         assert active.granted_at_utc == regranted_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preview", "subject", "expected_start"),
+    [
+        (("Please review the attached plan " * 8)[:255], "Plan", "Please review the attached"),
+        ("   ", "Quarterly plan " * 20, "Quarterly plan"),
+        ("", "", "No summary available"),
+    ],
+    ids=["long-preview", "subject-fallback", "nothing-available"],
+)
+async def test_unanalyzed_digest_item_summary_stays_within_item_limit(
+    database: Database,
+    preview: str,
+    subject: str,
+    expected_start: str,
+) -> None:
+    async with database.transaction() as session:
+        account = await AccountRepository(session).upsert(
+            AccountIdentity(
+                provider=ProviderKind.MICROSOFT,
+                provider_account_id="ms-1",
+                email_address="a@example.com",
+            )
+        )
+        (message,) = await MessageRepository(session).upsert_messages(
+            account.id,
+            [make_message(provider_message_id="msg-1", body_preview=preview, subject=subject)],
+        )
+        digest = await DigestRepository(session).save_digest(
+            account_id=account.id,
+            local_date=date(2026, 9, 4),
+            timezone_name="America/Toronto",
+            status=DigestStatus.COMPLETE,
+            items=[(message.id, None, 0, DigestSection.HIGHLIGHTS)],
+        )
+        digest_id = digest.id
+
+    async with database.session() as session:
+        repo = DigestRepository(session)
+        row = await repo.get_by_id(digest_id)
+        assert row is not None
+        restored = DigestRepository.to_domain(row, await repo.get_digest_items(digest_id), "ms-1")
+
+    summary = restored.items[0].summary
+    assert len(summary) <= 240
+    assert summary.startswith(expected_start)
