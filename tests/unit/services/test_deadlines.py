@@ -7,7 +7,12 @@ import pytest
 
 from mailbrief.domain.analysis import AnalysisCandidate, AnalysisRequest, DeadlinePrecision
 from mailbrief.domain.messages import EmailContact
-from mailbrief.services.deadlines import InvalidDeadlineError, ResolvedDeadline, resolve_deadline
+from mailbrief.services.deadlines import (
+    ZONE_TOKEN_PATTERN,
+    InvalidDeadlineError,
+    ResolvedDeadline,
+    resolve_deadline,
+)
 
 ZONE = "America/Toronto"
 BODY = (
@@ -185,7 +190,7 @@ def test_d6_a_stated_iana_zone_is_used() -> None:
             deadline_time="17:00",
             stated_timezone="Europe/London",
         ),
-        request(),
+        request(body_text=f"{BODY} All times are Europe/London."),
     )
 
     assert resolved.precision is DeadlinePrecision.DATETIME
@@ -206,7 +211,10 @@ def test_d6_a_stated_iana_zone_is_used() -> None:
 def test_d6_utc_and_iana_region_zones_resolve_exactly(
     zone: str, canonical: str, at_utc: datetime
 ) -> None:
-    resolved = resolve_deadline(friday(deadline_time="17:00", stated_timezone=zone), request())
+    resolved = resolve_deadline(
+        friday(deadline_time="17:00", stated_timezone=zone),
+        request(body_text=f"{BODY} All times are {zone}."),
+    )
 
     assert resolved.precision is DeadlinePrecision.DATETIME
     assert resolved.at_utc == at_utc
@@ -243,6 +251,100 @@ def test_d6_abbreviated_offset_and_unknown_zones_keep_only_the_day(zone: str) ->
     assert resolved == ResolvedDeadline(
         "5 PM PT", DeadlinePrecision.DATE, date(2026, 9, 4), None, ZONE
     )
+
+
+def resolve_phrase(
+    body: str, phrase: str, *, stated_timezone: str | None = None
+) -> ResolvedDeadline:
+    """Resolve ``phrase`` due 4 September at 17:00 from an email whose body is ``body``."""
+    return resolve_deadline(
+        candidate(
+            deadline_text=phrase,
+            deadline_date="2026-09-04",
+            deadline_time="17:00",
+            stated_timezone=stated_timezone,
+        ),
+        request(body_text=body),
+    )
+
+
+def test_d6_a_zone_the_email_never_writes_keeps_only_the_day() -> None:
+    resolved = resolve_phrase(
+        "Send it Friday at 5 PM.", "Friday at 5 PM", stated_timezone="America/Los_Angeles"
+    )
+
+    assert resolved == ResolvedDeadline(
+        "Friday at 5 PM", DeadlinePrecision.DATE, date(2026, 9, 4), None, ZONE
+    )
+
+
+def test_d6_a_zone_the_email_writes_resolves_exactly() -> None:
+    resolved = resolve_phrase(
+        "Send it by 5pm America/Chicago on Friday.",
+        "5pm America/Chicago",
+        stated_timezone="America/Chicago",
+    )
+
+    assert resolved.precision is DeadlinePrecision.DATETIME
+    assert resolved.at_utc == datetime(2026, 9, 4, 22, 0, tzinfo=UTC)
+    assert resolved.timezone == "America/Chicago"
+
+
+@pytest.mark.parametrize(
+    ("body", "phrase"),
+    [
+        ("Please send it by Friday 5pm PT.", "by Friday 5pm PT"),
+        ("请在北京时间下午五点前回复。", "北京时间下午五点"),
+        ("SUBMIT IT BY 5PM FRIDAY.", "SUBMIT IT BY 5PM"),  # A documented false positive.
+    ],
+    ids=["pt", "beijing", "false-positive"],
+)
+def test_d6_a_phrase_naming_an_unreported_zone_keeps_only_the_day(body: str, phrase: str) -> None:
+    resolved = resolve_phrase(body, phrase)
+
+    assert resolved == ResolvedDeadline(
+        phrase, DeadlinePrecision.DATE, date(2026, 9, 4), None, ZONE
+    )
+
+
+def test_d6_a_phrase_without_a_zone_uses_the_owner_zone() -> None:
+    resolved = resolve_phrase("Please send it by 5pm on Friday.", "by 5pm")
+
+    assert resolved.precision is DeadlinePrecision.DATETIME
+    assert resolved.at_utc == datetime(2026, 9, 4, 21, 0, tzinfo=UTC)
+    assert resolved.timezone == ZONE
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "5 PM ET",
+        "5pm PT",
+        "17:00 PST",
+        "noon EDT",
+        "9:00 CEST",
+        "10am AEST",
+        "5pm UTC",
+        "17:00 utc",
+        "5pm GMT+8",
+        "17:00 UTC-05:00",
+        "5pm Eastern",
+        "5 pm pacific time",
+        "Central time",
+        "北京时间下午五点",
+        "东八区17点",
+    ],
+)
+def test_zone_tokens_are_recognized(phrase: str) -> None:
+    assert ZONE_TOKEN_PATTERN.search(phrase) is not None
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["by 5pm", "Friday 5 PM", "at 17:00", "end of day", "tomorrow at noon", "下午五点"],
+)
+def test_phrases_without_a_zone_have_no_zone_token(phrase: str) -> None:
+    assert ZONE_TOKEN_PATTERN.search(phrase) is None
 
 
 def test_d7_a_time_in_the_spring_forward_gap_stays_consistent() -> None:

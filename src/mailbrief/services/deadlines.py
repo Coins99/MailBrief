@@ -19,6 +19,16 @@ _DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _TIME_PATTERN = re.compile(r"([0-9]{1,2}):([0-9]{2})(?::([0-9]{2}))?")
 _ZONE_KEY_PATTERN = re.compile(r"[A-Za-z]+(/[A-Za-z0-9_+-]+)+")
 _UTC_NAMES = {"utc": "UTC", "etc/utc": "Etc/UTC"}
+# Words in a deadline phrase that name a time zone. When the model reports no zone for such a
+# phrase, the owner's zone would be a guess, so only the day is kept. Upper-case
+# abbreviations ending in T (ET, PT, PST, EDT, CEST, AEST) are matched case-sensitively so
+# "at 5pm" never matches; a false positive such as "SUBMIT IT BY 5PM" only drops the time.
+ZONE_TOKEN_PATTERN = re.compile(
+    r"\b[A-Z]{1,4}T\b"
+    r"|(?i:\b(?:UTC|GMT)(?:\s?[+-]\d{1,2}(?::?\d{2})?)?\b)"
+    r"|(?i:\b(?:Eastern|Pacific|Central|Mountain|Atlantic)\b)"
+    r"|北京时间|东八区"
+)
 
 
 class InvalidDeadlineError(ValueError):
@@ -52,12 +62,15 @@ def _load_zone(name: str) -> ZoneInfo | None:
         return None
 
 
-def _usable_stated_zone(value: str) -> str | None:
-    """A stated zone naming one IANA region, else None.
+def _usable_stated_zone(value: str, request: AnalysisRequest) -> str | None:
+    """A stated zone that the email itself writes and that names UTC or one IANA region.
 
+    A zone the email does not contain is the model's guess, so it is never used.
     Abbreviations ("EST", "PT"), offsets ("UTC+2") and Etc/ zones are never resolved:
     people write "EST" year-round to mean Eastern Time, which tzdata models as fixed UTC-5.
     """
+    if not appears_in(value, request.subject, request.body_text):
+        return None
     utc = _UTC_NAMES.get(value.casefold())
     if utc is not None:
         return utc
@@ -96,7 +109,9 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
 
     Raises InvalidDeadlineError, whose messages are static, when a date or time comes
     without a phrase or the phrase is not in the email. An unusable date keeps the phrase
-    as unresolved, and an unusable time keeps only the date. Offsets are never guessed.
+    as unresolved, and an unusable time keeps only the date. A time is placed in a stated
+    zone only when the email writes that zone, and in the owner's zone only when the
+    phrase names none; otherwise only the day is kept. Offsets are never guessed.
     """
     text = _clean(candidate.deadline_text)
     raw_date = _clean(candidate.deadline_date)
@@ -124,11 +139,14 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
     due_time = None if raw_time is None else _parse_time(raw_time)
     if due_time is None:
         return date_only
-    zone_name = request.timezone_name
-    if stated_zone is not None:
-        usable = _usable_stated_zone(stated_zone)
+    if stated_zone is None:
+        if ZONE_TOKEN_PATTERN.search(text):
+            return date_only  # The phrase names a zone the model did not report.
+        zone_name = request.timezone_name
+    else:
+        usable = _usable_stated_zone(stated_zone, request)
         if usable is None:
-            return date_only  # The email names a zone we will not guess an offset for.
+            return date_only  # Not written in the email, or a zone we will not guess.
         zone_name = usable
     zone = ZoneInfo(zone_name)
     at_utc = dt.datetime.combine(due_date, due_time, tzinfo=zone).astimezone(dt.UTC)
