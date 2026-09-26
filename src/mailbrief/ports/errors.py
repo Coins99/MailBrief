@@ -65,3 +65,7 @@ class ProviderRateLimitError(ProviderError):
 
 class ProviderResponseError(ProviderError):
     """The provider returned an invalid or unsupported response."""
+
+
+class MessageUnavailableError(ProviderResponseError):
+    """The message no longer exists or can no longer be read, for example after deletion."""

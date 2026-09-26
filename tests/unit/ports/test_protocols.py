@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 
 from mailbrief.domain.analysis import AnalysisRequest, MessageAnalysis
+from mailbrief.domain.bodies import BodySource, MessageBody
 from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 from mailbrief.ports.ai_provider import AIProvider
 from mailbrief.ports.email_provider import EmailProvider
@@ -37,8 +38,12 @@ class FakeEmailProvider:
         del range_start_utc, range_end_utc, continuation
         yield MessagePage(page_number=1, messages=())
 
-    async def fetch_plain_text_body(self, provider_message_id: str) -> str:
-        return f"Body for {provider_message_id}"
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        return MessageBody(
+            provider_message_id=provider_message_id,
+            text=f"Body for {provider_message_id}",
+            source=BodySource.PLAIN,
+        )
 
     async def disconnect(self) -> None:
         return None

@@ -31,6 +31,7 @@ No feature is marked implemented merely because it appears in this plan.
 Main was reconciled with the Gmail line on 2026-09-25 and is again the integration
 branch; new work branches from `main`.
 
-Next: complete remaining live acceptance checks, then M3 shortlisted-body retrieval.
+Current: M3 (shortlisted-body reading and preparation) is implemented and awaiting live
+acceptance with `docs/gmail-bodies.md`. M4 starts only after it passes.
 General tasks, calendar, analytics and website directions are intentionally rough
 in [ecosystem-roadmap.md](ecosystem-roadmap.md).

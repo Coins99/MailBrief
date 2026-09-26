@@ -7,6 +7,7 @@ import msal
 import pytest
 import respx
 
+from mailbrief.domain.bodies import BodySource
 from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.ports.errors import (
@@ -200,7 +201,7 @@ async def test_iter_message_pages(
     assert pages[1].messages[0].provider_message_id == "msg-2"
 
 
-async def test_fetch_plain_text_body(
+async def test_fetch_message_body(
     mock_auth: MagicMock,
     mock_graph_client: MagicMock,
 ) -> None:
@@ -210,9 +211,9 @@ async def test_fetch_plain_text_body(
         "body": {"contentType": "text", "content": "Hello World body"},
     }
 
-    body = await provider.fetch_plain_text_body("msg-1")
+    body = await provider.fetch_message_body("msg-1")
 
-    assert body == "Hello World body"
+    assert (body.text, body.source) == ("Hello World body", BodySource.PLAIN)
     mock_graph_client.get.assert_awaited_once_with(
         "me/messages/msg-1",
         params={"$select": "id,body"},
@@ -220,7 +221,7 @@ async def test_fetch_plain_text_body(
     )
 
 
-async def test_fetch_plain_text_body_encodes_id_and_rejects_invalid_body(
+async def test_fetch_message_body_encodes_id_and_rejects_invalid_body(
     mock_auth: MagicMock,
     mock_graph_client: MagicMock,
 ) -> None:
@@ -228,7 +229,7 @@ async def test_fetch_plain_text_body_encodes_id_and_rejects_invalid_body(
     mock_graph_client.get.return_value = {"body": {"contentType": "html", "content": "private"}}
 
     with pytest.raises(ProviderResponseError):
-        await provider.fetch_plain_text_body("folder/id ?")
+        await provider.fetch_message_body("folder/id ?")
     assert mock_graph_client.get.await_args.args[0] == "me/messages/folder%2Fid%20%3F"
 
 
@@ -365,7 +366,7 @@ async def test_iter_message_pages_supports_resuming_with_continuation(
 
 
 @respx.mock
-async def test_fetch_plain_text_body_raw_path_encodes_question_mark_and_hash(
+async def test_fetch_message_body_raw_path_encodes_question_mark_and_hash(
     mock_auth: MagicMock,
 ) -> None:
     route = respx.get("https://graph.microsoft.com/v1.0/me/messages/msg%3Fwith%23symbols").respond(
@@ -374,9 +375,9 @@ async def test_fetch_plain_text_body_raw_path_encodes_question_mark_and_hash(
     )
     async with GraphClient(mock_auth) as client:
         provider = MicrosoftEmailProvider(mock_auth, client)
-        body = await provider.fetch_plain_text_body("msg?with#symbols")
+        body = await provider.fetch_message_body("msg?with#symbols")
 
-    assert body == "body text"
+    assert body.text == "body text"
     assert route.called
     assert b"msg%3Fwith%23symbols" in route.calls.last.request.url.raw_path
 

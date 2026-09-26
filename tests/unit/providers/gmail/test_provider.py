@@ -101,8 +101,6 @@ async def test_session_and_body_boundary() -> None:
             _ = [
                 p async for p in provider.iter_message_pages(range_start_utc=NOW, range_end_utc=NOW)
             ]
-        with pytest.raises(ProviderResponseError, match="M3"):
-            await provider.fetch_plain_text_body("a")
         await provider.disconnect()
         assert await provider.current_account() is None
 

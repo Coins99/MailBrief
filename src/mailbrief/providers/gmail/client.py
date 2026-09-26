@@ -1,4 +1,4 @@
-"""Bounded, read-only Gmail metadata requests with cancellable retries."""
+"""Bounded, read-only Gmail requests with cancellable retries."""
 
 import asyncio
 import json
@@ -37,6 +37,13 @@ def message_id(value: object) -> str:
     return value
 
 
+def attachment_id(value: object) -> str:
+    """Accept only opaque Gmail attachment identifiers before building a request path."""
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", value):
+        raise ProviderResponseError("Gmail returned an invalid attachment identifier.")
+    return value
+
+
 def retry_delay(value: str | None, attempt: int) -> float:
     """Honor finite Retry-After values; large delays are returned to the caller."""
     if value:
@@ -53,7 +60,7 @@ def retry_delay(value: str | None, attempt: int) -> float:
 
 
 class GmailClient:
-    """No configurable host, write method, body format, or attachment endpoint."""
+    """Read-only requests to fixed Gmail hosts; file attachments are never downloaded."""
 
     def __init__(
         self,
@@ -96,6 +103,22 @@ class GmailClient:
             missing_ok=True,
         )
 
+    async def message(self, identifier: str) -> dict[str, object] | None:
+        """One message's MIME structure; attachment data stays behind attachment IDs."""
+        return await self._get(
+            MESSAGES_URL + "/" + message_id(identifier),
+            httpx.QueryParams([("format", "full"), ("fields", "id,payload")]),
+            missing_ok=True,
+        )
+
+    async def part_data(self, identifier: str, attachment: str) -> dict[str, object] | None:
+        """A separately stored text part. Callers must never use this for file attachments."""
+        return await self._get(
+            f"{MESSAGES_URL}/{message_id(identifier)}/attachments/{attachment_id(attachment)}",
+            httpx.QueryParams([("fields", "size,data")]),
+            missing_ok=True,
+        )
+
     async def _get(
         self, url: str, params: httpx.QueryParams, *, missing_ok: bool
     ) -> dict[str, object] | None:
@@ -115,16 +138,12 @@ class GmailClient:
                     async for chunk in response.aiter_bytes(chunk_size=65_536):
                         body.extend(chunk)
                         if len(body) > MAX_RESPONSE_BYTES:
-                            raise ProviderResponseError(
-                                "Gmail metadata response exceeded its size limit."
-                            )
+                            raise ProviderResponseError("Gmail response exceeded its size limit.")
                     status = response.status_code
                     after = response.headers.get("Retry-After")
             except httpx.HTTPError:
                 if attempt == 3:
-                    raise ProviderResponseError(
-                        "Gmail metadata request failed; retry later."
-                    ) from None
+                    raise ProviderResponseError("Gmail request failed; retry later.") from None
                 await self._sleep(retry_delay(None, attempt))
                 continue
             if status == 401:
@@ -162,6 +181,6 @@ class GmailClient:
             if status == 403:
                 raise ProviderPermissionError(permission_guidance(payload))
             if status != 200 or not isinstance(payload, dict):
-                raise ProviderResponseError("Gmail returned an invalid metadata response.")
+                raise ProviderResponseError("Gmail returned an invalid response.")
             return cast(dict[str, object], payload)
         raise ProviderResponseError("Gmail retry limit reached.")

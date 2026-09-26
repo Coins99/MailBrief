@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
+from mailbrief.domain.bodies import MAX_EXTRACTED_CHARS, BodySource, MessageBody
 from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.ports.errors import (
@@ -118,8 +119,8 @@ class MicrosoftEmailProvider(EmailProvider):
             params = None  # Continuation URLs contain parameters embedded by Graph
             page_number += 1
 
-    async def fetch_plain_text_body(self, provider_message_id: str) -> str:
-        """Fetch plain-text body for one shortlisted message."""
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        """Fetch the plain-text body for one shortlisted message."""
         headers = {"Prefer": 'outlook.body-content-type="text"'}
         params = {"$select": "id,body"}
         encoded_message_id = quote(provider_message_id, safe="")
@@ -139,7 +140,13 @@ class MicrosoftEmailProvider(EmailProvider):
             or not isinstance(content, str)
         ):
             raise ProviderResponseError("Microsoft Graph returned a malformed message body.")
-        return content
+        text = content.strip()
+        return MessageBody(
+            provider_message_id=provider_message_id,
+            text=text[:MAX_EXTRACTED_CHARS],
+            source=BodySource.PLAIN if text else BodySource.NONE,
+            extraction_truncated=len(text) > MAX_EXTRACTED_CHARS,
+        )
 
     async def disconnect(self) -> None:
         """Clear local session and cached tokens."""
