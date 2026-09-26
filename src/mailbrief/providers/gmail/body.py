@@ -14,7 +14,7 @@ from email.message import Message
 
 from mailbrief.domain.bodies import MAX_EXTRACTED_CHARS, BodySource, MessageBody
 from mailbrief.ports.errors import ProviderResponseError
-from mailbrief.text.html_to_text import html_to_text
+from mailbrief.text.html_to_text import convert_html
 
 MAX_SEPARATE_PART_BYTES = 1_000_000
 # Last-resort bound per decoded part. Responses are already capped at 2 MB and separately
@@ -100,6 +100,11 @@ def _collect(part: dict[str, object], counts: _Counts, depth: int) -> list[_Segm
     counts.parts += 1
     if depth > MAX_DEPTH or counts.parts > MAX_PARTS:
         raise ProviderResponseError("Gmail message structure is too large to read.")
+    if _is_attachment(part):
+        # Checked before recursing, so an attached multipart item (an attached email, say)
+        # is never read as body text.
+        counts.attachments += 1
+        return []
     mime = _mime(part)
     if mime.startswith("multipart/"):
         children = part.get("parts", [])
@@ -117,9 +122,9 @@ def _collect(part: dict[str, object], counts: _Counts, depth: int) -> list[_Segm
             merged.plain.extend(segment.plain)
             merged.html.extend(segment.html)
         return [merged]
-    if mime in {"text/plain", "text/html"} and not _is_attachment(part):
+    if mime in {"text/plain", "text/html"}:
         return [_Segment(plain=[part])] if mime == "text/plain" else [_Segment(html=[part])]
-    if _is_attachment(part) or _has_content(part):
+    if _has_content(part):
         counts.attachments += 1
     return []
 
@@ -168,7 +173,10 @@ async def _resolve(segment: _Segment, counts: _Counts, fetch_part: PartFetcher) 
     plain = await _read_all(segment.plain, counts, fetch_part)
     if len(plain) >= STUB_PLAIN_CHARS or not segment.html:
         return plain, False
-    html = html_to_text(await _read_all(segment.html, counts, fetch_part))
+    html, cut = convert_html(
+        await _read_all(segment.html, counts, fetch_part), max_chars=MAX_EXTRACTED_CHARS
+    )
+    counts.truncated = counts.truncated or cut
     if html and (not plain or len(html) > 3 * len(plain)):
         return html, True
     return plain, False

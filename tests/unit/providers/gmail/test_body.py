@@ -164,6 +164,32 @@ async def test_malformed_children_are_rejected(children: object) -> None:
         await extract_body(message(payload), "m1", PartStore())
 
 
+@pytest.mark.parametrize(
+    ("filename", "headers"),
+    [("old-thread.eml", None), ("", {"Content-Disposition": 'attachment; filename="thread"'})],
+    ids=["filename", "disposition"],
+)
+async def test_attached_multipart_items_are_never_read(
+    filename: str, headers: dict[str, str] | None
+) -> None:
+    attached = part(
+        "multipart/mixed",
+        filename=filename,
+        headers=headers,
+        parts=[part("text/plain", "ATTACHED-THREAD-TEXT")],
+    )
+    payload = part("multipart/mixed", parts=[part("text/plain", "Body text"), attached])
+    body = await extract_body(message(payload), "m1", PartStore())
+    assert (body.text, body.attachments_skipped) == ("Body text", 1)
+
+
+async def test_html_conversion_cut_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(body_module, "MAX_EXTRACTED_CHARS", 20)
+    payload = part("text/html", "<p>" + "word " * 50 + "</p>")
+    body = await extract_body(message(payload), "m1", PartStore())
+    assert body.extraction_truncated and len(body.text) <= 20
+
+
 async def test_message_without_text_has_no_body() -> None:
     payload = part("multipart/mixed", parts=[part("image/png", filename="scan.png", size=10)])
     body = await extract_body(message(payload), "m1", PartStore())
