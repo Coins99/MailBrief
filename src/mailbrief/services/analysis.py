@@ -33,6 +33,7 @@ from mailbrief.domain.digests import SyncProgress, SyncStage
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.ports.ai_provider import AIProvider
 from mailbrief.ports.errors import (
+    NETWORK_BLOCKED_CODE,
     AIAuthenticationError,
     AICredentialsMissingError,
     AuthenticationRequiredError,
@@ -247,6 +248,8 @@ def _error_code(exc: ProviderError) -> str:
     if isinstance(exc, AIAuthenticationError | AuthenticationRequiredError):
         return "AI_AUTH_FAILED"
     if isinstance(exc, ProviderPermissionError):
+        if exc.provider_error_code == NETWORK_BLOCKED_CODE:
+            return "AI_NETWORK_BLOCKED"
         return "AI_PERMISSION_DENIED"
     if isinstance(exc, ProviderRateLimitError):
         return "AI_RATE_LIMITED"

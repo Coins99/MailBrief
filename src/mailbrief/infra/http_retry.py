@@ -15,6 +15,7 @@ from enum import StrEnum
 import httpx
 
 from mailbrief.ports.errors import (
+    NETWORK_BLOCKED_CODE,
     AIAuthenticationError,
     ProviderError,
     ProviderPermissionError,
@@ -29,6 +30,8 @@ _DURATION_RE = re.compile(
     r"^(?=[0-9])(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m(?!s))?(?:(?P<seconds>\d+(?:\.\d+)?)s)?(?:(?P<ms>\d+(?:\.\d+)?)ms)?$"
 )
 _DELTA_SECONDS_RE = re.compile(r"^\d+(\.\d+)?$")
+# Groq's 403 text for a blocked network, matched case-insensitively (see classify_groq_response).
+_GROQ_NETWORK_BLOCK = "check your network settings"
 MAX_REASONABLE_DELAY_SECONDS = 86400.0  # 24 hours ceiling to reject absurd inputs
 
 
@@ -162,6 +165,11 @@ def classify_groq_response(response: httpx.Response, client_request_id: str) -> 
         candidate = body["error"].get("code")
         if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", candidate):
             code = candidate
+        message = body["error"].get("message")
+        # Groq's edge blocks many VPN, proxy and data-centre networks with a 403 that carries
+        # no code, before the key is checked. Its text is only matched here, never kept.
+        if status == 403 and isinstance(message, str) and _GROQ_NETWORK_BLOCK in message.casefold():
+            code = NETWORK_BLOCKED_CODE
     kind: type[ProviderError] = ProviderResponseError
     retry = False
     delay = None

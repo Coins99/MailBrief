@@ -49,7 +49,7 @@ BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 MAX_RETRY_DELAY_SECONDS = 30.0
 
 AUTH_MESSAGE = "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
-PERMISSION_MESSAGE = "Groq denied access (permission, region or quota)."
+PERMISSION_MESSAGE = "Groq denied access (network, region, permission or quota)."
 RATE_LIMIT_MESSAGE = "Groq rate limit reached; retry later."
 TIMEOUT_MESSAGE = "Groq did not respond in time."
 CONNECTION_MESSAGE = "Could not reach Groq."

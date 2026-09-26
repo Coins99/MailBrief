@@ -61,7 +61,11 @@ _AI_ERROR_MESSAGES = {
     ),
     "AI_KEY_MISSING": KEY_MISSING_MESSAGE,
     "AI_AUTH_FAILED": "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set",
-    "AI_PERMISSION_DENIED": "Groq denied access (permission, region or quota).",
+    "AI_NETWORK_BLOCKED": (
+        "Groq refused this network. Groq blocks many VPN, proxy and data-centre connections; "
+        "try your usual home or mobile connection."
+    ),
+    "AI_PERMISSION_DENIED": "Groq denied access (network, region, permission or quota).",
     "AI_RATE_LIMITED": "Groq rate limit reached; retry later.",
     "AI_TIMEOUT": "Groq did not respond in time.",
     "AI_SERVER_ERROR": "Groq had a server problem or sent an unreadable reply; retry later.",

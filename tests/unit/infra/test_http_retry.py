@@ -18,6 +18,7 @@ from mailbrief.infra.http_retry import (
     parse_retry_delay,
 )
 from mailbrief.ports.errors import (
+    NETWORK_BLOCKED_CODE,
     AIAuthenticationError,
     AuthenticationRequiredError,
     ProviderError,
@@ -327,7 +328,35 @@ def test_classify_groq_response_403_forbidden_region() -> None:
     verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
     assert isinstance(verdict.exception, ProviderPermissionError)
+    assert verdict.exception.provider_error_code is None
     assert "Country or territory" not in str(verdict.exception)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Access denied. Please check your network settings.",
+        "ACCESS DENIED. PLEASE CHECK YOUR NETWORK SETTINGS",
+    ],
+)
+def test_classify_groq_response_403_network_block_gets_a_mailbrief_code(message: str) -> None:
+    response = httpx.Response(403, json={"error": {"message": message}})
+
+    verdict = classify_groq_response(response, "client-req")
+
+    assert verdict.kind == VerdictKind.FAIL
+    assert isinstance(verdict.exception, ProviderPermissionError)
+    assert verdict.exception.provider_error_code == NETWORK_BLOCKED_CODE == "network_blocked"
+    assert "network settings" not in str(verdict.exception).casefold()
+
+
+def test_classify_groq_response_network_text_outside_a_403_is_not_a_block() -> None:
+    body = {"error": {"message": "Please check your network settings.", "code": "bad_request"}}
+
+    verdict = classify_groq_response(httpx.Response(400, json=body), "client-req")
+
+    assert verdict.exception is not None
+    assert getattr(verdict.exception, "provider_error_code", None) == "bad_request"
 
 
 def test_classify_groq_response_429_insufficient_quota_is_terminal() -> None:

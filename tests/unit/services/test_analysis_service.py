@@ -29,6 +29,7 @@ from mailbrief.domain.digests import SyncProgress, SyncStage
 from mailbrief.domain.messages import AccountIdentity, EmailContact, ProviderKind, RankedMessage
 from mailbrief.ports.ai_provider import AIProvider
 from mailbrief.ports.errors import (
+    NETWORK_BLOCKED_CODE,
     AIAuthenticationError,
     AICredentialsMissingError,
     AuthenticationRequiredError,
@@ -319,6 +320,10 @@ async def test_a_provider_error_keeps_committed_results_and_fails_the_rest(tmp_p
         (ProviderResponseError("odd reply"), "AI_PROVIDER_ERROR"),
         (ProviderUnavailableError("down"), "AI_SERVER_ERROR"),
         (ProviderError("unreachable"), "AI_NETWORK_ERROR"),
+        (
+            ProviderPermissionError("blocked", provider_error_code=NETWORK_BLOCKED_CODE),
+            "AI_NETWORK_BLOCKED",
+        ),
         (AICredentialsMissingError("no key"), "AI_KEY_MISSING"),
     ],
 )

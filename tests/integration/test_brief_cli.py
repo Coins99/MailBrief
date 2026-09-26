@@ -400,8 +400,40 @@ def test_a_denied_request_shows_its_status_and_code_but_never_groq_text(
     lines = capsys.readouterr().out.splitlines()
     assert route.call_count == 1
     (outcome,) = [index for index, line in enumerate(lines) if line.startswith("Groq denied")]
+    assert lines[outcome].startswith("Groq denied access (network, region, permission or quota).")
     assert lines[outcome + 1] == detail
     assert not any(marker in line for line in lines)
+
+
+def test_a_blocked_network_is_named_without_groq_text(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    marker = "GROQ-EDGE-MARKER-3b9d"
+    route = respx_mock.post(CHAT_URL).respond(
+        403,
+        json={
+            "error": {"message": f"Access denied. Please check your network settings. {marker}."}
+        },
+    )
+    replies(monkeypatch, "yes")
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 4
+
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+    assert route.call_count == 1
+    (outcome,) = [index for index, line in enumerate(lines) if line.startswith("Groq refused")]
+    assert lines[outcome].startswith(
+        "Groq refused this network. Groq blocks many VPN, proxy and data-centre connections; "
+        "try your usual home or mobile connection."
+    )
+    assert lines[outcome + 1] == "Groq detail: HTTP 403, code network_blocked"
+    assert marker not in output
+    assert "network settings" not in output
 
 
 def test_a_partial_brief_names_the_provider_error(

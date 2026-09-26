@@ -201,9 +201,14 @@ When Groq refuses a request, the error message is followed by a line such as
 error code, when Groq sent a safe one; Groq's own error text is never shown or stored.
 
 - **"Groq rejected the API key"**: run `ai-key set` with a valid key.
-- **"Groq denied access (permission, region or quota)"**: check billing, quota, project
-  permissions and whether Groq serves your region. For HTTP 403, check in Groq Console
-  which project and organization the key belongs to, and whether the model in
+- **"Groq refused this network"** (`Groq detail: HTTP 403, code network_blocked`): Groq's
+  edge rejected the connection before checking the key, as it does for many VPN, proxy and
+  data-centre networks. Try your usual home or mobile connection. `network_blocked` is a
+  code MailBrief assigns when Groq's 403 asks you to check your network settings; Groq
+  itself sends no code, and its text is never shown or stored.
+- **"Groq denied access (network, region, permission or quota)"**: check billing, quota,
+  project permissions and whether Groq serves your region. For HTTP 403, check in Groq
+  Console which project and organization the key belongs to, and whether the model in
   `MAILBRIEF_GROQ_MODEL` is available to that project.
 - **HTTP 400, or "Groq request failed; check MAILBRIEF_GROQ_MODEL"**: the model may not
   support Structured Outputs. Choose one that does.

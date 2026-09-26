@@ -1,5 +1,11 @@
 """Provider-neutral errors surfaced to application services."""
 
+from typing import Final
+
+# A MailBrief-assigned provider_error_code, not one the provider sends: the provider refused
+# the caller's network (for example a VPN, proxy or data centre) before checking credentials.
+NETWORK_BLOCKED_CODE: Final = "network_blocked"
+
 
 class ProviderError(RuntimeError):
     """Base class for expected external-provider failures."""
