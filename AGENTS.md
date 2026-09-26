@@ -12,9 +12,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   compiling and its tests passing, but do not extend it unless a task says so.
 - Done: M1 Gmail OAuth and secure restore; M2 Inbox metadata sync, ranking and
   shortlist review (`mailbrief-gmail-diagnostic sync`).
-- Next: M3 shortlisted-body retrieval, then M4 AI analysis and digest, then M5 desktop
-  UI with Windows and macOS packages. See `docs/mvp-plan.md` and
-  `docs/email-implementation-plan.md`.
+- In progress: M3 shortlisted-body reading and preparation
+  (`mailbrief-gmail-diagnostic bodies`, `docs/gmail-bodies.md`). M4 AI analysis and digest
+  starts only after M3's live acceptance passes, then M5 desktop UI with Windows and macOS
+  packages. See `docs/mvp-plan.md` and `docs/email-implementation-plan.md`.
 
 ## Layout (ports and adapters)
 
@@ -22,16 +23,19 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` protocols and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
   `providers/openai/`: empty until M4.
-- `src/mailbrief/services/`: calendar, sync, ranking, application; `digest.py` arrives in M4.
+- `src/mailbrief/services/`: calendar, sync, ranking, bodies, application; `digest.py` arrives
+  in M4.
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`.
   Alembic revisions live in `migrations/versions/`.
-- `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text).
+- `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
+  quote trimming, length limits).
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 shell until M5.
 
 ## Invariants (never break these)
 
 - Never write full email bodies, OAuth tokens or API keys to SQLite, logs, exceptions,
-  printed output or files.
+  printed output or files. The one exception is `mailbrief-gmail-diagnostic bodies
+  --show-text`, which prints prepared text to the owner's terminal on explicit request.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - Provider JSON stays inside its adapter; services and storage use domain models only.
@@ -69,7 +73,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Tests mirror `src/` under `tests/`. Use `tests/factories.py`, `respx` for HTTP and
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
-- Coverage: at least 80% overall and 90% for the synchronization, ranking and digest
+- Coverage: at least 80% overall and 90% for the synchronization, ranking, body and digest
   services.
 
 ## Dormant Microsoft notes
