@@ -577,15 +577,20 @@ class DigestRepository:
             generated_at_utc=datetime.now(UTC),
             **coverage_values,
         )
-        stmt = base_stmt.on_conflict_do_update(
-            index_elements=["account_id", "local_date"],
-            set_={
-                "timezone_name": base_stmt.excluded.timezone_name,
-                "status": base_stmt.excluded.status,
-                "generated_at_utc": base_stmt.excluded.generated_at_utc,
-                **{name: base_stmt.excluded[name] for name in coverage_values},
-            },
-        ).returning(DigestTable)
+        stmt = (
+            base_stmt.on_conflict_do_update(
+                index_elements=["account_id", "local_date"],
+                set_={
+                    "timezone_name": base_stmt.excluded.timezone_name,
+                    "status": base_stmt.excluded.status,
+                    "generated_at_utc": base_stmt.excluded.generated_at_utc,
+                    **{name: base_stmt.excluded[name] for name in coverage_values},
+                },
+            )
+            .returning(DigestTable)
+            # Refresh a digest already loaded in this session instead of returning it stale.
+            .execution_options(populate_existing=True)
+        )
         digest = await self._session.scalar(stmt)
         assert digest is not None
 
