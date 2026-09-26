@@ -9,8 +9,12 @@ permissions:
 
 jobs:
   quality:
-    name: Lint, type, and test
-    runs-on: windows-latest
+    name: Lint, type, and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
     timeout-minutes: 20
     env:
       QT_QPA_PLATFORM: offscreen

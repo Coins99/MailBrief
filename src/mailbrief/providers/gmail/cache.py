@@ -1,4 +1,4 @@
-"""Refresh credentials stored only in Windows Credential Manager."""
+"""Refresh credentials stored only in the operating-system credential vault."""
 
 import sys
 from typing import Protocol
@@ -47,23 +47,31 @@ def _platform() -> str:
     return sys.platform
 
 
-def windows_vault() -> VaultBackend:
-    """Avoid keyring auto-selection, including insecure third-party backends."""
-    if _platform() != "win32":
-        raise GmailSetupError("Gmail credential storage currently requires Windows.")
-    try:
-        from keyring.backends.Windows import WinVaultKeyring
+def os_vault() -> VaultBackend:
+    """Choose the OS vault explicitly; never let keyring auto-select a backend."""
+    current = _platform()
+    if current == "win32":
+        try:
+            from keyring.backends.Windows import WinVaultKeyring
 
-        return WinVaultKeyring()  # type: ignore[no-untyped-call]
-    except Exception:
-        raise GmailSetupError("Windows Credential Manager is unavailable.") from None
+            return WinVaultKeyring()  # type: ignore[no-untyped-call]
+        except Exception:
+            raise GmailSetupError("Windows Credential Manager is unavailable.") from None
+    if current == "darwin":
+        try:
+            from keyring.backends.macOS import Keyring as MacOSKeychain
+
+            return MacOSKeychain()  # type: ignore[no-untyped-call]
+        except Exception:
+            raise GmailSetupError("The macOS Keychain is unavailable.") from None
+    raise GmailSetupError("Gmail credential storage requires Windows or macOS.")
 
 
 class GmailCredentialStore:
     """Fail closed if the OS vault cannot load, save, or delete credentials."""
 
     def __init__(self, backend: VaultBackend | None = None) -> None:
-        self._backend = backend if backend is not None else windows_vault()
+        self._backend = backend if backend is not None else os_vault()
 
     def load(self) -> RefreshCredential | None:
         try:

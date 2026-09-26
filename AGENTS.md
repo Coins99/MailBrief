@@ -6,13 +6,15 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 
 ## Product and status
 
-- Personal Windows desktop app that turns today's important Gmail into a short brief.
+- Personal desktop app for Windows and macOS that turns today's important Gmail into a
+  short brief. Both platforms are supported: run from source now, packaged apps in M5.
 - Gmail is the active provider. Microsoft (Outlook/Graph) code is dormant: keep it
   compiling and its tests passing, but do not extend it unless a task says so.
 - Done: M1 Gmail OAuth and secure restore; M2 Inbox metadata sync, ranking and
   shortlist review (`mailbrief-gmail-diagnostic sync`).
 - Next: M3 shortlisted-body retrieval, then M4 AI analysis and digest, then M5 desktop
-  UI and Windows package. See `docs/mvp-plan.md` and `docs/email-implementation-plan.md`.
+  UI with Windows and macOS packages. See `docs/mvp-plan.md` and
+  `docs/email-implementation-plan.md`.
 
 ## Layout (ports and adapters)
 
@@ -29,8 +31,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 
 - Never write full email bodies, OAuth tokens or API keys to SQLite, logs, exceptions,
   printed output or files.
-- Credentials live only in the OS credential store (Gmail: Windows Credential Manager,
-  no plaintext fallback).
+- Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
+  the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - Provider JSON stays inside its adapter; services and storage use domain models only.
 - Timestamps are timezone-aware UTC. Never use naive datetimes or `datetime.utcnow()`.
 - Gmail access is read-only (`gmail.readonly`). No mailbox writes or sends.

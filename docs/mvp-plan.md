@@ -14,7 +14,7 @@ product, after completion of the desktop ecosystem.
 | M2 | Inbox metadata sync, pagination and shortlist | Email MVP |
 | M3 | Selected-body decoding and minimization | Email MVP |
 | M4 | Consented structured analysis and saved brief | Email MVP |
-| M5 | Connected desktop workflow and Windows package | Email MVP gate |
+| M5 | Connected desktop workflow and Windows and macOS packages | Email MVP gate |
 | M6 | Accepted actions, target dates and editable plans | Complete email |
 | M7 | Persistent local email/note/message drafts | Complete email |
 | M8 | Thread follow-up, history and daily operation | Complete email |

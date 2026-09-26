@@ -79,7 +79,37 @@ def test_corrupt_storage_does_not_expose_payload(value: str) -> None:
         GmailCredentialStore(vault).load()
 
 
-def test_reject_non_windows_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rejects_unsupported_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    with pytest.raises(ConfigurationError, match="Windows"):
-        cache.windows_vault()
+    with pytest.raises(ConfigurationError, match="Windows or macOS"):
+        cache.os_vault()
+
+
+def test_windows_uses_credential_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    from keyring.backends.Windows import WinVaultKeyring
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert isinstance(cache.os_vault(), WinVaultKeyring)
+
+
+def test_macos_uses_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    from keyring.backends.macOS import Keyring
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert isinstance(cache.os_vault(), Keyring)
+
+
+@pytest.mark.parametrize(
+    ("platform", "module", "message"),
+    [
+        ("win32", "keyring.backends.Windows", "Windows Credential Manager"),
+        ("darwin", "keyring.backends.macOS", "macOS Keychain"),
+    ],
+)
+def test_unavailable_vault_is_setup_error(
+    monkeypatch: pytest.MonkeyPatch, platform: str, module: str, message: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setitem(sys.modules, module, None)
+    with pytest.raises(ConfigurationError, match=message):
+        cache.os_vault()

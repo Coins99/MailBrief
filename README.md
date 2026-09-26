@@ -1,14 +1,15 @@
 # MailBrief
 
-MailBrief is a Windows desktop app that turns today's important email into a
-short brief. Gmail is the first supported mailbox. Outlook code is retained for
+MailBrief is a desktop app for Windows and macOS that turns today's important
+email into a short brief. Gmail is the first supported mailbox. Outlook code is retained for
 later use after Microsoft Entra access is resolved.
 
 ## Current state
 
 - Implemented: provider-neutral models, SQLite storage, daily sync, ranking, and
   a tested Microsoft Graph adapter.
-- Implemented for M1: Gmail OAuth, Windows credential storage, and an authentication
+- Implemented for M1: Gmail OAuth, OS credential storage (Windows Credential Manager or
+  macOS Keychain), and an authentication
   diagnostic. The owner verified sign-in, restoration, disconnect and reconnect.
 - Implemented for M2: Gmail Inbox metadata, pagination, safe reconciliation,
   local ranking and a metadata sync/review diagnostic.

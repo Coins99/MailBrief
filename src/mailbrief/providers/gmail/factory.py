@@ -18,7 +18,7 @@ from mailbrief.providers.gmail.provider import GmailProvider
 
 @asynccontextmanager
 async def gmail_auth(settings: Settings) -> AsyncIterator[GmailAuth]:
-    """Own network resources and require the Windows OS vault; no token files."""
+    """Own network resources and require the OS credential vault; no token files."""
     try:
         path = settings.require_gmail_oauth_client_path()
     except ConfigurationError:
