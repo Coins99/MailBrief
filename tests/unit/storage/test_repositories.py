@@ -737,3 +737,37 @@ async def test_unanalyzed_digest_item_summary_stays_within_item_limit(
     summary = restored.items[0].summary
     assert len(summary) <= 240
     assert summary.startswith(expected_start)
+
+
+@pytest.mark.asyncio
+async def test_a_brief_with_a_provider_length_message_id_loads(database: Database) -> None:
+    long_id = "AAMkAD" + "x" * 144
+    account_id, (message_id,) = await _account_and_messages(database, long_id)
+
+    async with database.transaction() as session:
+        analysis = await AnalysisRepository(session).upsert_analysis(
+            message_id=message_id,
+            input_hash="hash-1",
+            provider="openai",
+            model="model-1",
+            prompt_version="prompt-1",
+            schema_version="2",
+            analysis=make_analysis(),
+        )
+        digest = await DigestRepository(session).save_digest(
+            account_id=account_id,
+            local_date=date(2026, 9, 4),
+            timezone_name="America/Toronto",
+            status=DigestStatus.COMPLETE,
+            items=[(message_id, analysis.id, 0, DigestSection.ACTIONS)],
+        )
+        digest_id = digest.id
+
+    async with database.session() as session:
+        repo = DigestRepository(session)
+        row = await repo.get_by_id(digest_id)
+        assert row is not None
+        restored = DigestRepository.to_domain(row, await repo.get_digest_items(digest_id), "ms-1")
+
+    assert len(long_id) == 150
+    assert [item.message_key for item in restored.items] == [long_id]

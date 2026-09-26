@@ -33,7 +33,7 @@ class DigestItem(DomainModel):
 
     model_config = ConfigDict(hide_input_in_errors=True)
 
-    message_key: str = Field(min_length=1, max_length=64)
+    message_key: str = Field(min_length=1, max_length=512)
     section: DigestSection
     position: int = Field(ge=0)
     subject: str = Field(default="", max_length=998)
