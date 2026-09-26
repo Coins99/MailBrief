@@ -25,6 +25,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/services/`: calendar, sync, ranking, application; `digest.py` arrives in M4.
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`.
   Alembic revisions live in `migrations/versions/`.
+- `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text).
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 shell until M5.
 
 ## Invariants (never break these)
