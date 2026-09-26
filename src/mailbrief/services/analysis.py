@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.analysis import (
+    ACTION_TEXT_MAX_CHARS,
     ANALYSIS_SCHEMA_VERSION,
+    SUMMARY_MAX_CHARS,
     AIUsage,
     AnalysisCandidate,
     AnalysisRequest,
@@ -40,6 +42,7 @@ from mailbrief.ports.errors import (
 from mailbrief.services.deadlines import resolve_deadline
 from mailbrief.storage.repositories import AnalysisRepository, MessageRepository
 from mailbrief.text.matching import appears_in
+from mailbrief.text.prepare import truncate_at_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +81,19 @@ def _trim_evidence(evidence: str) -> str:
     return text
 
 
+def _fit(text: str, limit: int) -> str:
+    """Text within ``limit`` characters; longer text is cut at a word break and ends in "…"."""
+    if len(text) <= limit:
+        return text
+    return truncate_at_boundary(text, limit - 1)[0] + "…"
+
+
 def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -> MessageAnalysis:
     """Check an untrusted candidate against its request and build the validated analysis.
 
-    Raises ValueError (pydantic's ValidationError is one); messages never echo email text.
+    An over-long summary or action is shortened; the evidence must still quote the email
+    within its limit. Raises ValueError (pydantic's ValidationError is one); messages never
+    echo email text.
     """
     if candidate.message_key != request.message_key:
         raise ValueError("the candidate key does not match its request")
@@ -89,12 +101,13 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
     if not appears_in(evidence, request.subject, request.body_text):
         raise ValueError("evidence must quote the email")
     deadline = resolve_deadline(candidate, request)
+    action_text = (candidate.action_text or "").strip()
     return MessageAnalysis(
         message_key=request.message_key,
         category=candidate.category,
-        summary=candidate.summary,
+        summary=_fit(candidate.summary, SUMMARY_MAX_CHARS),
         action_required=candidate.action_required,
-        action_text=(candidate.action_text or "").strip() or None,
+        action_text=_fit(action_text, ACTION_TEXT_MAX_CHARS) if action_text else None,
         deadline_text=deadline.text,
         deadline_precision=deadline.precision,
         deadline_date=deadline.date,

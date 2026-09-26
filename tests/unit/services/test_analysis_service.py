@@ -637,6 +637,35 @@ def test_validate_candidate_trims_quoted_evidence_and_blank_actions() -> None:
     assert plain.evidence == "Please approve"
 
 
+def test_validate_candidate_shortens_a_long_summary_and_action() -> None:
+    request = make_request()
+    exact = "s" * 240
+    candidate = good_candidate(
+        request,
+        summary="word " * 60,
+        action_required=True,
+        action_text="step " * 250,
+    )
+
+    analysis = validate_candidate(candidate, request)
+    unchanged = validate_candidate(good_candidate(request, summary=exact), request)
+
+    assert len(analysis.summary) <= 240
+    assert analysis.summary.endswith("word…")
+    assert analysis.action_text is not None
+    assert len(analysis.action_text) <= 1_000
+    assert analysis.action_text.endswith("step…")
+    assert unchanged.summary == exact
+
+
+def test_validate_candidate_keeps_evidence_strict_about_length() -> None:
+    long_body = "Please approve the budget. " * 50
+    request = make_request(body_text=long_body)
+
+    with pytest.raises(ValueError):
+        validate_candidate(good_candidate(request, evidence=long_body[:1_001]), request)
+
+
 def test_validate_candidate_resolves_the_deadline() -> None:
     request = make_request()
     candidate = good_candidate(
@@ -654,17 +683,33 @@ def test_validate_candidate_resolves_the_deadline() -> None:
     assert analysis.message_key == request.message_key
 
 
+def test_validate_candidate_keeps_the_analysis_when_the_deadline_date_is_unusable() -> None:
+    request = make_request()
+    candidate = good_candidate(
+        request,
+        category="deadline",
+        deadline_text="Friday 5 PM",
+        deadline_date="Sept 4",
+        deadline_time="17:00",
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    assert analysis.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert (analysis.deadline_text, analysis.deadline_date) == ("Friday 5 PM", None)
+    assert analysis.summary == "A short summary."
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
         {"message_key": "ffffffff"},
         {"evidence": "Words that never appeared."},
-        {"summary": "x" * 241},
         {"deadline_text": "next Tuesday"},
         {"category": "deadline"},
         {"action_required": True},
     ],
-    ids=["key", "evidence", "summary", "deadline", "category", "action"],
+    ids=["key", "evidence", "deadline", "category", "action"],
 )
 def test_validate_candidate_rejects_unsupported_output(overrides: dict[str, object]) -> None:
     request = make_request()

@@ -18,7 +18,7 @@ _UTC_NAMES = {"utc": "UTC", "etc/utc": "Etc/UTC"}
 
 
 class InvalidDeadlineError(ValueError):
-    """The deadline is inconsistent, not quoted from the email, or out of range."""
+    """The deadline has a date or time without a phrase, or its phrase is not in the email."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,31 +62,37 @@ def _usable_stated_zone(value: str) -> str | None:
     return value if _load_zone(value) is not None else None
 
 
-def _parse_date(value: str) -> dt.date:
+def _parse_date(value: str, received: dt.date) -> dt.date | None:
+    """A real YYYY-MM-DD day in the plausible window around the received day, else None."""
     if _DATE_PATTERN.fullmatch(value) is None:
-        raise InvalidDeadlineError("deadline date must be YYYY-MM-DD")
+        return None
     try:
-        return dt.date.fromisoformat(value)
+        day = dt.date.fromisoformat(value)
     except ValueError:
-        raise InvalidDeadlineError("deadline date must be a real calendar day") from None
+        return None
+    earliest = received - dt.timedelta(days=_PAST_DAYS)
+    latest = received + dt.timedelta(days=_FUTURE_DAYS)
+    return day if earliest <= day <= latest else None
 
 
-def _parse_time(value: str) -> dt.time:
+def _parse_time(value: str) -> dt.time | None:
+    """An H:MM or HH:MM[:SS] time within the day, without seconds, else None."""
     match = _TIME_PATTERN.fullmatch(value)
     if match is None:
-        raise InvalidDeadlineError("deadline time must be HH:MM or HH:MM:SS")
+        return None
     hour, minute = int(match[1]), int(match[2])
     second = 0 if match[3] is None else int(match[3])
     if hour > 23 or minute > 59 or second > 59:
-        raise InvalidDeadlineError("deadline time must be between 00:00 and 23:59")
+        return None
     return dt.time(hour, minute)
 
 
 def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> ResolvedDeadline:
     """Check the candidate's deadline against its email and resolve it to a day or instant.
 
-    Raises InvalidDeadlineError, whose messages are static, when the fields disagree, the
-    phrase is not in the email or the date is implausible. Offsets are never guessed.
+    Raises InvalidDeadlineError, whose messages are static, when a date or time comes
+    without a phrase or the phrase is not in the email. An unusable date keeps the phrase
+    as unresolved, and an unusable time keeps only the date. Offsets are never guessed.
     """
     text = _clean(candidate.deadline_text)
     raw_date = _clean(candidate.deadline_date)
@@ -101,29 +107,24 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
         text, request.subject, request.body_text
     ):
         raise InvalidDeadlineError("deadline text must quote the email")
+    unresolved = ResolvedDeadline(text, DeadlinePrecision.UNRESOLVED, None, None, None)
     if raw_date is None:
-        if raw_time is not None:
-            raise InvalidDeadlineError("a deadline time requires a date")
-        return ResolvedDeadline(text, DeadlinePrecision.UNRESOLVED, None, None, None)
-
-    due_date = _parse_date(raw_date)
+        return unresolved  # A time without a day cannot be placed.
     received = request.received_at_utc.astimezone(ZoneInfo(request.timezone_name)).date()
-    earliest = received - dt.timedelta(days=_PAST_DAYS)
-    latest = received + dt.timedelta(days=_FUTURE_DAYS)
-    if not earliest <= due_date <= latest:
-        raise InvalidDeadlineError("deadline date is outside the plausible window")
-    if raw_time is None:
-        return ResolvedDeadline(text, DeadlinePrecision.DATE, due_date, None, request.timezone_name)
-
-    due_time = _parse_time(raw_time)
+    due_date = _parse_date(raw_date, received)
+    if due_date is None:
+        return unresolved
+    date_only = ResolvedDeadline(
+        text, DeadlinePrecision.DATE, due_date, None, request.timezone_name
+    )
+    due_time = None if raw_time is None else _parse_time(raw_time)
+    if due_time is None:
+        return date_only
     zone_name = request.timezone_name
     if stated_zone is not None:
         usable = _usable_stated_zone(stated_zone)
         if usable is None:
-            # The email names a zone we will not guess an offset for: keep only the day.
-            return ResolvedDeadline(
-                text, DeadlinePrecision.DATE, due_date, None, request.timezone_name
-            )
+            return date_only  # The email names a zone we will not guess an offset for.
         zone_name = usable
     zone = ZoneInfo(zone_name)
     at_utc = dt.datetime.combine(due_date, due_time, tzinfo=zone).astimezone(dt.UTC)

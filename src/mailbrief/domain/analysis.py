@@ -13,6 +13,13 @@ from mailbrief.domain.messages import EmailContact
 
 ANALYSIS_SCHEMA_VERSION: Final = "2"
 
+# Limits shared by the analysis contract, the brief and storage.
+SUMMARY_MAX_CHARS: Final = 240
+ACTION_TEXT_MAX_CHARS: Final = 1_000
+DEADLINE_TEXT_MAX_CHARS: Final = 500
+EVIDENCE_MAX_CHARS: Final = 1_000
+MAX_ANALYSIS_BATCH: Final = 10  # Messages per provider call.
+
 
 def _require_time_zone(value: str) -> str:
     """Accept only IANA names that ZoneInfo can load; the error never echoes the value."""
@@ -127,16 +134,18 @@ class MessageAnalysis(DomainModel):
 
     message_key: str = Field(min_length=1, max_length=64)
     category: AnalysisCategory
-    summary: str = Field(min_length=1, max_length=240)
+    summary: str = Field(min_length=1, max_length=SUMMARY_MAX_CHARS)
     action_required: bool
-    action_text: str | None = Field(default=None, min_length=1, max_length=1_000)
-    deadline_text: str | None = Field(default=None, min_length=1, max_length=500)
+    action_text: str | None = Field(default=None, min_length=1, max_length=ACTION_TEXT_MAX_CHARS)
+    deadline_text: str | None = Field(
+        default=None, min_length=1, max_length=DEADLINE_TEXT_MAX_CHARS
+    )
     deadline_precision: DeadlinePrecision = DeadlinePrecision.NONE
     deadline_date: date | None = None
     deadline_at_utc: datetime | None = None
     deadline_timezone: str | None = None  # The zone used to resolve the date or instant.
     confidence: float = Field(ge=0, le=1)
-    evidence: str = Field(min_length=1, max_length=1_000)
+    evidence: str = Field(min_length=1, max_length=EVIDENCE_MAX_CHARS)
 
     @field_validator("deadline_at_utc")
     @classmethod
