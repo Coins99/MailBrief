@@ -238,6 +238,7 @@ def test_d6_utc_and_iana_region_zones_resolve_exactly(
     ],
 )
 def test_d6_abbreviated_offset_and_unknown_zones_keep_only_the_day(zone: str) -> None:
+    # The email writes each zone, so the name rules (not the grounding rule) decide.
     resolved = resolve_deadline(
         candidate(
             deadline_text="5 PM PT",
@@ -245,7 +246,7 @@ def test_d6_abbreviated_offset_and_unknown_zones_keep_only_the_day(zone: str) ->
             deadline_time="17:00",
             stated_timezone=zone,
         ),
-        request(),
+        request(body_text=f"{BODY} Times are {zone}."),
     )
 
     assert resolved == ResolvedDeadline(
