@@ -461,6 +461,19 @@ async def test_the_preview_states_the_body_limit_the_body_service_applies(
     assert "8,000" not in text
 
 
+async def test_the_disclosure_shows_the_provider_privacy_notice(session: AsyncSession) -> None:
+    gate = RecordingGate(answer=True)
+
+    await build(session, FakeAIProvider([answer_all()]), gate).generate(tz_key=ZONE)
+
+    (preview,) = gate.previews
+    assert preview.privacy_notice == "The fake provider keeps nothing."
+    text = "\n".join(disclosure_lines(preview))
+    assert "The fake provider keeps nothing." in text
+    assert "Zero Data Retention" not in text
+    assert "Groq" not in text
+
+
 async def test_nothing_to_send_never_calls_the_gate(session: AsyncSession) -> None:
     gate = RecordingGate(answer=False)
 
@@ -498,6 +511,7 @@ def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
         reused_count=2,
         first_use=True,
         body_character_limit=4_000,
+        privacy_notice="The provider keeps nothing.",
     )
 
     text = "\n".join(disclosure_lines(preview))
@@ -508,8 +522,7 @@ def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
     assert "plain-text body, cut to at most 4,000 characters" in text
     assert "8,000" not in text
     assert "attachments, recipients, message IDs, links, account IDs or credentials" in text
-    assert "Zero Data Retention" in text
-    assert "cannot verify" in text
+    assert "The provider keeps nothing." in text
     assert "2 messages already analyzed" in text
     assert "remembered for this account until you revoke it" in text
 
@@ -523,6 +536,7 @@ def test_disclosure_lines_for_a_returning_user_without_truncation() -> None:
         reused_count=0,
         first_use=False,
         body_character_limit=8_000,
+        privacy_notice="The provider keeps nothing.",
     )
 
     text = "\n".join(disclosure_lines(preview))

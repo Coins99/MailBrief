@@ -307,6 +307,10 @@ class AnalysisService:
     def model_name(self) -> str:
         return self._provider.model_name
 
+    @property
+    def privacy_notice(self) -> str:
+        return self._provider.privacy_notice
+
     async def plan(
         self,
         *,

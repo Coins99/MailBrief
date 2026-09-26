@@ -39,6 +39,7 @@ class TransmissionPreview(DomainModel):
     reused_count: int = Field(ge=0)
     first_use: bool
     body_character_limit: int = Field(ge=1, le=MAX_ANALYSIS_CHARS)  # The limit applied.
+    privacy_notice: str = Field(min_length=1, max_length=500)  # From the AI provider.
 
     @property
     def fields(self) -> tuple[str, ...]:

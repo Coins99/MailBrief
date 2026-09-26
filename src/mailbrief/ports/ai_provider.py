@@ -26,6 +26,11 @@ class AIProvider(Protocol):
         ...
 
     @property
+    def privacy_notice(self) -> str:
+        """Return the provider's data-handling notice, shown before the user consents."""
+        ...
+
+    @property
     def requests_sent(self) -> int:
         """Return the HTTP attempts made so far, including failed and retried ones."""
         ...

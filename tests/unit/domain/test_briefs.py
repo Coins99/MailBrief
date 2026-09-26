@@ -46,6 +46,7 @@ def preview(**overrides: object) -> TransmissionPreview:
         "reused_count": 2,
         "first_use": True,
         "body_character_limit": 4_000,
+        "privacy_notice": "The provider keeps nothing.",
     }
     values.update(overrides)
     return TransmissionPreview.model_validate(values)
@@ -76,6 +77,8 @@ def test_preview_fields_state_the_applied_body_limit() -> None:
         {"provider_name": ""},
         {"body_character_limit": 0},
         {"body_character_limit": 8_001},
+        {"privacy_notice": ""},
+        {"privacy_notice": "x" * 501},
     ],
     ids=[
         "nothing-to-send",
@@ -84,6 +87,8 @@ def test_preview_fields_state_the_applied_body_limit() -> None:
         "no-provider",
         "no-body",
         "body-over-limit",
+        "no-notice",
+        "notice-too-long",
     ],
 )
 def test_invalid_previews_are_rejected(overrides: dict[str, object]) -> None:

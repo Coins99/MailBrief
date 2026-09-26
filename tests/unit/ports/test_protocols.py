@@ -65,6 +65,10 @@ class FakeAIProvider:
         return "fake-prompt-1"
 
     @property
+    def privacy_notice(self) -> str:
+        return "The fake provider keeps nothing."
+
+    @property
     def requests_sent(self) -> int:
         return 0
 

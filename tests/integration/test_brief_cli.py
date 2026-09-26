@@ -17,7 +17,7 @@ from mailbrief.providers.gmail.client import MESSAGES_URL, GmailClient
 from mailbrief.providers.gmail.provider import GmailProvider
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE
 from mailbrief.providers.groq.factory import groq_provider
-from mailbrief.providers.groq.provider import GroqProvider
+from mailbrief.providers.groq.provider import PRIVACY_NOTICE, GroqProvider
 from tests.unit.providers.gmail.body_fixtures import message, part
 from tests.unit.providers.gmail.metadata_fixtures import FakeSession, metadata
 from tests.unit.providers.groq.groq_fixtures import (
@@ -155,6 +155,7 @@ def test_first_brief_asks_then_saves_and_prints_counts_only(
     output = capsys.readouterr().out
     assert "MailBrief will send 1 message to Groq (test-model)" in output
     assert "plain-text body, cut to at most 4,000 characters" in output  # The default limit.
+    assert PRIVACY_NOTICE in output  # Groq's notice, word for word.
     assert "8,000" not in output
     assert "Brief: saved (complete); items: 1" in output
     assert (

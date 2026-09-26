@@ -49,6 +49,10 @@ class FakeAIProvider:
         return len(self.batches)
 
     @property
+    def privacy_notice(self) -> str:
+        return "The fake provider keeps nothing."
+
+    @property
     def requests_sent(self) -> int:
         return self.calls * self.attempts_per_call
 

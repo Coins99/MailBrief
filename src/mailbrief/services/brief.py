@@ -63,9 +63,7 @@ def disclosure_lines(preview: TransmissionPreview) -> tuple[str, ...]:
         else "No message is cut to fit the length limit.",
         "For each message it sends: " + "; ".join(preview.fields) + ".",
         "It never sends attachments, recipients, message IDs, links, account IDs or credentials.",
-        "Enable Zero Data Retention in Groq Console Data Controls before sending private mail. "
-        "MailBrief cannot verify that setting. Without it, reliability/abuse logs may retain "
-        "content for up to 30 days (or longer when legally required). Usage metadata is retained.",
+        preview.privacy_notice,
     ]
     if preview.reused_count:
         lines.append(
@@ -197,6 +195,7 @@ class BriefService:
             reused_count=sum(item.outcome is AnalysisOutcome.REUSED for item in plan.messages),
             first_use=active is None,
             body_character_limit=self._bodies.limit,
+            privacy_notice=self._analysis.privacy_notice,
         )
         if not await self._consent_gate.confirm(preview):
             logger.info("AI consent declined for %d messages", preview.message_count)

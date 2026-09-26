@@ -56,6 +56,11 @@ CONNECTION_MESSAGE = "Could not reach Groq."
 UNREADABLE_MESSAGE = "Groq returned an unreadable response."
 KEY_MISSING_MESSAGE = "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set"
 _VAULT_WARNING = "The Groq API key could not be read from the OS credential store."
+PRIVACY_NOTICE = (
+    "Enable Zero Data Retention in Groq Console Data Controls before sending private mail. "
+    "MailBrief cannot verify that setting. Without it, reliability/abuse logs may retain "
+    "content for up to 30 days (or longer when legally required). Usage metadata is retained."
+)
 
 INSTRUCTIONS = (
     "You extract facts from emails for one person's private daily brief.\n"
@@ -329,6 +334,10 @@ class GroqProvider:
     @property
     def prompt_version(self) -> str:
         return PROMPT_VERSION
+
+    @property
+    def privacy_notice(self) -> str:
+        return PRIVACY_NOTICE
 
     @property
     def requests_sent(self) -> int:

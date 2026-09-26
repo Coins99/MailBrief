@@ -32,6 +32,7 @@ from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.providers.groq.provider import (
     AUTH_MESSAGE,
     INSTRUCTIONS,
+    PRIVACY_NOTICE,
     PROMPT_VERSION,
     UNREADABLE_MESSAGE,
     AnalysisWireBatch,
@@ -144,6 +145,18 @@ async def test_the_request_is_strict_and_minimized(
     assert messages[0]["received_local"] == "2026-09-04 (Friday) 09:30"
     assert (messages[0]["time_zone"], messages[0]["body_truncated"]) == ("America/Toronto", True)
     assert re.fullmatch(r"[0-9a-f-]{36}", sent.headers["X-Client-Request-Id"])
+
+
+def test_the_privacy_notice_is_unchanged_for_groq_users(provider: GroqProvider) -> None:
+    expected = (
+        "Enable Zero Data Retention in Groq Console Data Controls before sending private "
+        "mail. MailBrief cannot verify that setting. Without it, reliability/abuse logs may "
+        "retain content for up to 30 days (or longer when legally required). Usage metadata "
+        "is retained."
+    )
+
+    # Changing this text needs a new CONSENT_DISCLOSURE_VERSION, so users consent again.
+    assert provider.privacy_notice == PRIVACY_NOTICE == expected
 
 
 def test_the_prompt_version_changes_with_the_prompt_or_schema() -> None:
