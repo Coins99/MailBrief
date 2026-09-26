@@ -556,14 +556,15 @@ def _fallback_summary(preview: str, subject: str) -> str:
 def _displayed_precision(analysis: AnalysisTable) -> DeadlinePrecision:
     """The precision to show; rows saved before migration 0004 read "none" even with a deadline.
 
-    A legacy phrase shows as unresolved, and a legacy instant without a phrase as exact.
+    A legacy instant shows as exact, keeping its phrase; a legacy phrase alone shows as
+    unresolved.
     """
     precision = DeadlinePrecision(analysis.deadline_precision)
     if precision is DeadlinePrecision.NONE:
-        if analysis.deadline_text:
-            return DeadlinePrecision.UNRESOLVED
         if analysis.deadline_at_utc is not None:
             return DeadlinePrecision.DATETIME
+        if analysis.deadline_text:
+            return DeadlinePrecision.UNRESOLVED
     return precision
 
 

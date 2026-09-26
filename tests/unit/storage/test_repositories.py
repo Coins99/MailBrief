@@ -591,8 +591,12 @@ async def test_analysis_cache_identity_separates_provider_and_schema(database: D
 
 @pytest.mark.asyncio
 async def test_legacy_deadline_rows_still_show_their_deadline(database: Database) -> None:
-    account_id, (first_id, second_id) = await _account_and_messages(database, "msg-1", "msg-2")
+    account_id, message_ids = await _account_and_messages(database, "msg-1", "msg-2", "msg-3")
     due = datetime(2026, 9, 4, 21, 0, tzinfo=UTC)
+    # Shape rows as migration 0004 left rows saved before it: precision "none", and a
+    # phrase and instant each kept or not.
+    legacy = {"deadline_precision": "none", "deadline_date": None, "deadline_timezone": None}
+    shapes = [legacy, {**legacy, "deadline_text": None}, {**legacy, "deadline_at_utc": None}]
 
     async with database.transaction() as session:
         analyses = AnalysisRepository(session)
@@ -606,26 +610,22 @@ async def test_legacy_deadline_rows_still_show_their_deadline(database: Database
                 schema_version="1",
                 analysis=make_analysis(),
             )
-            for message_id in (first_id, second_id)
+            for message_id in message_ids
         ]
-        # Shape both rows as migration 0004 left rows saved before it: precision "none".
-        legacy = {"deadline_precision": "none", "deadline_date": None, "deadline_timezone": None}
-        await session.execute(
-            update(AnalysisTable).where(AnalysisTable.id == rows[0].id).values(**legacy)
-        )
-        await session.execute(
-            update(AnalysisTable)
-            .where(AnalysisTable.id == rows[1].id)
-            .values(**legacy, deadline_text=None)
-        )
+        for analysis_row, shape in zip(rows, shapes, strict=True):
+            await session.execute(
+                update(AnalysisTable).where(AnalysisTable.id == analysis_row.id).values(**shape)
+            )
         digest = await DigestRepository(session).save_digest(
             account_id=account_id,
             local_date=date(2026, 9, 4),
             timezone_name="America/Toronto",
             status=DigestStatus.COMPLETE,
             items=[
-                (first_id, rows[0].id, 0, DigestSection.ACTIONS),
-                (second_id, rows[1].id, 1, DigestSection.ACTIONS),
+                (message_id, analysis_row.id, position, DigestSection.ACTIONS)
+                for position, (message_id, analysis_row) in enumerate(
+                    zip(message_ids, rows, strict=True)
+                )
             ],
         )
         digest_id = digest.id
@@ -639,16 +639,20 @@ async def test_legacy_deadline_rows_still_show_their_deadline(database: Database
         stored = [analysis for _, _, analysis in items if analysis is not None]
         loaded = [AnalysisRepository.to_domain(item, message_key="local-1") for item in stored]
 
-    with_text, without_text = restored.items
-    assert with_text.deadline_precision is DeadlinePrecision.UNRESOLVED
-    assert with_text.deadline_text == "Friday 5 PM"
-    assert without_text.deadline_precision is DeadlinePrecision.DATETIME
-    assert without_text.deadline_at_utc == due
-    phrase_only, instant_only = loaded
+    both, instant_only, phrase_only = restored.items
+    assert both.deadline_precision is DeadlinePrecision.DATETIME  # The instant wins...
+    assert (both.deadline_at_utc, both.deadline_text) == (due, "Friday 5 PM")  # ...with its phrase.
+    assert instant_only.deadline_precision is DeadlinePrecision.DATETIME
+    assert (instant_only.deadline_at_utc, instant_only.deadline_text) == (due, None)
     assert phrase_only.deadline_precision is DeadlinePrecision.UNRESOLVED
-    assert (phrase_only.deadline_text, phrase_only.deadline_at_utc) == ("Friday 5 PM", None)
-    assert instant_only.deadline_precision is DeadlinePrecision.NONE
-    assert (instant_only.deadline_text, instant_only.deadline_at_utc) == (None, None)
+    assert (phrase_only.deadline_at_utc, phrase_only.deadline_text) == (None, "Friday 5 PM")
+    # Validated analyses need a zone for an instant, so a legacy phrase stays unresolved there.
+    loaded_both, loaded_instant, loaded_phrase = loaded
+    assert loaded_both.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert (loaded_both.deadline_text, loaded_both.deadline_at_utc) == ("Friday 5 PM", None)
+    assert loaded_instant.deadline_precision is DeadlinePrecision.NONE
+    assert (loaded_instant.deadline_text, loaded_instant.deadline_at_utc) == (None, None)
+    assert loaded_phrase.deadline_precision is DeadlinePrecision.UNRESOLVED
 
 
 @pytest.mark.asyncio
