@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import contextlib
 import getpass
 import logging
+import threading
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,8 +32,9 @@ from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
-from mailbrief.services.calendar import local_day_window, resolve_timezone
+from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.ranking import ShortlistReviewError
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -62,6 +65,22 @@ _AI_ERROR_MESSAGES = {
 }
 
 
+class SettingsError(ConfigurationError):
+    """A MailBrief setting is invalid. Messages name the settings, never their values."""
+
+
+def _load_settings() -> Settings:
+    """Build Settings, naming each invalid MAILBRIEF_* variable without its value."""
+    try:
+        return Settings()
+    except ValidationError as exc:
+        names = sorted(
+            {f"MAILBRIEF_{str(error['loc'][0]).upper()}" for error in exc.errors() if error["loc"]}
+        )
+        listed = ", ".join(names) or "MAILBRIEF_* settings"
+        raise SettingsError(f"Invalid setting: {listed}. See docs/ai-analysis.md.") from None
+
+
 async def run(command: str, *, silent_only: bool) -> int:
     """Verify a profile or forget credentials; output contains no mailbox identity."""
     if command == "disconnect":
@@ -69,7 +88,7 @@ async def run(command: str, *, silent_only: bool) -> int:
         print("Local Gmail credentials removed. Google access and local app data are unchanged.")
         return 0
 
-    async with gmail_auth(Settings()) as auth:
+    async with gmail_auth(_load_settings()) as auth:
         await auth.connect(silent_only=silent_only)
         print("Gmail read-only connection verified. No messages downloaded (M1).")
         return 0
@@ -89,7 +108,7 @@ async def sync(
     now = datetime.now(UTC)
     window = local_day_window(now, tz)
     path = database_path or AppPaths.from_qt().database_path
-    async with gmail_provider(Settings(), silent_only=silent_only) as provider:
+    async with gmail_provider(_load_settings(), silent_only=silent_only) as provider:
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
         database = Database.from_path(path)
@@ -168,7 +187,7 @@ async def bodies(
     show_text: bool,
 ) -> int:
     """Sync today's metadata, then read and prepare the shortlist in memory only."""
-    settings = Settings()
+    settings = _load_settings()
     tz = resolve_timezone(timezone)
     now = datetime.now(UTC)
     path = database_path or AppPaths.from_qt().database_path
@@ -258,11 +277,32 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
 
 
 async def _ask(prompt: str) -> str:
-    try:
-        answer = await asyncio.to_thread(input, prompt)
-    except EOFError:
-        return ""
-    return answer.strip()
+    """Read one answer in a daemon thread, so Ctrl+C never waits for Enter; EOF answers ""."""
+    loop = asyncio.get_running_loop()
+    answer: asyncio.Future[str] = loop.create_future()
+
+    def settle(result: str | Exception) -> None:
+        if answer.done():
+            return
+        if isinstance(result, Exception):
+            answer.set_exception(result)
+        else:
+            answer.set_result(result)
+
+    def read() -> None:
+        result: str | Exception
+        try:
+            result = input(prompt)
+        except EOFError:
+            result = ""
+        except Exception as exc:
+            result = exc
+        # After Ctrl+C the loop may be closed; nobody is waiting for this answer then.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(settle, result)
+
+    threading.Thread(target=read, name="mailbrief-prompt", daemon=True).start()
+    return (await answer).strip()
 
 
 class CliConsentGate:
@@ -336,6 +376,12 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
     partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")
     if result.status is BriefStatus.SAVED and partial_reason is not None:
         print(partial_reason)
+    if _sync_incomplete(result):
+        print("Inbox sync was incomplete, so this brief may be missing messages.")
+
+
+def _sync_incomplete(result: BriefRunResult) -> bool:
+    return result.coverage is not None and not result.coverage.sync_complete
 
 
 def _deadline(item: DigestItem, zone: ZoneInfo) -> str | None:
@@ -363,9 +409,11 @@ def _print_items(digest: DailyDigest) -> None:
 
 
 def _brief_exit_code(result: BriefRunResult) -> int:
+    """0 only for a complete brief, or an empty one after a complete sync."""
     if result.status is BriefStatus.SAVED:
         complete = (DigestStatus.COMPLETE, DigestStatus.EMPTY)
-        return 0 if result.digest is not None and result.digest.status in complete else 4
+        finished = result.digest is not None and result.digest.status in complete
+        return 0 if finished and not _sync_incomplete(result) else 4
     if result.status is BriefStatus.CONSENT_DECLINED:
         return 6
     if result.status is BriefStatus.CANCELLED:
@@ -384,7 +432,7 @@ async def brief(
     show: bool,
 ) -> int:
     """Sync, ask consent, analyze the shortlist with OpenAI and save today's brief."""
-    settings = Settings()
+    settings = _load_settings()
     tz = resolve_timezone(timezone)
     now = datetime.now(UTC)
     window = local_day_window(now, tz)
@@ -544,6 +592,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except GmailSetupError as exc:
         print(str(exc))
         return 3
+    except SettingsError as exc:
+        print(str(exc))
+        return 3
     except ConfigurationError as exc:
         # AI setup errors (model, key, vault) carry static, actionable messages.
         print(str(exc) if args.command in _AI_COMMANDS else _SETUP_UNAVAILABLE)
@@ -554,12 +605,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except ProviderError as exc:
         print(str(exc))
         return 4
-    except ValueError:
+    except (InvalidTimezoneError, ShortlistReviewError):
         print(
             "Invalid timezone or shortlist choices; "
             "IDs must belong to today's Inbox without overlap."
         )
         return 3
+    except ValueError as exc:
+        print(f"Unexpected error ({type(exc).__name__}).")
+        return 1
     except (SQLAlchemyError, OSError, CommandError):
         print(
             "Local database or file operation failed. "
@@ -567,7 +621,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         return 5
     except KeyboardInterrupt:
-        print("Gmail diagnostic cancelled.")
+        print("Cancelled.")
         return 130
 
 

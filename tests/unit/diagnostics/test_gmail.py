@@ -1,5 +1,7 @@
 """CLI output and exit codes never expose credentials or mailbox contents."""
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,6 +14,8 @@ from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponse
 from mailbrief.providers.gmail.auth import GmailAuth
 from mailbrief.providers.gmail.cache import GmailCredentialStore
 from mailbrief.providers.gmail.errors import GmailSetupError
+from mailbrief.services.calendar import InvalidTimezoneError
+from mailbrief.services.ranking import ShortlistReviewError
 from tests.unit.providers.gmail.test_cache import MemoryVault, credential
 
 
@@ -44,12 +48,15 @@ def test_disconnect_needs_no_client_file(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.parametrize(
-    "error,code",
+    "error,code,message",
     [
-        (AuthenticationRequiredError("Reconnect Gmail."), 2),
-        (ConfigurationError("sensitive file path"), 3),
-        (ProviderResponseError("Google unavailable."), 4),
-        (KeyboardInterrupt(), 130),
+        (AuthenticationRequiredError("Reconnect Gmail."), 2, "Reconnect Gmail."),
+        (ConfigurationError("sensitive file path"), 3, "configuration or secure storage"),
+        (ProviderResponseError("Google unavailable."), 4, "Google unavailable."),
+        (InvalidTimezoneError("sensitive zone"), 3, "Invalid timezone or shortlist choices"),
+        (ShortlistReviewError("sensitive IDs"), 3, "Invalid timezone or shortlist choices"),
+        (ValueError("sensitive detail"), 1, "Unexpected error (ValueError)."),
+        (KeyboardInterrupt(), 130, "Cancelled."),
     ],
 )
 def test_safe_failure_codes(
@@ -57,6 +64,7 @@ def test_safe_failure_codes(
     capsys: pytest.CaptureFixture[str],
     error: BaseException,
     code: int,
+    message: str,
 ) -> None:
     @asynccontextmanager
     async def factory(settings: Settings) -> AsyncIterator[GmailAuth]:
@@ -65,7 +73,63 @@ def test_safe_failure_codes(
 
     monkeypatch.setattr(gmail, "gmail_auth", factory)
     assert gmail.main(["fetch", "--silent-only"]) == code
-    assert "sensitive" not in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert message in output
+    assert "sensitive" not in output
+
+
+def test_invalid_settings_are_named_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("MAILBRIEF_AI_TIMEOUT_SECONDS", "7")
+    monkeypatch.setenv("MAILBRIEF_AI_BATCH_SIZE", "999")
+
+    assert gmail.main(["fetch"]) == 3
+
+    output = capsys.readouterr().out
+    assert output.strip() == (
+        "Invalid setting: MAILBRIEF_AI_BATCH_SIZE, MAILBRIEF_AI_TIMEOUT_SECONDS. "
+        "See docs/ai-analysis.md."
+    )
+
+
+async def test_a_prompt_answer_is_stripped_and_eof_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers: list[str | EOFError] = [" y ", EOFError()]
+
+    def fake_input(prompt: str = "") -> str:
+        answer = answers.pop(0)
+        if isinstance(answer, EOFError):
+            raise answer
+        return answer
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert await gmail._ask("Send? ") == "y"
+    assert await gmail._ask("Send? ") == ""
+
+
+async def test_a_cancelled_prompt_does_not_wait_for_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def blocking_input(prompt: str = "") -> str:
+        started.set()
+        release.wait(5)
+        return "too late"
+
+    monkeypatch.setattr("builtins.input", blocking_input)
+    task = asyncio.create_task(gmail._ask("Send? "))
+    await asyncio.to_thread(started.wait, 5)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    (reader,) = [thread for thread in threading.enumerate() if thread.name == "mailbrief-prompt"]
+    assert reader.daemon  # Interpreter exit never waits for the pending read.
+    release.set()
+    reader.join(5)
 
 
 def test_actionable_setup_error_is_displayed(

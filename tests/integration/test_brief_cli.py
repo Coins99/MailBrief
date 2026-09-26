@@ -43,6 +43,7 @@ class Mailbox:
         self.body = BODY
         self._router = router
         self._identifiers: list[str] = []
+        self._metadata: dict[str, respx.Route] = {}
         router.get(MESSAGES_URL).mock(side_effect=self._list)
         self.add("a1")
 
@@ -52,9 +53,13 @@ class Mailbox:
         self._router.get(f"{MESSAGES_URL}/{identifier}", params__contains={"format": "full"}).mock(
             side_effect=lambda request: self._full_message(identifier)
         )
-        self._router.get(f"{MESSAGES_URL}/{identifier}").respond(
+        self._metadata[identifier] = self._router.get(f"{MESSAGES_URL}/{identifier}").respond(
             json=metadata(identifier, received=received)
         )
+
+    def break_metadata(self, identifier: str) -> None:
+        """Serve another message's metadata, which the sync counts as a failed item."""
+        self._metadata[identifier].respond(json=metadata("mismatched"))
 
     def _list(self, request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"messages": [{"id": id_} for id_ in self._identifiers]})
@@ -269,6 +274,25 @@ def test_a_partial_brief_names_the_provider_error(
     assert lines[outcome + 1] == (
         "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
     )
+
+
+def test_an_empty_brief_after_an_incomplete_sync_exits_4(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = openai_answers(respx_mock)
+    mailbox.break_metadata("a1")
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 4
+
+    output = capsys.readouterr().out
+    assert route.call_count == 0
+    assert "Brief: saved (empty); items: 0" in output
+    assert "sync complete: no" in output
+    assert "AI: nothing sent this run" in output
+    assert "Inbox sync was incomplete, so this brief may be missing messages." in output
 
 
 def test_show_prints_the_items_but_never_evidence(
