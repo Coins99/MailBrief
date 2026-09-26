@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from mailbrief.text.html_to_text import MAX_QUOTE_DEPTH, convert_html, html_to_text
 
 
@@ -106,3 +108,18 @@ def test_conversion_stops_at_the_size_limit_and_says_so() -> None:
 
 def test_blank_lines_do_not_pile_up() -> None:
     assert html_to_text("<br>" * 100_000 + "<p></p>" * 50_000 + "end") == "end"
+
+
+@pytest.mark.parametrize(
+    "filler",
+    [" \n\t" * 100_000, "&zwnj;&nbsp;" * 100_000, "\u034f " * 100_000],
+    ids=["whitespace", "entity-padding", "grapheme-joiner-padding"],
+)
+def test_whitespace_and_padding_do_not_use_up_the_budget(filler: str) -> None:
+    markup = "<div>" + filler + "</div><p>Real content</p>"
+    assert convert_html(markup, max_chars=1_000) == ("Real content", False)
+
+
+def test_collapsed_spacing_between_words_is_kept() -> None:
+    assert html_to_text("<p>Hello   \n  <b>big</b>\t\tworld</p>") == "Hello big world"
+    assert html_to_text("<table><tr><td>Name</td><td>Due</td></tr></table>") == "Name Due"

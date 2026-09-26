@@ -70,7 +70,16 @@ _HIDDEN_STYLE = re.compile(
 # Quote markers stop growing past this depth, so deeply nested quotes can't multiply output.
 MAX_QUOTE_DEPTH = 5
 DEFAULT_MAX_CHARS = 1_000_000
-_INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"))
+# Invisible characters and padding fillers that email templates repeat to fill space.
+_INVISIBLE = dict.fromkeys(
+    map(
+        ord,
+        "\u00ad\u034f\u115f\u1160\u180e\u200b\u200c\u200d\u200e\u200f\u202a\u202b"
+        "\u202c\u202d\u202e\u2060\u2061\u2062\u2063\u2064\u2066\u2067\u2068\u2069"
+        "\u2800\u3164\ufeff\uffa0",
+    )
+)
+_WHITESPACE = re.compile(r"\s+")
 _DECIMAL_REF = re.compile(r"&#(\d+)(;?)")
 
 
@@ -112,18 +121,25 @@ class _TextBuilder(HTMLParser):
         self.truncated = False
 
     def _append(self, fragment: str) -> None:
-        """Add text to the current line, stopping for good once the size budget is spent."""
-        room = self._max_chars - self._size
-        if len(fragment) > room:
-            self.truncated = self.truncated or bool(fragment[max(room, 0) :].strip())
-            fragment = fragment[: max(room, 0)]
-        if not fragment:
-            return
+        """Add text to the current line, stopping for good once the size budget is spent.
+
+        Invisible padding is dropped and whitespace collapsed before counting, as rendering
+        would do anyway, so indentation and spacer text can't use up the budget.
+        """
         depth, fragments = self._lines[-1]
+        text = _WHITESPACE.sub(" ", fragment.translate(_INVISIBLE))
+        if text.startswith(" ") and (not fragments or fragments[-1].endswith(" ")):
+            text = text[1:]
+        room = self._max_chars - self._size
+        if len(text) > room:
+            self.truncated = self.truncated or bool(text[max(room, 0) :].strip())
+            text = text[: max(room, 0)]
+        if not text:
+            return
         if not fragments and depth != self._quote_depth:
             self._lines[-1] = (self._quote_depth, fragments)
-        fragments.append(fragment)
-        self._size += len(fragment)
+        fragments.append(text)
+        self._size += len(text)
 
     def _inside_hidden(self) -> bool:
         return bool(self._open) and self._open[-1][1]
