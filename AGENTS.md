@@ -96,8 +96,12 @@ uv sync --locked --all-groups
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
+uv run mypy --platform win32 src tests
+uv run mypy --platform darwin src tests
 uv run pytest
 ```
+
+CI type-checks on both Windows and macOS, so run mypy for both platforms before pushing.
 
 ## Git workflow
 
