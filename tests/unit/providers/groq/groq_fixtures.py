@@ -1,16 +1,12 @@
-"""Synthetic OpenAI Responses payloads and an in-memory vault for adapter and CLI tests.
-
-This folder deliberately has no __init__.py: as a package named "openai" it could shadow
-the OpenAI SDK on sys.path. Import these helpers by their full dotted path.
-"""
+"""Synthetic Groq Chat Completions payloads and an in-memory credential vault."""
 
 import json
 from typing import Any
 
 import httpx
 
-RESPONSES_URL = "https://api.openai.com/v1/responses"
-TEST_KEY = "sk-test-" + "a" * 32
+CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+TEST_KEY = "gsk_test_" + "a" * 32
 
 
 class MemoryVault:
@@ -31,42 +27,36 @@ class MemoryVault:
 
 def usage(input_tokens: int = 1_200, output_tokens: int = 300) -> dict[str, Any]:
     return {
-        "input_tokens": input_tokens,
-        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
-        "output_tokens": output_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
     }
 
 
 def output_text(text: str) -> dict[str, Any]:
-    return {"type": "output_text", "text": text, "annotations": []}
+    return {"text": text}
 
 
 def response_body(
     content: list[dict[str, Any]], *, status: str = "completed", with_usage: bool = True
 ) -> dict[str, Any]:
     return {
-        "id": "resp_test",
-        "object": "response",
-        "created_at": 1_790_000_000,
+        "id": "chatcmpl_test",
+        "object": "chat.completion",
+        "created": 1_790_000_000,
         "model": "test-model",
-        "status": status,
-        "incomplete_details": {"reason": "max_output_tokens"} if status == "incomplete" else None,
-        "error": None,
-        "output": [
+        "choices": [
             {
-                "id": "msg_test",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": content,
+                "index": 0,
+                "finish_reason": "stop" if status == "completed" else "length",
+                "message": {
+                    "role": "assistant",
+                    "content": content[0].get("text") if content else None,
+                    "refusal": content[0].get("refusal") if content else None,
+                },
             }
         ],
         "usage": usage() if with_usage else None,
-        "parallel_tool_calls": True,
-        "tool_choice": "auto",
-        "tools": [],
     }
 
 
@@ -93,8 +83,10 @@ def results_body(results: list[dict[str, Any]], **options: Any) -> dict[str, Any
 
 
 def sent_messages(request: httpx.Request) -> list[dict[str, Any]]:
-    """The messages a captured Responses request carried in its input."""
-    messages: list[dict[str, Any]] = json.loads(json.loads(request.content)["input"])["messages"]
+    """The messages a captured chat request carried in its user message."""
+    messages: list[dict[str, Any]] = json.loads(
+        json.loads(request.content)["messages"][1]["content"]
+    )["messages"]
     return messages
 
 

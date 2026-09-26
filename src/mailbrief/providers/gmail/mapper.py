@@ -15,8 +15,8 @@ from mailbrief.domain.messages import (
     MessageImportance,
     NormalizedMessage,
 )
-from mailbrief.ports.errors import ProviderResponseError
 from mailbrief.providers.gmail.client import message_id
+from mailbrief.providers.gmail.errors import response_error
 
 
 def clean_text(value: str, limit: int) -> str:
@@ -94,4 +94,4 @@ def map_metadata(data: dict[str, object], account: AccountIdentity) -> Normalize
             ),
         )
     except (ValueError, TypeError, OverflowError):
-        raise ProviderResponseError("Gmail message metadata could not be normalized.") from None
+        raise response_error("Gmail message metadata could not be normalized.") from None

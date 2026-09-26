@@ -1,5 +1,6 @@
-"""OpenAI adapter: strict request shape, response mapping, retries and error hygiene."""
+"""Groq adapter: strict request shape, response mapping, retries and error hygiene."""
 
+import asyncio
 import json
 import logging
 import re
@@ -21,18 +22,19 @@ from mailbrief.ports.errors import (
     ProviderRateLimitError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUsageLimitError,
 )
-from mailbrief.providers.openai.credentials import ENTRY, SERVICE, OpenAIKeyStore
-from mailbrief.providers.openai.factory import openai_provider
-from mailbrief.providers.openai.provider import (
+from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
+from mailbrief.providers.groq.factory import groq_provider
+from mailbrief.providers.groq.provider import (
     AUTH_MESSAGE,
     INSTRUCTIONS,
     PROMPT_VERSION,
     UNREADABLE_MESSAGE,
-    OpenAIProvider,
+    GroqProvider,
 )
-from tests.unit.providers.openai.openai_fixtures import (
-    RESPONSES_URL,
+from tests.unit.providers.groq.groq_fixtures import (
+    CHAT_URL,
     TEST_KEY,
     MemoryVault,
     answer_every_message,
@@ -45,7 +47,7 @@ from tests.unit.providers.openai.openai_fixtures import (
 )
 
 BODY = "Please approve the quarterly budget by Friday 5 PM."
-MARKER = "OPENAI-ERROR-MARKER-5d2e"
+MARKER = "GROQ-ERROR-MARKER-5d2e"
 STEP_5_3_KEYS = {
     "message_key",
     "subject",
@@ -70,14 +72,14 @@ def sleeps() -> RecordedSleeps:
     return RecordedSleeps()
 
 
-def store() -> OpenAIKeyStore:
-    return OpenAIKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
+def store() -> GroqKeyStore:
+    return GroqKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
 
 
 @pytest.fixture
-async def provider(sleeps: RecordedSleeps) -> AsyncIterator[OpenAIProvider]:
-    settings = Settings(openai_model="test-model", ai_max_output_tokens=4_000)
-    async with openai_provider(settings, key_store=store(), sleep=sleeps) as built:
+async def provider(sleeps: RecordedSleeps) -> AsyncIterator[GroqProvider]:
+    settings = Settings(groq_model="test-model", ai_max_output_tokens=4_000)
+    async with groq_provider(settings, key_store=store(), sleep=sleeps) as built:
         yield built
 
 
@@ -102,22 +104,24 @@ def object_schemas(schema: dict[str, Any]) -> list[dict[str, Any]]:
     return [schema, *nested]
 
 
-async def test_the_request_is_strict_minimized_and_unstored(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider
+async def test_the_request_is_strict_and_minimized(
+    respx_mock: respx.MockRouter, provider: GroqProvider
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).mock(side_effect=answer_every_message)
+    route = respx_mock.post(CHAT_URL).mock(side_effect=answer_every_message)
 
     await provider.analyze([make_request("0000abcd"), make_request("0000abce", "Second body.")])
 
     sent = route.calls.last.request
     body = json.loads(sent.content)
-    assert sent.url == RESPONSES_URL
+    assert sent.url == CHAT_URL
     assert body["model"] == "test-model"
-    assert body["store"] is False
-    assert body["instructions"] == INSTRUCTIONS
-    assert body["max_output_tokens"] == 4_000
-    text_format = body["text"]["format"]
-    assert (text_format["type"], text_format["strict"]) == ("json_schema", True)
+    assert "store" not in body
+    assert sent.headers["Authorization"] == f"Bearer {TEST_KEY}"
+    assert body["messages"][0]["content"] == INSTRUCTIONS
+    assert body["max_completion_tokens"] == 4_000
+    assert body["response_format"]["type"] == "json_schema"
+    text_format = body["response_format"]["json_schema"]
+    assert text_format["strict"] is True
     levels = object_schemas(text_format["schema"])
     assert len(levels) == 2
     for level in levels:
@@ -132,9 +136,9 @@ async def test_the_request_is_strict_minimized_and_unstored(
 
 
 async def test_a_valid_answer_becomes_candidates_with_usage(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider
+    respx_mock: respx.MockRouter, provider: GroqProvider
 ) -> None:
-    respx_mock.post(RESPONSES_URL).mock(return_value=good_answer())
+    respx_mock.post(CHAT_URL).mock(return_value=good_answer())
 
     response = await provider.analyze([make_request()])
 
@@ -142,7 +146,7 @@ async def test_a_valid_answer_becomes_candidates_with_usage(
     (candidate,) = response.candidates
     assert (candidate.message_key, candidate.evidence) == ("0000abcd", BODY[:40])
     assert response.usage == AIUsage(input_tokens=1_200, output_tokens=300)
-    assert (provider.provider_name, provider.model_name) == ("openai", "test-model")
+    assert (provider.provider_name, provider.model_name) == ("groq", "test-model")
     assert provider.prompt_version == PROMPT_VERSION
 
 
@@ -172,11 +176,11 @@ async def test_a_valid_answer_becomes_candidates_with_usage(
 )
 async def test_problem_responses_keep_their_usage(
     respx_mock: respx.MockRouter,
-    provider: OpenAIProvider,
+    provider: GroqProvider,
     payload: dict[str, Any],
     problem: AnalysisProblem,
 ) -> None:
-    respx_mock.post(RESPONSES_URL).respond(json=payload)
+    respx_mock.post(CHAT_URL).respond(json=payload)
 
     response = await provider.analyze([make_request()])
 
@@ -186,9 +190,9 @@ async def test_problem_responses_keep_their_usage(
 
 
 async def test_a_response_without_usage_reports_none(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider
+    respx_mock: respx.MockRouter, provider: GroqProvider
 ) -> None:
-    respx_mock.post(RESPONSES_URL).respond(
+    respx_mock.post(CHAT_URL).respond(
         json=results_body([wire_result("0000abcd", BODY[:40])], with_usage=False)
     )
 
@@ -198,13 +202,41 @@ async def test_a_response_without_usage_reports_none(
     assert len(response.candidates) == 1
 
 
+@pytest.mark.parametrize("status", ["failed", "cancelled", "queued", "in_progress", None])
+async def test_only_completed_responses_can_supply_candidates(
+    respx_mock: respx.MockRouter, provider: GroqProvider, status: str | None
+) -> None:
+    payload = results_body([wire_result("0000abcd", BODY[:40])])
+    payload["choices"][0]["finish_reason"] = status
+    respx_mock.post(CHAT_URL).respond(json=payload)
+
+    response = await provider.analyze([make_request()])
+
+    assert response.problem is AnalysisProblem.INVALID_OUTPUT
+    assert response.candidates == ()
+
+
+@pytest.mark.parametrize("output", [None, [None], [{"type": "message", "content": None}]])
+async def test_malformed_envelopes_are_invalid_output(
+    respx_mock: respx.MockRouter, provider: GroqProvider, output: object
+) -> None:
+    payload = results_body([wire_result("0000abcd", BODY[:40])])
+    payload["choices"] = output
+    respx_mock.post(CHAT_URL).respond(json=payload)
+
+    response = await provider.analyze([make_request()])
+
+    assert response.problem is AnalysisProblem.INVALID_OUTPUT
+    assert response.candidates == ()
+
+
 async def test_a_short_rate_limit_is_waited_out_once(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider, sleeps: RecordedSleeps
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
 ) -> None:
     limited = httpx.Response(
         429, headers={"Retry-After": "2"}, json=error_body("rate_limit_exceeded")
     )
-    route = respx_mock.post(RESPONSES_URL).mock(side_effect=[limited, good_answer()])
+    route = respx_mock.post(CHAT_URL).mock(side_effect=[limited, good_answer()])
 
     response = await provider.analyze([make_request()])
 
@@ -214,9 +246,9 @@ async def test_a_short_rate_limit_is_waited_out_once(
 
 
 async def test_a_long_rate_limit_fails_at_once(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider, sleeps: RecordedSleeps
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).respond(
+    route = respx_mock.post(CHAT_URL).respond(
         429, headers={"Retry-After": "120"}, json=error_body("rate_limit_exceeded")
     )
 
@@ -226,13 +258,15 @@ async def test_a_long_rate_limit_fails_at_once(
     assert route.call_count == 1
     assert sleeps.delays == []
     assert caught.value.retry_after_seconds == 120.0
-    assert str(caught.value) == "OpenAI rate limit reached; retry later."
+    assert str(caught.value) == "Groq rate limit reached; retry later."
 
 
 @pytest.mark.parametrize(
     ("status", "code", "error_type", "message"),
     [
-        (429, "insufficient_quota", ProviderPermissionError, "OpenAI denied access"),
+        (429, "insufficient_quota", ProviderPermissionError, "Groq denied access"),
+        (400, "blocked_api_access", ProviderPermissionError, "Groq denied access"),
+        (413, "request_too_large", ProviderResponseError, "HTTP 413"),
         (401, "invalid_api_key", AIAuthenticationError, AUTH_MESSAGE),
         (403, "unsupported_country_region_territory", ProviderPermissionError, "denied access"),
         (400, "invalid_json_schema", ProviderResponseError, "rejected the request (HTTP 400)"),
@@ -240,13 +274,13 @@ async def test_a_long_rate_limit_fails_at_once(
 )
 async def test_terminal_errors_carry_static_messages_and_safe_codes(
     respx_mock: respx.MockRouter,
-    provider: OpenAIProvider,
+    provider: GroqProvider,
     status: int,
     code: str,
     error_type: type[ProviderError],
     message: str,
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).respond(status, json=error_body(code))
+    route = respx_mock.post(CHAT_URL).respond(status, json=error_body(code))
 
     with pytest.raises(error_type, match=re.escape(message)) as caught:
         await provider.analyze([make_request()])
@@ -266,26 +300,26 @@ async def test_terminal_errors_carry_static_messages_and_safe_codes(
 )
 async def test_an_unreadable_reply_is_a_provider_error_without_retry(
     respx_mock: respx.MockRouter,
-    provider: OpenAIProvider,
+    provider: GroqProvider,
     sleeps: RecordedSleeps,
     reply: httpx.Response,
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).mock(return_value=reply)
+    route = respx_mock.post(CHAT_URL).mock(return_value=reply)
 
     with pytest.raises(ProviderResponseError) as caught:
         await provider.analyze([make_request()])
 
     assert type(caught.value) is ProviderResponseError
-    assert str(caught.value) == UNREADABLE_MESSAGE == "OpenAI returned an unreadable response."
+    assert str(caught.value) == UNREADABLE_MESSAGE == "Groq returned an unreadable response."
     assert caught.value.client_request_id is not None
     assert route.call_count == 1
     assert sleeps.delays == []
 
 
 async def test_an_unsafe_error_code_is_dropped(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider
+    respx_mock: respx.MockRouter, provider: GroqProvider
 ) -> None:
-    respx_mock.post(RESPONSES_URL).respond(401, json=error_body("bad code; with spaces"))
+    respx_mock.post(CHAT_URL).respond(401, json=error_body("bad code; with spaces"))
 
     with pytest.raises(AIAuthenticationError) as caught:
         await provider.analyze([make_request()])
@@ -294,9 +328,9 @@ async def test_an_unsafe_error_code_is_dropped(
 
 
 async def test_server_errors_are_retried_three_times(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider, sleeps: RecordedSleeps
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).respond(500, json=error_body("server_error"))
+    route = respx_mock.post(CHAT_URL).respond(500, json=error_body("server_error"))
 
     with pytest.raises(ProviderResponseError, match=re.escape("(HTTP 500)")):
         await provider.analyze([make_request()])
@@ -308,20 +342,20 @@ async def test_server_errors_are_retried_three_times(
 @pytest.mark.parametrize(
     ("failure", "error_type", "message"),
     [
-        (httpx.ConnectError("unreachable"), ProviderError, "Could not reach OpenAI."),
-        (httpx.ReadTimeout("slow"), ProviderTimeoutError, "OpenAI did not respond in time."),
+        (httpx.ConnectError("unreachable"), ProviderError, "Could not reach Groq."),
+        (httpx.ReadTimeout("slow"), ProviderTimeoutError, "Groq did not respond in time."),
     ],
     ids=["connection", "timeout"],
 )
 async def test_transport_failures_are_retried_then_raised(
     respx_mock: respx.MockRouter,
-    provider: OpenAIProvider,
+    provider: GroqProvider,
     sleeps: RecordedSleeps,
     failure: Exception,
     error_type: type[ProviderError],
     message: str,
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).mock(side_effect=failure)
+    route = respx_mock.post(CHAT_URL).mock(side_effect=failure)
 
     with pytest.raises(ProviderError) as caught:
         await provider.analyze([make_request()])
@@ -332,11 +366,11 @@ async def test_transport_failures_are_retried_then_raised(
     assert sleeps.delays == [1.0, 2.0, 4.0]
 
 
-async def test_openai_error_text_never_reaches_exceptions_or_logs(
-    respx_mock: respx.MockRouter, provider: OpenAIProvider, caplog: pytest.LogCaptureFixture
+async def test_groq_error_text_never_reaches_exceptions_or_logs(
+    respx_mock: respx.MockRouter, provider: GroqProvider, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    respx_mock.post(RESPONSES_URL).respond(
+    respx_mock.post(CHAT_URL).respond(
         401, json=error_body("invalid_api_key", f"Incorrect API key provided: {MARKER}")
     )
 
@@ -351,11 +385,11 @@ async def test_openai_error_text_never_reaches_exceptions_or_logs(
 async def test_the_base_url_ignores_the_environment(
     respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch, sleeps: RecordedSleeps
 ) -> None:
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
-    route = respx_mock.post(RESPONSES_URL).mock(return_value=good_answer())
+    monkeypatch.setenv("GROQ_BASE_URL", "https://example.invalid/v1")
+    route = respx_mock.post(CHAT_URL).mock(return_value=good_answer())
 
-    async with openai_provider(
-        Settings(openai_model="test-model"), key_store=store(), sleep=sleeps
+    async with groq_provider(
+        Settings(groq_model="test-model"), key_store=store(), sleep=sleeps
     ) as built:
         await built.analyze([make_request()])
 
@@ -363,13 +397,122 @@ async def test_the_base_url_ignores_the_environment(
 
 
 @pytest.mark.parametrize("count", [0, 11])
-async def test_a_call_needs_one_to_ten_requests(provider: OpenAIProvider, count: int) -> None:
+async def test_a_call_needs_one_to_ten_requests(provider: GroqProvider, count: int) -> None:
     requests = [make_request(f"{index:08x}") for index in range(count)]
 
     with pytest.raises(ValueError, match="1 to 10"):
         await provider.analyze(requests)
 
 
-async def test_a_call_needs_unique_keys(provider: OpenAIProvider) -> None:
+async def test_a_call_needs_unique_keys(provider: GroqProvider) -> None:
     with pytest.raises(ValueError, match="unique"):
         await provider.analyze([make_request("0000abcd"), make_request("0000abcd")])
+
+
+async def test_request_budget_spans_calls_and_resets_only_for_a_new_connection(
+    respx_mock: respx.MockRouter,
+) -> None:
+    route = respx_mock.post(CHAT_URL).mock(return_value=good_answer())
+    settings = Settings(groq_model="test-model", ai_max_requests_per_run=1)
+    async with groq_provider(settings, key_store=store()) as built:
+        await built.analyze([make_request()])
+        with pytest.raises(ProviderUsageLimitError, match="request limit"):
+            await built.analyze([make_request()])
+    assert route.call_count == 1
+
+    async with groq_provider(settings, key_store=store()) as built:
+        await built.analyze([make_request()])
+    assert route.call_count == 2
+
+
+async def test_request_budget_counts_retries_and_stops_before_an_extra_sleep(
+    respx_mock: respx.MockRouter, sleeps: RecordedSleeps
+) -> None:
+    route = respx_mock.post(CHAT_URL).respond(500, json=error_body("server_error"))
+    settings = Settings(groq_model="test-model", ai_max_requests_per_run=2)
+    async with groq_provider(settings, key_store=store(), sleep=sleeps) as built:
+        with pytest.raises(ProviderUsageLimitError):
+            await built.analyze([make_request()])
+    assert route.call_count == 2
+    assert sleeps.delays == [1.0]
+
+
+@pytest.mark.parametrize("resource", ["tokens", "requests"])
+async def test_exhausted_quota_paces_the_next_call(
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps, resource: str
+) -> None:
+    first = good_answer()
+    first.headers.update(
+        {
+            f"x-ratelimit-remaining-{resource}": "0",
+            f"x-ratelimit-reset-{resource}": "2s",
+        }
+    )
+    route = respx_mock.post(CHAT_URL).mock(side_effect=[first, good_answer()])
+    await provider.analyze([make_request()])
+    assert sleeps.delays == []
+    await provider.analyze([make_request()])
+    assert sleeps.delays == [2.0]
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize("reset", ["1h", "nonsense", ""])
+async def test_long_or_unknown_exhausted_quota_stops_before_another_request(
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps, reset: str
+) -> None:
+    first = good_answer()
+    first.headers.update({"x-ratelimit-remaining-tokens": "0", "x-ratelimit-reset-tokens": reset})
+    route = respx_mock.post(CHAT_URL).mock(return_value=first)
+    await provider.analyze([make_request()])
+    with pytest.raises(ProviderRateLimitError):
+        await provider.analyze([make_request()])
+    assert route.call_count == 1
+    assert sleeps.delays == []
+
+
+async def test_cancellation_is_not_retried(
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
+) -> None:
+    attempts = 0
+
+    async def cancel(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise asyncio.CancelledError
+
+    respx_mock.post(CHAT_URL).mock(side_effect=cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await provider.analyze([make_request()])
+    assert attempts == 1
+    assert sleeps.delays == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        None,
+        {},
+        {"role": "user", "content": "{}"},
+        {"role": "assistant", "content": []},
+        {"role": "assistant", "content": "{}", "tool_calls": [{"id": "unexpected"}]},
+    ],
+)
+async def test_invalid_chat_messages_never_supply_candidates(
+    respx_mock: respx.MockRouter, provider: GroqProvider, message: object
+) -> None:
+    payload = results_body([wire_result("0000abcd", BODY[:40])])
+    payload["choices"][0]["message"] = message
+    respx_mock.post(CHAT_URL).respond(json=payload)
+    response = await provider.analyze([make_request()])
+    assert response.problem is AnalysisProblem.INVALID_OUTPUT
+    assert response.candidates == ()
+
+
+async def test_redirect_cannot_forward_key_or_mail(
+    respx_mock: respx.MockRouter, provider: GroqProvider
+) -> None:
+    route = respx_mock.post(CHAT_URL).respond(307, headers={"Location": "https://evil.invalid/"})
+    with pytest.raises(ProviderResponseError):
+        await provider.analyze([make_request()])
+    assert route.call_count == 1
+    assert len(respx_mock.calls) == 1

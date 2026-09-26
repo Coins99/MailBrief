@@ -1,18 +1,18 @@
-"""The OpenAI API key, kept only in the OS credential vault; no message ever contains it."""
+"""The Groq API key, kept only in the OS credential vault; no message ever contains it."""
 
 from pydantic import SecretStr
 
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.vault import VaultBackend, os_vault
 
-SERVICE = "MailBrief.OpenAI"
+SERVICE = "MailBrief.Groq"
 ENTRY = "api-key-v1"
 _MIN_KEY_CHARS = 20
 _MAX_KEY_CHARS = 512
 
 
-class OpenAIKeyError(ConfigurationError):
-    """The OpenAI API key is missing, malformed or unavailable. Messages are static."""
+class GroqKeyError(ConfigurationError):
+    """The Groq API key is missing, malformed or unavailable. Messages are static."""
 
 
 def parse_api_key(raw: str) -> SecretStr:
@@ -21,11 +21,11 @@ def parse_api_key(raw: str) -> SecretStr:
     if not _MIN_KEY_CHARS <= len(key) <= _MAX_KEY_CHARS or any(
         not 33 <= ord(character) <= 126 for character in key
     ):
-        raise OpenAIKeyError("That does not look like an OpenAI API key. Nothing was saved.")
+        raise GroqKeyError("That does not look like a Groq API key. Nothing was saved.")
     return SecretStr(key)
 
 
-class OpenAIKeyStore:
+class GroqKeyStore:
     """Load, save and clear the key in the OS vault."""
 
     def __init__(self, backend: VaultBackend | None = None) -> None:
@@ -35,8 +35,8 @@ class OpenAIKeyStore:
         try:
             value = self._backend.get_password(SERVICE, ENTRY)
         except Exception:
-            raise OpenAIKeyError(
-                "The OpenAI API key could not be read from the OS credential store."
+            raise GroqKeyError(
+                "The Groq API key could not be read from the OS credential store."
             ) from None
         return None if value is None else SecretStr(value)
 
@@ -44,8 +44,8 @@ class OpenAIKeyStore:
         try:
             self._backend.set_password(SERVICE, ENTRY, key.get_secret_value())
         except Exception:
-            raise OpenAIKeyError(
-                "The OpenAI API key could not be saved in the OS credential store."
+            raise GroqKeyError(
+                "The Groq API key could not be saved in the OS credential store."
             ) from None
 
     def clear(self) -> None:
@@ -54,6 +54,6 @@ class OpenAIKeyStore:
             if self._backend.get_password(SERVICE, ENTRY) is not None:
                 self._backend.delete_password(SERVICE, ENTRY)
         except Exception:
-            raise OpenAIKeyError(
-                "The OpenAI API key could not be removed from the OS credential store."
+            raise GroqKeyError(
+                "The Groq API key could not be removed from the OS credential store."
             ) from None

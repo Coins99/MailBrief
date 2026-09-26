@@ -16,9 +16,8 @@ from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     ProviderPermissionError,
     ProviderRateLimitError,
-    ProviderResponseError,
 )
-from mailbrief.providers.gmail.errors import permission_guidance
+from mailbrief.providers.gmail.errors import permission_guidance, response_error
 
 MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 MAX_RESPONSE_BYTES = 2_000_000
@@ -33,14 +32,14 @@ class TokenSource(Protocol):
 def message_id(value: object) -> str:
     """Reject path/query injection and invalid IDs before constructing requests."""
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,512}", value):
-        raise ProviderResponseError("Gmail returned an invalid message identifier.")
+        raise response_error("Gmail returned an invalid message identifier.")
     return value
 
 
 def attachment_id(value: object) -> str:
     """Accept only opaque Gmail attachment identifiers before building a request path."""
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", value):
-        raise ProviderResponseError("Gmail returned an invalid attachment identifier.")
+        raise response_error("Gmail returned an invalid attachment identifier.")
     return value
 
 
@@ -79,7 +78,7 @@ class GmailClient:
             "q": query,
             "maxResults": "100",
             "includeSpamTrash": "false",
-            "fields": "messages(id),nextPageToken",
+            "fields": "messages(id),nextPageToken,resultSizeEstimate",
         }
         if page_token:
             params["pageToken"] = page_token
@@ -138,12 +137,18 @@ class GmailClient:
                     async for chunk in response.aiter_bytes(chunk_size=65_536):
                         body.extend(chunk)
                         if len(body) > MAX_RESPONSE_BYTES:
-                            raise ProviderResponseError("Gmail response exceeded its size limit.")
+                            raise response_error("Gmail response exceeded its size limit.")
                     status = response.status_code
                     after = response.headers.get("Retry-After")
-            except httpx.HTTPError:
+            except httpx.HTTPError as exc:
                 if attempt == 3:
-                    raise ProviderResponseError("Gmail request failed; retry later.") from None
+                    guidance = (
+                        "Gmail request timed out after retries; check your connection and retry."
+                        if isinstance(exc, httpx.TimeoutException)
+                        else "Gmail network request failed after retries; check connectivity to "
+                        "gmail.googleapis.com, including firewall or TLS restrictions."
+                    )
+                    raise response_error(guidance) from None
                 await self._sleep(retry_delay(None, attempt))
                 continue
             if status == 401:
@@ -154,6 +159,12 @@ class GmailClient:
                 continue
             if status == 404 and missing_ok:
                 return None
+            if status == 204 and url == MESSAGES_URL and "fields" in params and attempt < 3:
+                # An empty partial response is ambiguous. Retry the same listing without
+                # field selection; never reconcile the Inbox based on a bare 204.
+                # Unfiltered messages.list still returns IDs, not message bodies.
+                params = params.remove("fields")
+                continue
             try:
                 payload = json.loads(body)
             except (ValueError, UnicodeError):
@@ -175,12 +186,16 @@ class GmailClient:
                         raise ProviderRateLimitError(
                             "Gmail rate limit reached; retry later.", retry_after_seconds=delay
                         )
-                    raise ProviderResponseError("Gmail is temporarily unavailable; retry later.")
+                    raise response_error(
+                        f"Gmail is temporarily unavailable (HTTP {status}); retry later."
+                    )
                 await self._sleep(delay)
                 continue
             if status == 403:
                 raise ProviderPermissionError(permission_guidance(payload))
-            if status != 200 or not isinstance(payload, dict):
-                raise ProviderResponseError("Gmail returned an invalid response.")
+            if status != 200:
+                raise response_error(f"Gmail request rejected (HTTP {status}).")
+            if not isinstance(payload, dict):
+                raise response_error("Gmail returned an unreadable response (HTTP 200).")
             return cast(dict[str, object], payload)
-        raise ProviderResponseError("Gmail retry limit reached.")
+        raise response_error("Gmail retry limit reached.")

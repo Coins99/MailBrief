@@ -26,8 +26,7 @@ def _check_destination(sock: socket.socket, address: Any) -> None:
 def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail any non-loopback lookup or connection.
 
-    The OpenAI SDK's default client is httpx2, which respx cannot see, so a test that forgot
-    to inject an httpx client would otherwise reach the real API. On Windows, asyncio's
+    A missing HTTP mock must never reach real mail or AI services. On Windows, asyncio's
     proactor bypasses socket.connect; the getaddrinfo guard still covers hostnames there.
     """
     real_getaddrinfo = socket.getaddrinfo

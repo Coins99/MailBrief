@@ -33,6 +33,7 @@ from mailbrief.ports.errors import (
     ProviderPermissionError,
     ProviderRateLimitError,
     ProviderTimeoutError,
+    ProviderUsageLimitError,
 )
 from mailbrief.services.deadlines import resolve_deadline
 from mailbrief.storage.repositories import AnalysisRepository, MessageRepository
@@ -185,6 +186,8 @@ class _ProviderStopped(Exception):
 
 
 def _error_code(exc: ProviderError) -> str:
+    if isinstance(exc, ProviderUsageLimitError):
+        return "AI_USAGE_LIMIT"
     if isinstance(exc, AIAuthenticationError | AuthenticationRequiredError):
         return "AI_AUTH_FAILED"
     if isinstance(exc, ProviderPermissionError):

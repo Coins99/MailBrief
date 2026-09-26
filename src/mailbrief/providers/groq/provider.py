@@ -1,4 +1,4 @@
-"""OpenAI Responses API adapter using Structured Outputs.
+"""Groq Chat Completions API adapter using Structured Outputs.
 
 Email content goes only into the request body. Raised errors carry static messages, and logs
 carry status codes, attempt counts and request IDs only.
@@ -10,13 +10,10 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Literal, cast
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-import openai
-from openai import AsyncOpenAI
-from openai.types.responses import ParsedResponse
 from pydantic import BaseModel, ConfigDict
 
 from mailbrief.domain.analysis import (
@@ -26,7 +23,7 @@ from mailbrief.domain.analysis import (
     AnalysisRequest,
     AnalysisResponse,
 )
-from mailbrief.infra.http_retry import VerdictKind, classify_openai_response
+from mailbrief.infra.http_retry import VerdictKind, classify_groq_response, parse_retry_delay
 from mailbrief.ports.errors import (
     AIAuthenticationError,
     ProviderError,
@@ -34,22 +31,24 @@ from mailbrief.ports.errors import (
     ProviderRateLimitError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUsageLimitError,
 )
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "2026-09-26.1"
+PROMPT_VERSION = "groq-2026-09-26.1"
+CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 MAX_REQUESTS_PER_CALL = 10
 MAX_RETRIES = 3
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 MAX_RETRY_DELAY_SECONDS = 30.0
 
-AUTH_MESSAGE = "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
-PERMISSION_MESSAGE = "OpenAI denied access (permission, region or quota)."
-RATE_LIMIT_MESSAGE = "OpenAI rate limit reached; retry later."
-TIMEOUT_MESSAGE = "OpenAI did not respond in time."
-CONNECTION_MESSAGE = "Could not reach OpenAI."
-UNREADABLE_MESSAGE = "OpenAI returned an unreadable response."
+AUTH_MESSAGE = "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
+PERMISSION_MESSAGE = "Groq denied access (permission, region or quota)."
+RATE_LIMIT_MESSAGE = "Groq rate limit reached; retry later."
+TIMEOUT_MESSAGE = "Groq did not respond in time."
+CONNECTION_MESSAGE = "Could not reach Groq."
+UNREADABLE_MESSAGE = "Groq returned an unreadable response."
 
 INSTRUCTIONS = (
     "You extract facts from emails for one person's private daily brief.\n"
@@ -81,7 +80,7 @@ _ERROR_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
 class AnalysisWireResult(BaseModel):
-    """One result as OpenAI returns it; strict mode forbids defaults and constraints."""
+    """One result as Groq returns it; strict mode forbids defaults and constraints."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -132,49 +131,40 @@ def _usage(envelope: dict[str, object]) -> AIUsage | None:
     usage = envelope.get("usage")
     if not isinstance(usage, dict):
         return None
-    counts = [usage.get("input_tokens"), usage.get("output_tokens")]
+    counts = [usage.get("prompt_tokens"), usage.get("completion_tokens")]
     tokens_in, tokens_out = (
-        value if isinstance(value, int) and value >= 0 else None for value in counts
+        value if type(value) is int and value >= 0 else None for value in counts
     )
     return AIUsage(input_tokens=tokens_in, output_tokens=tokens_out)
 
 
-def _refused(envelope: dict[str, object]) -> bool:
-    output = envelope.get("output")
-    if not isinstance(output, list):
-        return False
-    for item in output:
-        if isinstance(item, dict) and item.get("type") == "message":
-            content = item.get("content")
-            if isinstance(content, list) and any(
-                isinstance(part, dict) and part.get("type") == "refusal" for part in content
-            ):
-                return True
-    return False
-
-
-def _to_response(
-    envelope: dict[str, object],
-    parse: Callable[[], ParsedResponse[AnalysisWireBatch]],
-) -> AnalysisResponse:
-    """Map one completed HTTP exchange; status, usage and refusals come before parsing."""
+def _to_response(envelope: dict[str, object]) -> AnalysisResponse:
+    """Validate the chat envelope before accepting any structured extraction."""
     usage = _usage(envelope)
-    if envelope.get("status") == "incomplete":
+    invalid = AnalysisResponse(problem=AnalysisProblem.INVALID_OUTPUT, usage=usage)
+    choices = envelope.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        return invalid
+    choice = choices[0]
+    if choice.get("finish_reason") == "length":
         return AnalysisResponse(problem=AnalysisProblem.INCOMPLETE, usage=usage)
-    if _refused(envelope):
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return invalid
+    if message.get("refusal") or choice.get("finish_reason") == "content_filter":
         return AnalysisResponse(problem=AnalysisProblem.REFUSED, usage=usage)
+    if choice.get("finish_reason") != "stop" or message.get("role") != "assistant":
+        return invalid
+    content = message.get("content")
+    if not isinstance(content, str) or message.get("tool_calls"):
+        return invalid
     try:
-        batch = parse().output_parsed
-    except (ValueError, openai.APIResponseValidationError):
-        batch = None
-    if batch is None:
-        return AnalysisResponse(problem=AnalysisProblem.INVALID_OUTPUT, usage=usage)
-    try:
+        batch = AnalysisWireBatch.model_validate_json(content, strict=True)
         candidates = tuple(
             AnalysisCandidate.model_validate(result.model_dump()) for result in batch.results
         )
     except ValueError:
-        return AnalysisResponse(problem=AnalysisProblem.INVALID_OUTPUT, usage=usage)
+        return invalid
     return AnalysisResponse(candidates=candidates, usage=usage)
 
 
@@ -185,7 +175,7 @@ def _safe_code(code: object) -> str | None:
 def _failure(
     kind: type[ProviderError], status: int, request_id: str, code: str | None
 ) -> ProviderError:
-    """An error of the classifier's type with a static message; OpenAI's text never passes."""
+    """An error of the classifier's type with a static message; Groq's text never passes."""
     if issubclass(kind, AIAuthenticationError):
         message = AUTH_MESSAGE
     elif issubclass(kind, ProviderPermissionError):
@@ -195,19 +185,18 @@ def _failure(
     elif issubclass(kind, ProviderTimeoutError):
         message = TIMEOUT_MESSAGE
     elif issubclass(kind, ProviderResponseError):
-        message = f"OpenAI rejected the request (HTTP {status})."
+        message = f"Groq rejected the request (HTTP {status})."
     else:
         message = CONNECTION_MESSAGE
     return kind(message, client_request_id=request_id, provider_error_code=code)
 
 
 def _status_outcome(
-    exc: openai.APIStatusError, attempt: int, request_id: str
+    response: httpx.Response, attempt: int, request_id: str
 ) -> tuple[ProviderError, float | None]:
     """The error for an HTTP failure and, when one more attempt is allowed, the delay first."""
-    status = exc.status_code
-    # The factory's client is httpx, so this is an httpx.Response; the SDK annotates httpx2.
-    verdict = classify_openai_response(cast(httpx.Response, exc.response), request_id)
+    status = response.status_code
+    verdict = classify_groq_response(response, request_id)
     code = _safe_code(getattr(verdict.exception, "provider_error_code", None))
     if verdict.kind is not VerdictKind.RETRY:
         failure = verdict.exception
@@ -231,25 +220,52 @@ def _status_outcome(
     return error, delay
 
 
-class OpenAIProvider:
-    """AIProvider over the OpenAI Responses API with Structured Outputs."""
+def _exhausted_reset(headers: httpx.Headers) -> float:
+    """Pace subsequent calls when Groq explicitly reports an exhausted quota."""
+    delays = []
+    for resource in ("requests", "tokens"):
+        try:
+            remaining = int(headers.get(f"x-ratelimit-remaining-{resource}", "1"))
+        except ValueError:
+            continue
+        if remaining <= 0:
+            reset = parse_retry_delay(headers.get(f"x-ratelimit-reset-{resource}"))
+            # Missing or invalid reset: stop this run rather than immediately send again.
+            delays.append(reset if reset is not None else MAX_RETRY_DELAY_SECONDS + 1)
+    return max(delays, default=0.0)
+
+
+class GroqProvider:
+    """AIProvider over the Groq Chat Completions API with Structured Outputs."""
 
     def __init__(
         self,
-        client: AsyncOpenAI,
+        client: httpx.AsyncClient,
         *,
         model: str,
         max_output_tokens: int,
+        max_requests: int = 10,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        if not 1 <= max_requests <= 1_000:
+            raise ValueError("max_requests must be between 1 and 1000")
         self._client = client
         self._model = model
         self._max_output_tokens = max_output_tokens
         self._sleep = sleep
+        self._remaining_requests = max_requests
+        self._pace_delay = 0.0
+
+    def _check_budget(self) -> None:
+        if self._remaining_requests == 0:
+            raise ProviderUsageLimitError(
+                "MailBrief's AI request limit for this run was reached. "
+                "Review MAILBRIEF_AI_MAX_REQUESTS_PER_RUN before running again."
+            )
 
     @property
     def provider_name(self) -> str:
-        return "openai"
+        return "groq"
 
     @property
     def model_name(self) -> str:
@@ -260,51 +276,77 @@ class OpenAIProvider:
         return PROMPT_VERSION
 
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
-        """One logical Responses call for 1-10 requests, retrying transient failures."""
+        """One logical chat completion for 1-10 requests, retrying transient failures."""
         keys = [request.message_key for request in requests]
         if not 1 <= len(keys) <= MAX_REQUESTS_PER_CALL or len(set(keys)) != len(keys):
-            raise ValueError("an OpenAI call needs 1 to 10 requests with unique message keys")
+            raise ValueError("a Groq call needs 1 to 10 requests with unique message keys")
         request_id = str(uuid.uuid4())
         payload = _request_input(requests)
         attempt = 0
+        self._check_budget()
+        if self._pace_delay > MAX_RETRY_DELAY_SECONDS:
+            raise ProviderRateLimitError(RATE_LIMIT_MESSAGE, retry_after_seconds=self._pace_delay)
+        if self._pace_delay:
+            delay_before_call = self._pace_delay
+            self._pace_delay = 0.0
+            await self._sleep(delay_before_call)
         while True:
+            self._check_budget()
+            # Reserve before the first await, including failed attempts and retries.
+            self._remaining_requests -= 1
             error: ProviderError
             delay: float | None
             try:
-                raw = await self._client.responses.with_raw_response.parse(
-                    model=self._model,
-                    instructions=INSTRUCTIONS,
-                    input=payload,
-                    text_format=AnalysisWireBatch,
-                    store=False,
-                    max_output_tokens=self._max_output_tokens,
-                    extra_headers={"X-Client-Request-Id": request_id},
+                raw = await self._client.post(
+                    CHAT_URL,
+                    json={
+                        "model": self._model,
+                        "messages": [
+                            {"role": "system", "content": INSTRUCTIONS},
+                            {"role": "user", "content": payload},
+                        ],
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "AnalysisWireBatch",
+                                "strict": True,
+                                "schema": AnalysisWireBatch.model_json_schema(),
+                            },
+                        },
+                        "max_completion_tokens": self._max_output_tokens,
+                    },
+                    headers={"X-Client-Request-Id": request_id},
+                    follow_redirects=False,
                 )
-            except openai.APITimeoutError:
+            except httpx.TimeoutException:
                 error = ProviderTimeoutError(TIMEOUT_MESSAGE, client_request_id=request_id)
                 delay = BACKOFF_SECONDS[attempt] if attempt < MAX_RETRIES else None
                 reason = "timeout"
-            except openai.APIConnectionError:
+            except httpx.TransportError:
                 error = ProviderError(CONNECTION_MESSAGE, client_request_id=request_id)
                 delay = BACKOFF_SECONDS[attempt] if attempt < MAX_RETRIES else None
                 reason = "connection error"
-            except openai.APIStatusError as exc:
-                error, delay = _status_outcome(exc, attempt, request_id)
-                reason = f"HTTP {exc.status_code}"
             else:
-                try:
-                    body = raw.http_response.json()
-                except ValueError:
-                    body = None
-                if not isinstance(body, dict):
-                    raise ProviderResponseError(UNREADABLE_MESSAGE, client_request_id=request_id)
-                return _to_response(body, raw.parse)
+                if raw.is_success:
+                    self._pace_delay = _exhausted_reset(raw.headers)
+                    try:
+                        body = raw.json()
+                    except ValueError:
+                        body = None
+                    if not isinstance(body, dict):
+                        raise ProviderResponseError(
+                            UNREADABLE_MESSAGE, client_request_id=request_id
+                        )
+                    return _to_response(body)
+                error, delay = _status_outcome(raw, attempt, request_id)
+                reason = f"HTTP {raw.status_code}"
             if delay is None:
-                logger.warning("OpenAI call failed after %d attempts: %s", attempt + 1, reason)
+                logger.warning("Groq call failed after %d attempts: %s", attempt + 1, reason)
                 raise error
+            self._check_budget()
             attempt += 1
             logger.info(
-                "OpenAI %s; retry %d of %d in %.1fs (request %s)",
+                "Groq %s; retry %d of %d in %.1fs (request %s)",
                 reason,
                 attempt,
                 MAX_RETRIES,

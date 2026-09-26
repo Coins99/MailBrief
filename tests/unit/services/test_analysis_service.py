@@ -36,8 +36,8 @@ from mailbrief.ports.errors import (
     ProviderResponseError,
     ProviderTimeoutError,
 )
-from mailbrief.providers.openai.credentials import ENTRY, SERVICE, OpenAIKeyStore
-from mailbrief.providers.openai.factory import openai_provider
+from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
+from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.services.analysis import (
     AnalysisRun,
     AnalysisService,
@@ -49,7 +49,7 @@ from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
 from mailbrief.storage.tables import AnalysisTable
 from tests.factories import make_message
-from tests.unit.providers.openai.openai_fixtures import RESPONSES_URL, TEST_KEY, MemoryVault
+from tests.unit.providers.groq.groq_fixtures import CHAT_URL, TEST_KEY, MemoryVault
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all, good_candidate
 
 ZONE = "America/Toronto"
@@ -321,16 +321,16 @@ async def test_provider_errors_stop_the_run_with_a_code(
     assert provider.calls == run.calls == 1
 
 
-async def test_an_unreadable_openai_reply_fails_every_sent_message(
+async def test_an_unreadable_groq_reply_fails_every_sent_message(
     session: AsyncSession, respx_mock: respx.MockRouter
 ) -> None:
     account_id, shortlist = await seed(session, 2)
-    respx_mock.post(RESPONSES_URL).respond(
+    respx_mock.post(CHAT_URL).respond(
         200, text="<html>maintenance</html>", headers={"content-type": "text/html"}
     )
-    key_store = OpenAIKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
+    key_store = GroqKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
 
-    async with openai_provider(Settings(openai_model="test-model"), key_store=key_store) as ai:
+    async with groq_provider(Settings(groq_model="test-model"), key_store=key_store) as ai:
         run = await analyze(session, ai, shortlist, account_id=account_id)
 
     assert run.error_code == "AI_PROVIDER_ERROR"

@@ -1,4 +1,4 @@
-"""OpenAI provider composition: settings, the stored key and the HTTP client's lifetime."""
+"""Groq provider composition: settings, the stored key and the HTTP client's lifetime."""
 
 from typing import Any
 
@@ -7,27 +7,27 @@ import pytest
 
 from mailbrief.config import Settings
 from mailbrief.errors import ConfigurationError
-from mailbrief.providers.openai.credentials import ENTRY, SERVICE, OpenAIKeyError, OpenAIKeyStore
-from mailbrief.providers.openai.factory import openai_provider
-from tests.unit.providers.openai.openai_fixtures import TEST_KEY, MemoryVault
+from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyError, GroqKeyStore
+from mailbrief.providers.groq.factory import groq_provider
+from tests.unit.providers.groq.groq_fixtures import TEST_KEY, MemoryVault
 
 
-def saved_key() -> OpenAIKeyStore:
-    return OpenAIKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
+def saved_key() -> GroqKeyStore:
+    return GroqKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
 
 
 @pytest.mark.parametrize("model", [None, "   "])
 async def test_a_missing_model_is_a_configuration_error(model: str | None) -> None:
-    with pytest.raises(ConfigurationError, match="MAILBRIEF_OPENAI_MODEL"):
-        async with openai_provider(Settings(openai_model=model), key_store=saved_key()):
+    with pytest.raises(ConfigurationError, match="MAILBRIEF_GROQ_MODEL"):
+        async with groq_provider(Settings(groq_model=model), key_store=saved_key()):
             pass
 
 
 async def test_a_missing_key_says_how_to_save_one() -> None:
-    no_key = OpenAIKeyStore(MemoryVault())
+    no_key = GroqKeyStore(MemoryVault())
 
-    with pytest.raises(OpenAIKeyError, match="ai-key set"):
-        async with openai_provider(Settings(openai_model="test-model"), key_store=no_key):
+    with pytest.raises(GroqKeyError, match="ai-key set"):
+        async with groq_provider(Settings(groq_model="test-model"), key_store=no_key):
             pass
 
 
@@ -42,9 +42,9 @@ async def test_the_http_client_is_pinned_and_closed_on_exit(
             created.append(self)
 
     monkeypatch.setattr(httpx, "AsyncClient", RecordingClient)
-    settings = Settings(openai_model=" test-model ", ai_timeout_seconds=45)
+    settings = Settings(groq_model=" test-model ", ai_timeout_seconds=45)
 
-    async with openai_provider(settings, key_store=saved_key()) as provider:
+    async with groq_provider(settings, key_store=saved_key()) as provider:
         (client,) = created
         assert provider.model_name == "test-model"
         assert not client.is_closed
@@ -57,9 +57,9 @@ async def test_the_http_client_is_pinned_and_closed_on_exit(
 
 async def test_the_default_key_store_uses_the_os_vault(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "mailbrief.providers.openai.credentials.os_vault",
+        "mailbrief.providers.groq.credentials.os_vault",
         lambda: MemoryVault({(SERVICE, ENTRY): TEST_KEY}),
     )
 
-    async with openai_provider(Settings(openai_model="test-model")) as provider:
-        assert provider.provider_name == "openai"
+    async with groq_provider(Settings(groq_model="test-model")) as provider:
+        assert provider.provider_name == "groq"

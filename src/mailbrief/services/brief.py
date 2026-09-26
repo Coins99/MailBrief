@@ -26,7 +26,7 @@ from mailbrief.storage.repositories import ConsentRepository
 
 logger = logging.getLogger(__name__)
 
-CONSENT_DISCLOSURE_VERSION: Final = "1"
+CONSENT_DISCLOSURE_VERSION: Final = "2"
 
 
 class ConsentGate(Protocol):
@@ -51,8 +51,9 @@ def disclosure_lines(preview: TransmissionPreview) -> tuple[str, ...]:
         else "No message is cut to fit the length limit.",
         "For each message it sends: " + "; ".join(preview.fields) + ".",
         "It never sends attachments, recipients, message IDs, links, account IDs or credentials.",
-        f"MailBrief asks {provider} not to store the request (store=false), but {provider}'s "
-        "own data policies still apply.",
+        "Enable Zero Data Retention in Groq Console Data Controls before sending private mail. "
+        "MailBrief cannot verify that setting. Without it, reliability/abuse logs may retain "
+        "content for up to 30 days (or longer when legally required). Usage metadata is retained.",
     ]
     if preview.reused_count:
         lines.append(
@@ -130,7 +131,7 @@ class BriefService:
 
         run = await self._analysis.execute(plan, cancel=cancel, progress=progress)
         if run.cancelled:
-            return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
+            return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync, ai_calls=run.calls)
 
         coverage = self._coverage(sync, len(shortlist), run)
         emit_progress(progress, SyncProgress(stage=SyncStage.ASSEMBLING))
@@ -146,6 +147,7 @@ class BriefService:
                 status=BriefStatus.ANALYSIS_FAILED,
                 sync=sync,
                 coverage=coverage,
+                ai_calls=run.calls,
                 error_code=run.error_code or "ANALYSIS_FAILED",
             )
         return BriefRunResult(
@@ -153,6 +155,7 @@ class BriefService:
             sync=sync,
             digest=digest,
             coverage=coverage,
+            ai_calls=run.calls,
             error_code=run.error_code,
         )
 

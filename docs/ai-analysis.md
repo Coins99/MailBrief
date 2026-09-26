@@ -1,38 +1,90 @@
 # AI analysis and the daily brief (M4)
 
 `mailbrief-gmail-diagnostic brief` syncs today's Inbox, reads the shortlisted bodies in
-memory, asks for your consent, sends minimized messages to OpenAI, validates every answer
+memory, asks for your consent, sends minimized messages to Groq, validates every answer
 in Python and saves the day's brief to SQLite. Bodies are never stored.
 
 ## Setup
 
-1. Save your OpenAI API key: `uv run mailbrief-gmail-diagnostic ai-key set` (input is hidden).
+Create a key in [Groq Console](https://console.groq.com/keys). Keep the organization on
+its free plan initially. Enable **Zero Data Retention** in **Data Controls** before
+sending private mail; MailBrief cannot verify this remote setting. Without ZDR, Groq
+may retain content for reliability/abuse monitoring for up to 30 days, with legal
+exceptions. Usage metadata is retained even with ZDR. See
+[Groq data controls](https://console.groq.com/docs/your-data).
+
+1. Save your Groq API key: `uv run mailbrief-gmail-diagnostic ai-key set` (input is hidden).
    It is kept only in Windows Credential Manager or the macOS Keychain, under
-   `MailBrief.OpenAI`. `ai-key status` says whether one is saved; `ai-key clear` removes it.
-2. Set `MAILBRIEF_OPENAI_MODEL` to an OpenAI model that supports Structured Outputs.
+   `MailBrief.Groq`. `ai-key status` says whether one is saved; `ai-key clear` removes it.
+2. Set `MAILBRIEF_GROQ_MODEL` to `openai/gpt-oss-120b`, which supports strict Structured Outputs on Groq.
+   This model name does not require an OpenAI API account.
 3. Optional settings:
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
-| `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` | 8000 | 256-64000 | Output limit per OpenAI call |
+| `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` | 2000 | 256-64000 | Output limit per Groq call |
+| `MAILBRIEF_AI_MAX_REQUESTS_PER_RUN` | 10 | 1-1000 | Maximum HTTP attempts per connection/run, including retries |
 | `MAILBRIEF_AI_TIMEOUT_SECONDS` | 120 | 10-600 | Time limit per request |
-| `MAILBRIEF_AI_BATCH_SIZE` | 5 | 1-10 | Messages per call |
+| `MAILBRIEF_AI_BODY_CHARACTER_LIMIT` | 4000 | 1-8000 | Prepared body characters per email |
+| `MAILBRIEF_AI_BATCH_SIZE` | 1 | 1-10 | Messages per call |
 
 Then run `uv run mailbrief-gmail-diagnostic brief`. It accepts the same `--timezone`,
 `--include`, `--exclude`, `--database` and `--silent-only` options as `sync`, plus `--yes`
 and `--show` (below).
 
+PowerShell example (replace the model and Gmail client path with your own):
+
+```powershell
+uv run mailbrief-gmail-diagnostic ai-key set
+uv run mailbrief-gmail-diagnostic ai-key status
+$env:MAILBRIEF_GROQ_MODEL = "openai/gpt-oss-120b"
+$env:MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH = "C:\path\to\gmail-client.json"
+$env:MAILBRIEF_AI_MAX_REQUESTS_PER_RUN = "5"
+$env:MAILBRIEF_AI_MAX_OUTPUT_TOKENS = "2000"
+uv run mailbrief-gmail-diagnostic brief
+```
+
+The key is saved across sessions in the OS vault. The `$env:` settings above apply to this
+PowerShell session. `ai-key status` confirms storage, not API validity; a consented brief
+verifies access. Never pass the key as a command argument or put it into a repository file.
+
+## Usage and spending limits
+
+MailBrief enforces the request cap on each Groq provider connection, which is one `brief`
+run in the CLI. Batches, individual fallback calls and HTTP retries all share the same
+counter. Failed requests also count. Cached analyses consume no requests. At the cap,
+MailBrief stops making requests, retains successful analyses and reports a partial brief
+(exit 4), or preserves the previous brief if nothing could be analyzed.
+
+The example above permits at most five requests with at most 2,000 output tokens each.
+On paid plans, input tokens are also billable. These controls are not a dollar cap:
+starting another run resets the counter, and processes have separate counters.
+
+On the free plan, Groq enforces organization-wide quotas. The documented free limits
+for `openai/gpt-oss-120b` are 30 requests/minute, 1,000/day, 8,000 tokens/minute and
+200,000/day; check your dashboard for actual limits. Character counts do not guarantee
+that prompts, schemas and output reservations fit the token allowance. See
+[Groq rate limits](https://console.groq.com/docs/rate-limits).
+
+If you later enable paid usage, an organization owner can set a monthly USD limit in
+**Groq Console > Settings > Billing > Limits** and add alerts. This applies across all
+keys in the organization. Spend tracking is delayed 10-15 minutes, so some overshoot is
+possible. MailBrief treats `blocked_api_access` as terminal and does not retry it.
+See [Groq spending limits](https://console.groq.com/docs/spend-limits).
+
 ## What is sent, and what never is
 
 For each shortlisted message with readable text: the subject, the sender's name and
 address, the received time (local, with the weekday), your time zone, whether the body was
-cut, and the plain-text body with quoted history trimmed, cut to at most 8,000 characters.
+cut, and the plain-text body with quoted history trimmed, cut to 4,000 characters by
+default (configurable up to 8,000).
 Each message is labelled with a random key that changes every run.
 
 Never sent: attachments, recipients, message IDs, links, account IDs, credentials, or any
 message outside the shortlist. Empty or unreadable bodies are skipped. Requests go only to
-`https://api.openai.com/v1`, whatever `OPENAI_BASE_URL` or proxy variables say, and set
-`store=false`. OpenAI's own data policies still apply.
+`https://api.groq.com/openai/v1/chat/completions`, regardless of base-URL or proxy
+environment variables. Groq privacy controls are configured in its console, not with
+an OpenAI `store=false` request parameter.
 
 ## Consent
 
@@ -42,6 +94,13 @@ message outside the shortlist. Empty or unreadable bodies are skipped. Requests 
 - Nothing is asked when nothing needs sending, because every result is cached.
 - `ai-consent status` shows each account's consent; `ai-consent revoke` withdraws it, and
   the next brief asks again. Both work without a Gmail connection.
+
+## Moving from OpenAI
+
+Save a new Groq key and replace `MAILBRIEF_OPENAI_MODEL` with `MAILBRIEF_GROQ_MODEL`.
+The old OpenAI vault entry is left untouched and is never used as a Groq credential.
+Groq requires fresh consent. Existing OpenAI analyses and saved briefs remain readable,
+but they do not count as Groq cache hits. There is no automatic OpenAI fallback.
 
 ## Caching
 
@@ -92,16 +151,18 @@ summary, action, deadline and Gmail link, never the evidence or the body.
 
 ## Tokens
 
-Each run prints the input and output tokens OpenAI reported, or `?` when it reported none.
-"AI: nothing sent this run" means every result came from the cache. MailBrief shows no cost
-estimates; check usage in your OpenAI dashboard.
+Each run prints the input and output tokens Groq reported, or `?` when it reported none.
+"AI: nothing sent this run" means no AI provider call was attempted (for example, all results
+were cached or all bodies were empty). A failed call with no reported usage prints `? / ?`;
+missing token counts do not mean nothing was sent. MailBrief shows no cost estimates; check
+usage in your Groq dashboard.
 
 ## Troubleshooting
 
-- **"OpenAI rejected the API key"**: run `ai-key set` with a valid key.
-- **"OpenAI denied access (permission, region or quota)"**: check billing, quota, project
-  permissions and whether OpenAI serves your region.
-- **HTTP 400, or "OpenAI request failed; check MAILBRIEF_OPENAI_MODEL"**: the model may not
+- **"Groq rejected the API key"**: run `ai-key set` with a valid key.
+- **"Groq denied access (permission, region or quota)"**: check billing, quota, project
+  permissions and whether Groq serves your region.
+- **HTTP 400, or "Groq request failed; check MAILBRIEF_GROQ_MODEL"**: the model may not
   support Structured Outputs. Choose one that does.
 - **"Incomplete" results**: the answer hit the output limit. Raise
   `MAILBRIEF_AI_MAX_OUTPUT_TOKENS`, or lower `MAILBRIEF_AI_BATCH_SIZE`.
@@ -113,7 +174,7 @@ estimates; check usage in your OpenAI dashboard.
 Every command that uses the database (`sync`, `bodies`, `brief` and `ai-consent`) accepts
 `--database PATH`, so the live check can use a separate database from your everyday one.
 
-1. Run `ai-key set`; `ai-key status` then shows "saved".
+1. Enable ZDR in Groq Console Data Controls. Run `ai-key set`; `ai-key status` then shows "saved".
 2. Run `brief`: the disclosure lists the count and the fields. Answer "no": nothing is sent,
    exit 6.
 3. Run `brief` and answer "yes": the brief is saved. `brief --show` lists the items, and
@@ -132,4 +193,4 @@ Every command that uses the database (`sync`, `bodies`, `brief` and `ai-consent`
    the database files for it: it is absent. (The first ~200 characters of each email are
    stored as its preview, and short evidence excerpts are stored by design.)
 
-The owner records the results in `docs/m4-validation.md`.
+The owner records the results in [m4-validation.md](m4-validation.md).

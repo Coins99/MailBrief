@@ -18,10 +18,11 @@ class Settings(BaseSettings):
     gmail_oauth_client_path: Path | None = None
     microsoft_client_id: str | None = None
     graph_base_url: HttpUrl = HttpUrl("https://graph.microsoft.com/v1.0")
-    openai_model: str | None = None
-    ai_batch_size: int = Field(default=5, ge=1, le=10)
-    ai_body_character_limit: int = Field(default=8_000, ge=1, le=8_000)
-    ai_max_output_tokens: int = Field(default=8_000, ge=256, le=64_000)
+    groq_model: str | None = None
+    ai_batch_size: int = Field(default=1, ge=1, le=10)
+    ai_body_character_limit: int = Field(default=4_000, ge=1, le=8_000)
+    ai_max_output_tokens: int = Field(default=2_000, ge=256, le=64_000)
+    ai_max_requests_per_run: int = Field(default=10, ge=1, le=1_000)
     ai_timeout_seconds: float = Field(default=120, ge=10, le=600)
 
     @field_validator("graph_base_url")
@@ -50,12 +51,12 @@ class Settings(BaseSettings):
             )
         return value
 
-    def require_openai_model(self) -> str:
-        """Return the configured OpenAI model or an actionable error."""
-        value = (self.openai_model or "").strip()
+    def require_groq_model(self) -> str:
+        """Return the configured Groq model or an actionable error."""
+        value = (self.groq_model or "").strip()
         if not value:
             raise ConfigurationError(
-                "Set MAILBRIEF_OPENAI_MODEL to an OpenAI model that supports Structured Outputs."
+                "Set MAILBRIEF_GROQ_MODEL to a Groq model that supports Structured Outputs."
             )
         return value
 

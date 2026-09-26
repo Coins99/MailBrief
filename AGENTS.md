@@ -23,7 +23,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
 - `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` protocols and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
-  `providers/openai/`: active AI adapter (Structured Outputs), API key store and factory.
+  `providers/groq/`: active AI adapter (Structured Outputs), API key store and factory.
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
   analysis, deadlines, digest and brief.
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`.
@@ -43,7 +43,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   link) on explicit request, never evidence or bodies.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
-- The OpenAI API key lives only in that OS vault, under `MailBrief.OpenAI`.
+- The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
 - Provider JSON stays inside its adapter; services and storage use domain models only.
 - Timestamps are timezone-aware UTC. Never use naive datetimes or `datetime.utcnow()`.
 - Gmail access is read-only (`gmail.readonly`). No mailbox writes or sends.
@@ -61,7 +61,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Never send tokens, account or tenant IDs, provider message IDs, source links or
   attachments.
 - Require explicit first-use consent, and disable provider-side response storage where
-  supported (OpenAI: `store=False`).
+  supported; enable Groq Zero Data Retention in Console Data Controls before live mail use.
 - Accept only responses that validate against the versioned Pydantic schema. Cache by
   input hash, provider, model, prompt version and schema version.
 

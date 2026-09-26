@@ -182,6 +182,52 @@ async def test_an_unchanged_second_run_reuses_everything_without_asking(
     assert result.coverage.ai_provider == "fake"
 
 
+async def test_migration_requires_new_consent_and_keeps_provider_caches_separate(
+    session: AsyncSession,
+) -> None:
+    class PreviousProvider(FakeAIProvider):
+        @property
+        def provider_name(self) -> str:
+            return "openai"
+
+    class NewProvider(FakeAIProvider):
+        @property
+        def provider_name(self) -> str:
+            return "groq"
+
+    old = await build(session, PreviousProvider([answer_all()]), RecordingGate(True)).generate(
+        tz_key=ZONE
+    )
+    assert old.digest is not None
+    account_id = await account_id_of(session)
+    gate = RecordingGate(False)
+    provider = NewProvider()
+    declined = await build(session, provider, gate).generate(tz_key=ZONE)
+    assert declined.status is BriefStatus.CONSENT_DECLINED
+    assert provider.calls == 0
+    assert gate.previews[0].first_use
+    assert gate.previews[0].reused_count == 0
+    historical = await DigestRepository(session).get_by_account_and_date(account_id, TODAY)
+    assert historical is not None
+    assert historical.ai_provider == "openai"
+
+    fresh = await build(session, NewProvider([answer_all()]), RecordingGate(True)).generate(
+        tz_key=ZONE
+    )
+    assert fresh.coverage is not None
+    assert (fresh.coverage.analyzed, fresh.coverage.reused) == (2, 0)
+    assert (
+        await ConsentRepository(session).get_active(
+            account_id, "openai", CONSENT_DISCLOSURE_VERSION
+        )
+        is not None
+    )
+    # Same model/prompt/input still selects the original provider's cached rows.
+    reused = await build(session, PreviousProvider(), RecordingGate(False)).generate(tz_key=ZONE)
+    assert reused.coverage is not None
+    assert (reused.coverage.analyzed, reused.coverage.reused) == (0, 2)
+
+
 async def test_a_declined_gate_sends_nothing_and_saves_nothing(session: AsyncSession) -> None:
     provider = FakeAIProvider()
     gate = RecordingGate(answer=False)
@@ -351,7 +397,7 @@ async def test_progress_reports_analyzing_then_assembling(session: AsyncSession)
 
 def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
     preview = TransmissionPreview(
-        provider_name="openai",
+        provider_name="groq",
         model_name="model-1",
         message_count=3,
         truncated_count=1,
@@ -361,18 +407,19 @@ def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
 
     text = "\n".join(disclosure_lines(preview))
 
-    assert "send 3 messages to openai (model-1)" in text
+    assert "send 3 messages to groq (model-1)" in text
     assert "1 message is cut" in text
     assert all(sent_field in text for sent_field in SENT_FIELDS)
     assert "attachments, recipients, message IDs, links, account IDs or credentials" in text
-    assert "store=false" in text
+    assert "Zero Data Retention" in text
+    assert "cannot verify" in text
     assert "2 messages already analyzed" in text
     assert "remembered for this account until you revoke it" in text
 
 
 def test_disclosure_lines_for_a_returning_user_without_truncation() -> None:
     preview = TransmissionPreview(
-        provider_name="openai",
+        provider_name="groq",
         model_name="model-1",
         message_count=1,
         truncated_count=0,
@@ -382,7 +429,7 @@ def test_disclosure_lines_for_a_returning_user_without_truncation() -> None:
 
     text = "\n".join(disclosure_lines(preview))
 
-    assert "send 1 message to openai" in text
+    assert "send 1 message to groq" in text
     assert "No message is cut" in text
     assert "remembered" not in text
     assert "already analyzed" not in text

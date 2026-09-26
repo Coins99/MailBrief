@@ -1,4 +1,4 @@
-"""The brief, ai-key and ai-consent commands end to end, with Gmail and OpenAI over respx."""
+"""The brief, ai-key and ai-consent commands end to end, with Gmail and Groq over respx."""
 
 import logging
 from collections.abc import AsyncIterator, Callable
@@ -14,11 +14,11 @@ from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
 from mailbrief.providers.gmail.client import MESSAGES_URL, GmailClient
 from mailbrief.providers.gmail.provider import GmailProvider
-from mailbrief.providers.openai.credentials import ENTRY, SERVICE
+from mailbrief.providers.groq.credentials import ENTRY, SERVICE
 from tests.unit.providers.gmail.body_fixtures import message, part
 from tests.unit.providers.gmail.metadata_fixtures import FakeSession, metadata
-from tests.unit.providers.openai.openai_fixtures import (
-    RESPONSES_URL,
+from tests.unit.providers.groq.groq_fixtures import (
+    CHAT_URL,
     TEST_KEY,
     MemoryVault,
     answer_every_message,
@@ -67,7 +67,7 @@ class Mailbox:
 @pytest.fixture
 def vault(monkeypatch: pytest.MonkeyPatch) -> MemoryVault:
     backend = MemoryVault({(SERVICE, ENTRY): TEST_KEY})
-    monkeypatch.setattr("mailbrief.providers.openai.credentials.os_vault", lambda: backend)
+    monkeypatch.setattr("mailbrief.providers.groq.credentials.os_vault", lambda: backend)
     return backend
 
 
@@ -85,14 +85,14 @@ def mailbox(
             )
 
     monkeypatch.setattr(gmail, "gmail_provider", factory)
-    monkeypatch.setenv("MAILBRIEF_OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("MAILBRIEF_GROQ_MODEL", "test-model")
     return Mailbox(respx_mock)
 
 
-def openai_answers(
+def groq_answers(
     router: respx.MockRouter, responder: Responder = answer_every_message
 ) -> respx.Route:
-    return router.post(RESPONSES_URL).mock(side_effect=responder)
+    return router.post(CHAT_URL).mock(side_effect=responder)
 
 
 def replies(monkeypatch: pytest.MonkeyPatch, *answers: str) -> None:
@@ -117,26 +117,26 @@ def test_first_brief_asks_then_saves_and_prints_counts_only(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    route = openai_answers(respx_mock)
+    route = groq_answers(respx_mock)
     replies(monkeypatch, "yes")
     path = tmp_path / "brief.sqlite3"
 
     assert run_brief(path) == 0
 
     output = capsys.readouterr().out
-    assert "MailBrief will send 1 message to openai (test-model)" in output
+    assert "MailBrief will send 1 message to groq (test-model)" in output
     assert "Brief: saved (complete); items: 1" in output
     assert (
         "Coverage: shortlisted 1, analyzed 1, reused 0, failed 0, skipped 0; sync complete: yes"
         in output
     )
-    assert "AI: openai / test-model; tokens in/out: 1200 / 300" in output
+    assert "AI: groq / test-model; tokens in/out: 1200 / 300" in output
     assert "Saved. Bodies were not stored." in output
     for private in ("Approval needed", "sender@example.com", EVIDENCE, MARKER):
         assert private not in output
     assert route.call_count == 1
     assert gmail.main(["ai-consent", "status", "--database", str(path)]) == 0
-    assert "OpenAI consent granted" in capsys.readouterr().out
+    assert "Groq consent granted" in capsys.readouterr().out
 
 
 def test_a_repeat_brief_with_yes_reuses_everything(
@@ -146,7 +146,7 @@ def test_a_repeat_brief_with_yes_reuses_everything(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    route = openai_answers(respx_mock)
+    route = groq_answers(respx_mock)
     replies(monkeypatch, "yes")
     path = tmp_path / "brief.sqlite3"
     assert run_brief(path) == 0
@@ -161,6 +161,36 @@ def test_a_repeat_brief_with_yes_reuses_everything(
     assert "MailBrief will send" not in output
 
 
+def test_usage_limit_saves_partial_results_and_cached_results_use_no_budget(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("MAILBRIEF_AI_MAX_REQUESTS_PER_RUN", "1")
+    monkeypatch.setenv("MAILBRIEF_AI_BATCH_SIZE", "1")
+    mailbox.add("a2")
+    route = groq_answers(respx_mock)
+    replies(monkeypatch, "yes")
+    path = tmp_path / "brief.sqlite3"
+
+    assert run_brief(path) == 4
+    output = capsys.readouterr().out
+    assert route.call_count == 1
+    assert "Brief: saved (partial); items: 1" in output
+    assert "AI request limit for this run was reached" in output
+
+    assert run_brief(path, "--yes") == 0
+    output = capsys.readouterr().out
+    assert route.call_count == 2
+    assert "analyzed 1, reused 1, failed 0" in output
+
+    assert run_brief(path, "--yes") == 0
+    assert route.call_count == 2
+    assert "AI: nothing sent this run" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("answer", ["no", "", "y", "YES"])
 def test_first_use_needs_exactly_yes(
     tmp_path: Path,
@@ -170,7 +200,7 @@ def test_first_use_needs_exactly_yes(
     capsys: pytest.CaptureFixture[str],
     answer: str,
 ) -> None:
-    route = openai_answers(respx_mock)
+    route = groq_answers(respx_mock)
     replies(monkeypatch, answer)
 
     assert run_brief(tmp_path / "brief.sqlite3") == 6
@@ -186,7 +216,7 @@ def test_yes_never_grants_first_use_consent(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    route = openai_answers(respx_mock)
+    route = groq_answers(respx_mock)
     replies(monkeypatch)
 
     assert run_brief(tmp_path / "brief.sqlite3", "--yes") == 6
@@ -203,12 +233,12 @@ def test_revoked_consent_blocks_a_later_brief_with_yes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    route = openai_answers(respx_mock)
+    route = groq_answers(respx_mock)
     replies(monkeypatch, "yes")
     path = tmp_path / "brief.sqlite3"
     assert run_brief(path) == 0
     assert gmail.main(["ai-consent", "revoke", "--database", str(path)]) == 0
-    assert "OpenAI consent revoked: 1" in capsys.readouterr().out
+    assert "Groq consent revoked: 1" in capsys.readouterr().out
     mailbox.body = f"{BODY} A follow-up line arrived."
 
     assert run_brief(path, "--yes") == 6
@@ -216,7 +246,7 @@ def test_revoked_consent_blocks_a_later_brief_with_yes(
     assert route.call_count == 1
     assert "First use needs your interactive consent" in capsys.readouterr().out
     assert gmail.main(["ai-consent", "status", "--database", str(path)]) == 0
-    assert "OpenAI consent not granted" in capsys.readouterr().out
+    assert "Groq consent not granted" in capsys.readouterr().out
 
 
 def test_a_rejected_key_exits_4_with_the_ai_key_hint(
@@ -226,7 +256,7 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    route = respx_mock.post(RESPONSES_URL).respond(401, json=error_body("invalid_api_key"))
+    route = respx_mock.post(CHAT_URL).respond(401, json=error_body("invalid_api_key"))
     replies(monkeypatch, "yes")
 
     assert run_brief(tmp_path / "brief.sqlite3") == 4
@@ -234,8 +264,10 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
     output = capsys.readouterr().out
     assert route.call_count == 1
     assert "Brief: analysis_failed; items: 0" in output
+    assert "AI: nothing sent this run" not in output
+    assert "AI: groq / test-model; tokens in/out: ? / ?" in output
     assert (
-        "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set "
+        "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set "
         "Your last saved brief for today is unchanged."
     ) in output
 
@@ -247,7 +279,7 @@ def test_a_partial_brief_names_the_provider_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    route = openai_answers(respx_mock)
+    route = groq_answers(respx_mock)
     replies(monkeypatch, "yes")
     path = tmp_path / "brief.sqlite3"
     assert run_brief(path) == 0
@@ -260,10 +292,12 @@ def test_a_partial_brief_names_the_provider_error(
     lines = capsys.readouterr().out.splitlines()
     assert route.call_count == 2
     assert "Brief: saved (partial); items: 1" in lines
+    assert "AI: nothing sent this run" not in lines
+    assert "AI: groq / test-model; tokens in/out: ? / ?" in lines
     assert any("analyzed 0, reused 1, failed 1" in line for line in lines)
     outcome = lines.index("Saved. Bodies were not stored.")
     assert lines[outcome + 1] == (
-        "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
+        "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
     )
 
 
@@ -292,7 +326,7 @@ def test_show_prints_the_items_but_never_evidence(
         ]
         return httpx.Response(200, json=results_body(results))
 
-    openai_answers(respx_mock, answer_with_action)
+    groq_answers(respx_mock, answer_with_action)
     replies(monkeypatch, "yes")
 
     assert run_brief(tmp_path / "brief.sqlite3", "--show") == 0
@@ -311,7 +345,7 @@ def test_ai_key_commands_never_print_the_key(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     backend = MemoryVault()
-    monkeypatch.setattr("mailbrief.providers.openai.credentials.os_vault", lambda: backend)
+    monkeypatch.setattr("mailbrief.providers.groq.credentials.os_vault", lambda: backend)
     monkeypatch.setattr("getpass.getpass", lambda prompt="": f"  {TEST_KEY}  ")
 
     assert gmail.main(["ai-key", "status"]) == 0
@@ -323,9 +357,9 @@ def test_ai_key_commands_never_print_the_key(
     assert gmail.main(["ai-key", "status"]) == 0
 
     output = capsys.readouterr().out
-    assert output.count("OpenAI API key: not saved") == 2
-    assert "OpenAI API key: saved" in output
-    assert "OpenAI API key saved in the OS credential store." in output
+    assert output.count("Groq API key: not saved") == 2
+    assert "Groq API key: saved" in output
+    assert "Groq API key saved in the OS credential store." in output
     assert "sk-" not in output
     assert "a" * 16 not in output
 
@@ -334,13 +368,13 @@ def test_an_invalid_key_is_rejected_without_echo(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     backend = MemoryVault()
-    monkeypatch.setattr("mailbrief.providers.openai.credentials.os_vault", lambda: backend)
+    monkeypatch.setattr("mailbrief.providers.groq.credentials.os_vault", lambda: backend)
     monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-too short")
 
     assert gmail.main(["ai-key", "set"]) == 3
 
     output = capsys.readouterr().out
-    assert "That does not look like an OpenAI API key. Nothing was saved." in output
+    assert "That does not look like a Groq API key. Nothing was saved." in output
     assert "sk-too" not in output
     assert backend.entries == {}
 
@@ -354,13 +388,13 @@ def test_a_missing_key_or_model_is_a_setup_error(
 ) -> None:
     vault.entries.clear()
     assert run_brief(tmp_path / "brief.sqlite3") == 3
-    assert "No OpenAI API key is saved. Run: mailbrief-gmail-diagnostic ai-key set" in (
+    assert "No Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set" in (
         capsys.readouterr().out
     )
-    monkeypatch.delenv("MAILBRIEF_OPENAI_MODEL")
+    monkeypatch.delenv("MAILBRIEF_GROQ_MODEL")
 
     assert run_brief(tmp_path / "brief.sqlite3") == 3
-    assert "Set MAILBRIEF_OPENAI_MODEL" in capsys.readouterr().out
+    assert "Set MAILBRIEF_GROQ_MODEL" in capsys.readouterr().out
 
 
 def test_consent_status_on_an_empty_database(
@@ -379,7 +413,7 @@ def test_the_body_outside_the_evidence_never_reaches_disk_output_or_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    openai_answers(respx_mock)
+    groq_answers(respx_mock)
     replies(monkeypatch, "yes")
 
     assert run_brief(tmp_path / "leak.sqlite3", "--show") == 0

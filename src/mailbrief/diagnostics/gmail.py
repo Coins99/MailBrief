@@ -24,8 +24,8 @@ from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.providers.gmail.cache import GmailCredentialStore
 from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
-from mailbrief.providers.openai.credentials import OpenAIKeyStore, parse_api_key
-from mailbrief.providers.openai.factory import openai_provider
+from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
+from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
@@ -41,17 +41,21 @@ from mailbrief.storage.repositories import (
     SyncRunRepository,
 )
 
-OPENAI = "openai"
+GROQ = "groq"
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 _SETUP_UNAVAILABLE = (
     "Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md."
 )
 _AI_ERROR_MESSAGES = {
-    "AI_AUTH_FAILED": "OpenAI rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set",
-    "AI_PERMISSION_DENIED": "OpenAI denied access (permission, region or quota).",
-    "AI_RATE_LIMITED": "OpenAI rate limit reached; retry later.",
-    "AI_TIMEOUT": "OpenAI did not respond in time.",
-    "AI_PROVIDER_ERROR": "OpenAI request failed; check MAILBRIEF_OPENAI_MODEL.",
+    "AI_USAGE_LIMIT": (
+        "MailBrief's AI request limit for this run was reached. "
+        "Review MAILBRIEF_AI_MAX_REQUESTS_PER_RUN before running again."
+    ),
+    "AI_AUTH_FAILED": "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set",
+    "AI_PERMISSION_DENIED": "Groq denied access (permission, region or quota).",
+    "AI_RATE_LIMITED": "Groq rate limit reached; retry later.",
+    "AI_TIMEOUT": "Groq did not respond in time.",
+    "AI_PROVIDER_ERROR": "Groq request failed; check MAILBRIEF_GROQ_MODEL.",
     "ANALYSIS_FAILED": "No message could be analyzed.",
 }
 
@@ -200,25 +204,25 @@ async def bodies(
 
 
 def ai_key(action: str) -> int:
-    """Save, check or remove the OpenAI API key; no part of the key is ever printed."""
-    store = OpenAIKeyStore()
+    """Save, check or remove the Groq API key; no part of the key is ever printed."""
+    store = GroqKeyStore()
     if action == "set":
         try:
-            raw = getpass.getpass("OpenAI API key (input hidden): ")
+            raw = getpass.getpass("Groq API key (input hidden): ")
         except EOFError:
             raw = ""
         store.save(parse_api_key(raw))
-        print("OpenAI API key saved in the OS credential store.")
+        print("Groq API key saved in the OS credential store.")
     elif action == "status":
-        print("OpenAI API key: saved" if store.load() is not None else "OpenAI API key: not saved")
+        print("Groq API key: saved" if store.load() is not None else "Groq API key: not saved")
     else:
         store.clear()
-        print("OpenAI API key removed from the OS credential store.")
+        print("Groq API key removed from the OS credential store.")
     return 0
 
 
 async def ai_consent(action: str, *, database_path: Path | None) -> int:
-    """Show or revoke recorded OpenAI consent for every account; needs no Gmail connection."""
+    """Show or revoke recorded Groq consent for every account; needs no Gmail connection."""
     path = database_path or AppPaths.from_qt().database_path
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
@@ -230,22 +234,20 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
                 if not accounts:
                     print("No accounts in this database.")
                 for account in accounts:
-                    active = await consents.get_active(
-                        account.id, OPENAI, CONSENT_DISCLOSURE_VERSION
-                    )
+                    active = await consents.get_active(account.id, GROQ, CONSENT_DISCLOSURE_VERSION)
                     state = (
                         f"granted {active.granted_at_utc:%Y-%m-%d %H:%M} UTC"
                         if active is not None
                         else "not granted"
                     )
-                    print(f"Account {account.id}: OpenAI consent {state}")
+                    print(f"Account {account.id}: Groq consent {state}")
                 return 0
             now = datetime.now(UTC)
             revoked = 0
             for account in accounts:
-                revoked += await consents.revoke_all(account.id, OPENAI, now)
+                revoked += await consents.revoke_all(account.id, GROQ, now)
             await session.commit()
-            print(f"OpenAI consent revoked: {revoked}")
+            print(f"Groq consent revoked: {revoked}")
             return 0
     finally:
         await database.dispose()
@@ -309,11 +311,11 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
             f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}; "
             f"sync complete: {'yes' if coverage.sync_complete else 'no'}"
         )
-        if coverage.analyzed == 0 and coverage.input_tokens is None:
+        if result.ai_calls == 0:
             print("AI: nothing sent this run")
         else:
             print(
-                f"AI: {OPENAI} / {coverage.ai_model or model}; tokens in/out: "
+                f"AI: {GROQ} / {coverage.ai_model or model}; tokens in/out: "
                 f"{_count(coverage.input_tokens)} / {_count(coverage.output_tokens)}"
             )
     print(_outcome(result))
@@ -368,7 +370,7 @@ async def brief(
     assume_yes: bool,
     show: bool,
 ) -> int:
-    """Sync, ask consent, analyze the shortlist with OpenAI and save today's brief."""
+    """Sync, ask consent, analyze the shortlist with Groq and save today's brief."""
     settings = Settings()
     tz = resolve_timezone(timezone)
     now = datetime.now(UTC)
@@ -376,7 +378,7 @@ async def brief(
     path = database_path or AppPaths.from_qt().database_path
     async with (
         gmail_provider(settings, silent_only=silent_only) as provider,
-        openai_provider(settings) as ai,
+        groq_provider(settings) as ai,
     ):
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
@@ -449,7 +451,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     brief_parser = commands.add_parser(
         "brief",
-        help="Sync today's Inbox, analyze the shortlist with OpenAI after consent, save the brief.",
+        help="Sync today's Inbox, analyze the shortlist with Groq after consent, save the brief.",
     )
     _add_day_options(brief_parser)
     brief_parser.add_argument(
@@ -463,7 +465,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         help="Print the saved items: sender, subject, summary, action, deadline and link.",
     )
     key_parser = commands.add_parser(
-        "ai-key", help="Save, check or remove the OpenAI API key in the OS credential store."
+        "ai-key", help="Save, check or remove the Groq API key in the OS credential store."
     )
     key_parser.add_argument(
         "action",
@@ -471,7 +473,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         help="set prompts without echoing; status never shows the key; clear is safe to repeat.",
     )
     consent_parser = commands.add_parser(
-        "ai-consent", help="Show or revoke your recorded consent to send email to OpenAI."
+        "ai-consent", help="Show or revoke your recorded consent to send email to Groq."
     )
     consent_parser.add_argument(
         "action", choices=("status", "revoke"), help="Show or revoke consent for every account."
@@ -481,7 +483,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(arguments)
     # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
-    for name in ("httpx", "httpcore", "openai"):
+    for name in ("httpx", "httpcore", "groq"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
     try:
         if args.command == "brief":

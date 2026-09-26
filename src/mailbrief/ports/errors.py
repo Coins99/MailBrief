@@ -24,6 +24,10 @@ class ProviderTimeoutError(ProviderError):
     """An external provider operation exceeded its wall-clock timeout deadline."""
 
 
+class ProviderUsageLimitError(ProviderError):
+    """The local usage budget is exhausted; do not retry this connection."""
+
+
 class AuthenticationRequiredError(ProviderError):
     """The user must authenticate or reconnect before work can continue."""
 

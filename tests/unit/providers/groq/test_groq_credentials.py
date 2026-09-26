@@ -1,18 +1,18 @@
-"""OpenAI API key parsing and OS-vault storage; the key is never echoed."""
+"""Groq API key parsing and OS-vault storage; the key is never echoed."""
 
 import pytest
 from pydantic import SecretStr
 
 from mailbrief.errors import ConfigurationError
-from mailbrief.providers.openai import credentials
-from mailbrief.providers.openai.credentials import (
+from mailbrief.providers.groq import credentials
+from mailbrief.providers.groq.credentials import (
     ENTRY,
     SERVICE,
-    OpenAIKeyError,
-    OpenAIKeyStore,
+    GroqKeyError,
+    GroqKeyStore,
     parse_api_key,
 )
-from tests.unit.providers.openai.openai_fixtures import TEST_KEY, MemoryVault
+from tests.unit.providers.groq.groq_fixtures import TEST_KEY, MemoryVault
 
 
 class BrokenVault:
@@ -30,24 +30,34 @@ class BrokenVault:
 
 def test_the_key_round_trips_through_the_vault() -> None:
     backend = MemoryVault()
-    store = OpenAIKeyStore(backend)
+    store = GroqKeyStore(backend)
 
     store.save(parse_api_key(f"  {TEST_KEY}\n"))
 
     loaded = store.load()
     assert loaded is not None
     assert loaded.get_secret_value() == TEST_KEY
-    assert backend.entries == {("MailBrief.OpenAI", "api-key-v1"): TEST_KEY}
-    assert (SERVICE, ENTRY) == ("MailBrief.OpenAI", "api-key-v1")
+    assert backend.entries == {("MailBrief.Groq", "api-key-v1"): TEST_KEY}
+    assert (SERVICE, ENTRY) == ("MailBrief.Groq", "api-key-v1")
 
 
 def test_clear_is_safe_to_run_twice() -> None:
-    store = OpenAIKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
+    store = GroqKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
 
     store.clear()
     store.clear()
 
     assert store.load() is None
+
+
+def test_old_openai_key_is_never_loaded_or_removed() -> None:
+    old = ("MailBrief.OpenAI", ENTRY)
+    backend = MemoryVault({old: TEST_KEY})
+    store = GroqKeyStore(backend)
+    assert store.load() is None
+    store.save(parse_api_key("gsk_" + "b" * 32))
+    store.clear()
+    assert backend.entries == {old: TEST_KEY}
 
 
 @pytest.mark.parametrize("length", [20, 512])
@@ -68,18 +78,18 @@ def test_keys_at_the_length_limits_are_accepted(length: int) -> None:
     ids=["empty", "short", "long", "space", "tab", "non-ascii"],
 )
 def test_invalid_keys_are_rejected_without_echo(raw: str) -> None:
-    with pytest.raises(OpenAIKeyError) as caught:
+    with pytest.raises(GroqKeyError) as caught:
         parse_api_key(raw)
 
-    assert str(caught.value) == "That does not look like an OpenAI API key. Nothing was saved."
+    assert str(caught.value) == "That does not look like a Groq API key. Nothing was saved."
     assert isinstance(caught.value, ConfigurationError)
 
 
 @pytest.mark.parametrize("operation", ["load", "save", "clear"])
 def test_backend_failures_become_static_errors(operation: str) -> None:
-    store = OpenAIKeyStore(BrokenVault())
+    store = GroqKeyStore(BrokenVault())
 
-    with pytest.raises(OpenAIKeyError) as caught:
+    with pytest.raises(GroqKeyError) as caught:
         if operation == "save":
             store.save(SecretStr(TEST_KEY))
         elif operation == "load":
@@ -96,7 +106,7 @@ def test_the_default_store_uses_the_os_vault(monkeypatch: pytest.MonkeyPatch) ->
     backend = MemoryVault({(SERVICE, ENTRY): TEST_KEY})
     monkeypatch.setattr(credentials, "os_vault", lambda: backend)
 
-    loaded = OpenAIKeyStore().load()
+    loaded = GroqKeyStore().load()
 
     assert loaded is not None
     assert loaded.get_secret_value() == TEST_KEY

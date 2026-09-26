@@ -206,7 +206,7 @@ Inspect persisted rows and captured logs for synthetic full-body markers.
 - Bound batches, retries and per-run usage. Record usage when available; avoid
   claiming dollar costs without known pricing.
 
-**Files:** analysis models/port, `providers/openai/provider.py`, analysis service,
+**Files:** analysis models/port, `providers/groq/provider.py`, analysis service,
 `services/digest.py`, repositories and version/cache migrations.
 
 **Tests:** fake AI results, schema/context cache invalidation, unchanged-input

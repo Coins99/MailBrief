@@ -15,7 +15,7 @@ later use after Microsoft Entra access is resolved.
   local ranking and a metadata sync/review diagnostic.
 - Implemented for M3, awaiting live acceptance: shortlisted body reading and preparation
   ([Gmail bodies](docs/gmail-bodies.md)).
-- Implemented for M4, awaiting live acceptance: consented OpenAI analysis and the saved
+- Implemented for M4, awaiting live acceptance: consented Groq analysis and the saved
   daily brief ([AI analysis](docs/ai-analysis.md)).
 - Next: the desktop workflow and Windows and macOS packages (M5).
 

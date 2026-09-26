@@ -65,6 +65,7 @@ class BriefRunResult(DomainModel):
     sync: SyncResult
     digest: DailyDigest | None = None
     coverage: DigestCoverage | None = None
+    ai_calls: int = Field(default=0, ge=0)
     error_code: str | None = Field(default=None, max_length=128)
 
     @model_validator(mode="after")
