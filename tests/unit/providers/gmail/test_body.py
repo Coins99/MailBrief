@@ -267,3 +267,12 @@ async def test_deleted_message_is_unavailable(respx_mock: respx.MockRouter) -> N
         provider = GmailProvider(FakeSession(), GmailClient(http, FakeSession(), sleep=no_sleep))
         with pytest.raises(MessageUnavailableError):
             await provider.fetch_message_body("gone")
+
+
+@pytest.mark.parametrize("mime", ["image/png", "text/calendar"])
+async def test_unnamed_non_text_parts_are_counted_not_read(mime: str) -> None:
+    payload = part(
+        "multipart/mixed", parts=[part("text/plain", "Body text"), part(mime, "INLINE-CONTENT")]
+    )
+    body = await extract_body(message(payload), "m1", PartStore())
+    assert (body.text, body.attachments_skipped) == ("Body text", 1)
