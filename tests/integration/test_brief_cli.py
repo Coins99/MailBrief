@@ -372,6 +372,38 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
     ) in output
 
 
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        ("permission_denied", "Groq detail: HTTP 403, code permission_denied"),
+        (None, "Groq detail: HTTP 403"),
+    ],
+    ids=["with-code", "without-code"],
+)
+def test_a_denied_request_shows_its_status_and_code_but_never_groq_text(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: str | None,
+    detail: str,
+) -> None:
+    marker = "GROQ-403-MARKER-7c1a"
+    route = respx_mock.post(CHAT_URL).respond(
+        403, json=error_body(code, f"Project {marker} cannot use this model.")
+    )
+    replies(monkeypatch, "yes")
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 4
+
+    lines = capsys.readouterr().out.splitlines()
+    assert route.call_count == 1
+    (outcome,) = [index for index, line in enumerate(lines) if line.startswith("Groq denied")]
+    assert lines[outcome + 1] == detail
+    assert not any(marker in line for line in lines)
+
+
 def test_a_partial_brief_names_the_provider_error(
     tmp_path: Path,
     mailbox: Mailbox,
@@ -401,6 +433,7 @@ def test_a_partial_brief_names_the_provider_error(
     assert lines[outcome + 1] == (
         "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
     )
+    assert lines[outcome + 2] == "Groq detail: HTTP 401, code invalid_api_key"
 
 
 def test_an_empty_brief_after_an_incomplete_sync_exits_4(

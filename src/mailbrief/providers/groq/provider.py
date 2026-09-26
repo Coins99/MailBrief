@@ -199,7 +199,7 @@ def _failure(
         message = f"Groq rejected the request (HTTP {status})."
     else:
         message = CONNECTION_MESSAGE
-    return kind(message, client_request_id=request_id, provider_error_code=code)
+    return kind(message, client_request_id=request_id, provider_error_code=code, http_status=status)
 
 
 def _status_outcome(
@@ -225,6 +225,7 @@ def _status_outcome(
             retry_after_seconds=delay,
             client_request_id=request_id,
             provider_error_code=code,
+            http_status=status,
         )
     else:
         error = _failure(ProviderUnavailableError, status, request_id, code)

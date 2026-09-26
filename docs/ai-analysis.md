@@ -196,9 +196,15 @@ cost estimates; check usage in your Groq dashboard.
 
 ## Troubleshooting
 
+When Groq refuses a request, the error message is followed by a line such as
+`Groq detail: HTTP 403, code permission_denied`. It shows only the HTTP status and Groq's
+error code, when Groq sent a safe one; Groq's own error text is never shown or stored.
+
 - **"Groq rejected the API key"**: run `ai-key set` with a valid key.
 - **"Groq denied access (permission, region or quota)"**: check billing, quota, project
-  permissions and whether Groq serves your region.
+  permissions and whether Groq serves your region. For HTTP 403, check in Groq Console
+  which project and organization the key belongs to, and whether the model in
+  `MAILBRIEF_GROQ_MODEL` is available to that project.
 - **HTTP 400, or "Groq request failed; check MAILBRIEF_GROQ_MODEL"**: the model may not
   support Structured Outputs. Choose one that does.
 - **"Incomplete" results**: the answer hit the output limit. Raise

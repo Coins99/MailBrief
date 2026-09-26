@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import secrets
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ _KEY_ATTEMPTS = 64
 _QUOTES = "\"'‘’“”"
 _ELLIPSES = ("...", "…")
 REQUEST_REJECTED = "AI_REQUEST_REJECTED"
+_DETAIL_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 KEY_MISSING = "AI_KEY_MISSING"
 
 
@@ -182,12 +184,14 @@ class AnalysisRun:
     cancelled: bool
     error_code: str | None
     requests_sent: int = 0
+    provider_detail: str | None = None  # See provider_detail(); set with error_code.
 
 
 @dataclass(slots=True)
 class _Tally:
     calls: int = 0
     rejected: int = 0  # Messages left out because the provider rejected their request.
+    rejected_detail: str | None = None  # The first such rejection's provider detail.
     reported: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -214,9 +218,25 @@ class _Cancelled(Exception):
 class _ProviderStopped(Exception):
     """The provider raised an expected error, so no further calls are made."""
 
-    def __init__(self, error_code: str) -> None:
+    def __init__(self, error_code: str, detail: str | None) -> None:
         super().__init__(error_code)
         self.error_code = error_code
+        self.detail = detail
+
+
+def provider_detail(exc: ProviderError) -> str | None:
+    """The HTTP status and sanitized provider code behind an error, never provider text.
+
+    For example "HTTP 403, code permission_denied"; None when neither is known.
+    """
+    parts: list[str] = []
+    status = exc.http_status
+    if status is not None and 100 <= status <= 599:
+        parts.append(f"HTTP {status}")
+    code = exc.provider_error_code
+    if code is not None and _DETAIL_CODE_PATTERN.fullmatch(code):
+        parts.append(f"code {code}")
+    return ", ".join(parts) or None
 
 
 def _error_code(exc: ProviderError) -> str:
@@ -402,6 +422,7 @@ class AnalysisService:
         tally = _Tally()
         cancelled = False
         error_code: str | None = None
+        detail: str | None = None
         try:
             for start in range(0, len(pending), self._batch_size):
                 batch = pending[start : start + self._batch_size]
@@ -415,9 +436,11 @@ class AnalysisService:
             cancelled = True
         except _ProviderStopped as stop:
             error_code = stop.error_code
+            detail = stop.detail
             _fail(item for item in plan.messages if item.outcome is None)
         if error_code is None and tally.rejected:
             error_code = REQUEST_REJECTED
+            detail = tally.rejected_detail
         analyzed = sum(item.outcome is AnalysisOutcome.ANALYZED for item in plan.messages)
         failed = sum(item.outcome is AnalysisOutcome.FAILED for item in plan.messages)
         requests_sent = self._provider.requests_sent - requests_before
@@ -437,6 +460,7 @@ class AnalysisService:
             cancelled=cancelled,
             error_code=error_code,
             requests_sent=requests_sent,
+            provider_detail=detail,
         )
 
     async def _call(
@@ -457,9 +481,11 @@ class AnalysisService:
             code = _error_code(exc)
             logger.warning("AI provider call failed: %s", code)
             if code != REQUEST_REJECTED:
-                raise _ProviderStopped(code) from None
+                raise _ProviderStopped(code, provider_detail(exc)) from None
             if len(batch) == 1:
                 tally.rejected += 1  # The caller fails a single message it cannot retry.
+                if tally.rejected_detail is None:
+                    tally.rejected_detail = provider_detail(exc)
             retry = list(batch)
         else:
             tally.add(response.usage)

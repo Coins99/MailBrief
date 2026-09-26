@@ -300,6 +300,7 @@ async def test_a_long_rate_limit_fails_at_once(
     assert route.call_count == 1
     assert sleeps.delays == []
     assert caught.value.retry_after_seconds == 120.0
+    assert caught.value.http_status == 429
     assert str(caught.value) == "Groq rate limit reached; retry later."
 
 
@@ -332,6 +333,7 @@ async def test_terminal_errors_carry_static_messages_and_safe_codes(
     assert type(caught.value) is error_type
     assert route.call_count == 1
     assert caught.value.provider_error_code == code
+    assert caught.value.http_status == status
     assert caught.value.client_request_id is not None
 
 
@@ -382,6 +384,7 @@ async def test_server_errors_are_retried_three_times_then_unavailable(
         await provider.analyze([make_request()])
 
     assert str(caught.value) == f"Groq is unavailable (HTTP {status}); retry later."
+    assert caught.value.http_status == status
     assert route.call_count == 4
     assert sleeps.delays == [1.0, 2.0, 4.0]
 

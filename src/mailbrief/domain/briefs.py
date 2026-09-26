@@ -74,6 +74,8 @@ class BriefRunResult(DomainModel):
     coverage: DigestCoverage | None = None
     error_code: str | None = Field(default=None, max_length=128)
     ai_calls: int = Field(default=0, ge=0)  # HTTP requests this run, even failed or retried.
+    # The HTTP status and sanitized provider code behind error_code, e.g. "HTTP 403".
+    provider_detail: str | None = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
     def validate_digest(self) -> Self:

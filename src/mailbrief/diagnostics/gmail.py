@@ -387,6 +387,8 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
     partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")
     if result.status is BriefStatus.SAVED and partial_reason is not None:
         print(partial_reason)
+    if result.provider_detail:
+        print(f"{provider_display_name(PROVIDER_NAME)} detail: {result.provider_detail}")
     if _sync_incomplete(result):
         print("Inbox sync was incomplete, so this brief may be missing messages.")
 

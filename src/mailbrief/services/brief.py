@@ -167,6 +167,7 @@ class BriefService:
                 coverage=coverage,
                 error_code=run.error_code or "ANALYSIS_FAILED",
                 ai_calls=run.requests_sent,
+                provider_detail=run.provider_detail,
             )
         return BriefRunResult(
             status=BriefStatus.SAVED,
@@ -175,6 +176,7 @@ class BriefService:
             coverage=coverage,
             error_code=run.error_code,
             ai_calls=run.requests_sent,
+            provider_detail=run.provider_detail,
         )
 
     async def _consented(self, account_id: int, plan: AnalysisPlan, now: datetime) -> bool:

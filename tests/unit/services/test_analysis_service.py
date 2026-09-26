@@ -435,6 +435,44 @@ async def test_a_stopping_error_wins_over_an_earlier_rejection(session: AsyncSes
     assert provider.calls == 2
 
 
+@pytest.mark.parametrize(
+    ("status", "code", "detail"),
+    [
+        (403, "permission_denied", "HTTP 403, code permission_denied"),
+        (403, None, "HTTP 403"),
+        (403, "bad code; with spaces", "HTTP 403"),
+        (None, "permission_denied", "code permission_denied"),
+        (None, None, None),
+    ],
+    ids=["status-and-code", "status-only", "unsafe-code", "code-only", "neither"],
+)
+async def test_a_stopping_error_records_its_status_and_code(
+    session: AsyncSession, status: int | None, code: str | None, detail: str | None
+) -> None:
+    account_id, shortlist = await seed(session, 2)
+    error = ProviderPermissionError("denied", http_status=status, provider_error_code=code)
+
+    run = await analyze(session, FakeAIProvider([error]), shortlist, account_id=account_id)
+
+    assert run.error_code == "AI_PERMISSION_DENIED"
+    assert run.provider_detail == detail
+
+
+async def test_a_rejection_that_leaves_a_message_out_records_its_detail(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 2)
+    rejected = ProviderRequestRejectedError(
+        "no", http_status=400, provider_error_code="invalid_prompt"
+    )
+    provider = FakeAIProvider([rejected, answer_all()])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    assert run.error_code == "AI_REQUEST_REJECTED"
+    assert run.provider_detail == "HTTP 400, code invalid_prompt"
+
+
 async def test_unexpected_errors_propagate(session: AsyncSession) -> None:
     account_id, shortlist = await seed(session, 1)
 
