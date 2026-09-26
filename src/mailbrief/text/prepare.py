@@ -28,9 +28,12 @@ _ENDIF = re.compile(r"<!\[endif\]-->", re.IGNORECASE)
 _OFFICE_TAG = re.compile(r"</?[vwo]:[a-z]+\b[^<>]*>", re.IGNORECASE)
 _BREAK_TAG = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _WRAPPED_LINK = re.compile(
-    r"\(\s*(?:https?|mailto|tel):[^\s()]*\s*\)|<(?:https?|mailto|tel):[^\s<>]*>", re.IGNORECASE
+    r"\(\s*(?:https?|mailto|tel):[^\s()]*\s*\)"
+    r"|\[\s*(?:https?|mailto|tel):[^\s\[\]]*\s*\]"
+    r"|<(?:https?|mailto|tel):[^\s<>]*>",
+    re.IGNORECASE,
 )
-_BARE_LINK = re.compile(r"\b(?:https?://|mailto:|tel:)\S+", re.IGNORECASE)
+_BARE_LINK = re.compile(r"\b(?:https?://|mailto:|tel:)[^\s<>()\[\]]+", re.IGNORECASE)
 _LINK_ONLY = re.compile(r"^(?:\[link\][\s|,.;:()-]*)+$")
 _SPACES = re.compile(r"[^\S\n]+")
 

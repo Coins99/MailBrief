@@ -153,3 +153,9 @@ def test_truncation_prefers_line_then_word_boundaries() -> None:
     assert truncate_at_boundary("aaaaaaaaa\nbbbbbbbbbb", 12) == ("aaaaaaaaa", True)
     assert truncate_at_boundary("aaaaaaaaa bbbbbbbbbb", 12) == ("aaaaaaaaa", True)
     assert truncate_at_boundary("a" * 30, 12) == ("a" * 12, True)
+
+
+def test_bracketed_links_are_removed_without_leftover_brackets() -> None:
+    raw = "GET STARTED\n[https://x.example.test/a]\nSee [ https://x.example.test/b ] now\n"
+    raw += "Visit https://x.example.test/c], then (https://x.example.test/d)."
+    assert normalize_text(raw) == "GET STARTED\nSee now\nVisit [link]], then ."
