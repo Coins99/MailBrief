@@ -20,7 +20,7 @@ text.
 | 3 | Newsletter or marketing email | Pass. Four real newsletters, for example 5,585 → 1,492 and 4,124 → 1,536 characters. Readable text; tracking links, invisible padding and HTML leftovers removed. |
 | 4 | Non-English email | Pass. Chinese text displayed correctly, in real mail and in a synthetic re-check. |
 | 5 | Attachments | Pass. Body text only (82 → 80 characters). Attachment-only emails came back empty, with attachments counted and never read. |
-| 6 | Long email | Deferred. The bodies result for a long email at the current default limit of 4,000 characters (set with the move to Groq) was not supplied for this record. The 25 September test email (7,348 characters) was under the limit then in force (8,000), so it did not exercise truncation. The limit is configurable. |
+| 6 | Long email | Pass. Two real emails, 5,272 → 3,844 and 6,247 → 3,845 characters, cut at a line or word break at the default limit of 4,000 (26 September). The 25 September test email (7,348 characters) was under the limit then in force (8,000), so it did not exercise truncation. The limit is configurable. |
 | 7 | Image-only email | Pass. Came back empty, with no error. |
 
 Across all runs, sync completed, nothing crashed, and no email text was saved or logged.
