@@ -689,12 +689,33 @@ def test_validate_candidate_shortens_a_long_summary_and_action() -> None:
     assert unchanged.summary == exact
 
 
-def test_validate_candidate_keeps_evidence_strict_about_length() -> None:
-    long_body = "Please approve the budget. " * 50
+def test_validate_candidate_never_stores_a_whole_short_body() -> None:
+    request = make_request()
+
+    analysis = validate_candidate(good_candidate(request, evidence=BODY), request)
+
+    assert len(analysis.evidence) < len(BODY)
+    assert len(analysis.evidence) <= int(len(BODY) * 0.8)
+    assert analysis.evidence.endswith("…")
+    assert BODY.startswith(analysis.evidence.removesuffix("…"))
+
+
+def test_validate_candidate_stores_long_evidence_at_most_300_characters() -> None:
+    long_body = "Please approve the budget for the new office. " * 40
     request = make_request(body_text=long_body)
 
+    analysis = validate_candidate(good_candidate(request, evidence=long_body[:900]), request)
+
+    assert len(analysis.evidence) <= 300
+    assert analysis.evidence.endswith("…")
+    assert long_body.startswith(analysis.evidence.removesuffix("…"))
+
+
+def test_validate_candidate_rejects_evidence_from_a_body_too_short_to_quote() -> None:
+    request = make_request(body_text="Ok")
+
     with pytest.raises(ValueError):
-        validate_candidate(good_candidate(request, evidence=long_body[:1_001]), request)
+        validate_candidate(good_candidate(request, evidence="Ok"), request)
 
 
 def test_validate_candidate_resolves_the_deadline() -> None:

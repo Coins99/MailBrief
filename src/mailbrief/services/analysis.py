@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mailbrief.domain.analysis import (
     ACTION_TEXT_MAX_CHARS,
     ANALYSIS_SCHEMA_VERSION,
+    EVIDENCE_BODY_SHARE,
+    EVIDENCE_STORE_CHARS,
     MAX_ANALYSIS_BATCH,
     SUMMARY_MAX_CHARS,
     AIUsage,
@@ -94,15 +96,19 @@ def _fit(text: str, limit: int) -> str:
 def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -> MessageAnalysis:
     """Check an untrusted candidate against its request and build the validated analysis.
 
-    An over-long summary or action is shortened; the evidence must still quote the email
-    within its limit. Raises ValueError (pydantic's ValidationError is one); messages never
-    echo email text.
+    An over-long summary or action is shortened. The evidence must quote the email, and is
+    stored at most 300 characters long and never as the whole body: it is cut to under 80%
+    of the body. Raises ValueError (pydantic's ValidationError is one); messages never echo
+    email text.
     """
     if candidate.message_key != request.message_key:
         raise ValueError("the candidate key does not match its request")
     evidence = _trim_evidence(candidate.evidence)
     if not appears_in(evidence, request.subject, request.body_text):
         raise ValueError("evidence must quote the email")
+    evidence_cap = min(EVIDENCE_STORE_CHARS, int(len(request.body_text) * EVIDENCE_BODY_SHARE))
+    if evidence_cap < 2:
+        raise ValueError("the body is too short to store any evidence from it")
     deadline = resolve_deadline(candidate, request)
     action_text = (candidate.action_text or "").strip()
     return MessageAnalysis(
@@ -117,7 +123,7 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
         deadline_at_utc=deadline.at_utc,
         deadline_timezone=deadline.timezone,
         confidence=candidate.confidence,
-        evidence=evidence,
+        evidence=_fit(evidence, evidence_cap),
     )
 
 

@@ -503,3 +503,38 @@ async def test_body_text_outside_the_evidence_never_reaches_disk_or_logs(
     assert b"quarterly budget" in stored  # The evidence excerpt is stored...
     assert MARKER.encode() not in stored  # ...but nothing else from the body.
     assert MARKER not in caplog.text
+
+
+async def test_a_body_returned_whole_as_evidence_is_never_stored_whole(tmp_path: Path) -> None:
+    path = tmp_path / "whole.sqlite3"
+    database = Database.from_path(path)
+    await database.create_schema_for_tests()
+    messages = inbox(1)
+    body = (
+        "Hi team, please approve the revised quarterly budget before Friday so finance can "
+        "close the books. The new numbers cover travel, the office move and two contractor "
+        "renewals. Reply here if anything looks wrong and I will update the sheet today."
+    )
+    assert 240 <= len(body) <= 260
+    try:
+        async with database.session() as session:
+            result = await build(
+                session,
+                FakeAIProvider(
+                    [lambda requests: answer_all(evidence=requests[0].body_text)(requests)]
+                ),
+                RecordingGate(answer=True),
+                messages=messages,
+                texts={messages[0].provider_message_id: body},
+            ).generate(tz_key=ZONE)
+    finally:
+        await database.dispose()
+
+    assert result.status is BriefStatus.SAVED
+    assert result.digest is not None
+    (item,) = result.digest.items
+    assert item.evidence is not None
+    assert item.evidence.endswith("…")
+    stored = database_bytes(tmp_path, "whole.sqlite3")
+    assert body[:100].encode() in stored  # A cut excerpt is stored...
+    assert body.encode() not in stored  # ...but never the whole body.

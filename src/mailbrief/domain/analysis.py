@@ -11,13 +11,15 @@ from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS
 from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.messages import EmailContact
 
-ANALYSIS_SCHEMA_VERSION: Final = "2"
+ANALYSIS_SCHEMA_VERSION: Final = "3"  # Bump when validation changes what may be cached.
 
 # Limits shared by the analysis contract, the brief and storage.
 SUMMARY_MAX_CHARS: Final = 240
 ACTION_TEXT_MAX_CHARS: Final = 1_000
 DEADLINE_TEXT_MAX_CHARS: Final = 500
-EVIDENCE_MAX_CHARS: Final = 1_000
+EVIDENCE_MAX_CHARS: Final = 1_000  # Older rows may hold up to this much.
+EVIDENCE_STORE_CHARS: Final = 300  # New evidence is stored at most this long.
+EVIDENCE_BODY_SHARE: Final = 0.8  # ...and never longer than this share of the body.
 MAX_ANALYSIS_BATCH: Final = 10  # Messages per provider call.
 
 
