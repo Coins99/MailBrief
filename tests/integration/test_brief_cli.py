@@ -362,14 +362,16 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
     assert run_brief(tmp_path / "brief.sqlite3") == 4
 
     output = capsys.readouterr().out
+    lines = output.splitlines()
     assert route.call_count == 1
     assert "Brief: analysis_failed; items: 0" in output
     assert "AI: Groq / test-model; requests: 1; tokens in/out: ? / ?" in output
     assert "nothing sent" not in output
-    assert (
-        "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set "
-        "Your last saved brief for today is unchanged."
-    ) in output
+    outcome = lines.index("Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set")
+    assert lines[outcome + 1 :] == [
+        "Groq detail: HTTP 401, code invalid_api_key",
+        "Your last saved brief for today is unchanged.",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -650,7 +652,11 @@ def test_without_a_usable_key_nothing_is_asked_or_sent(
     assert "MailBrief will send" not in output
     assert "Brief: analysis_failed; items: 0" in output
     assert "AI: nothing sent this run" in output
-    assert "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set" in output
+    lines = output.splitlines()
+    outcome = lines.index(
+        "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set"
+    )
+    assert lines[outcome + 1] == "Your last saved brief for today is unchanged."
 
 
 def test_consent_status_on_an_empty_database(

@@ -4,11 +4,14 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import pytest
 
 from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
+from mailbrief.domain.briefs import BriefRunResult, BriefStatus
+from mailbrief.domain.digests import SyncResult, SyncStatus
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
 from mailbrief.providers.gmail.auth import GmailAuth
@@ -151,3 +154,27 @@ def test_missing_path_is_actionable(
     monkeypatch.delenv("MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH", raising=False)
     assert gmail.main(["fetch", "--silent-only"]) == 3
     assert "Set MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH" in capsys.readouterr().out
+
+
+def test_a_key_missing_failure_keeps_the_saved_brief_note_on_its_own_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sync = SyncResult(
+        account_id="owner@example.com",
+        range_start_utc=datetime(2026, 9, 4, 4, 0, tzinfo=UTC),
+        range_end_utc=datetime(2026, 9, 5, 4, 0, tzinfo=UTC),
+        status=SyncStatus.COMPLETE,
+        page_count=1,
+        message_count=1,
+    )
+    result = BriefRunResult(
+        status=BriefStatus.ANALYSIS_FAILED, sync=sync, error_code="AI_KEY_MISSING"
+    )
+
+    gmail._print_result(result, model="test-model")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2:] == [
+        "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set",
+        "Your last saved brief for today is unchanged.",
+    ]

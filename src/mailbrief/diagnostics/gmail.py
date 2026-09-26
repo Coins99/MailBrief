@@ -348,10 +348,9 @@ def _outcome(result: BriefRunResult) -> str:
     if result.status is BriefStatus.CONSENT_DECLINED:
         return "Nothing was sent. No brief saved."
     if result.status is BriefStatus.ANALYSIS_FAILED:
-        message = _AI_ERROR_MESSAGES.get(
+        return _AI_ERROR_MESSAGES.get(
             result.error_code or "", _AI_ERROR_MESSAGES["ANALYSIS_FAILED"]
         )
-        return f"{message} Your last saved brief for today is unchanged."
     if result.status is BriefStatus.SYNC_FAILED:
         return f"Sync failed ({result.error_code or 'unknown'}). Nothing was sent."
     return "Cancelled. No brief saved."
@@ -393,6 +392,9 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
         print(partial_reason)
     if result.provider_detail:
         print(f"{provider_display_name(PROVIDER_NAME)} detail: {result.provider_detail}")
+    if result.status is BriefStatus.ANALYSIS_FAILED:
+        # Its own line: some messages end in a command, which must not run into this note.
+        print("Your last saved brief for today is unchanged.")
     if _sync_incomplete(result):
         print("Inbox sync was incomplete, so this brief may be missing messages.")
 
