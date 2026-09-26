@@ -33,3 +33,11 @@ untrusted, deadlines are easy to get wrong, and email must go only where the own
   as exact.
 - A new model, prompt or schema re-analyzes each message once; unchanged input costs nothing.
 - Revoking consent, or changing the disclosure version, makes the next run ask again.
+
+## Amendment (2026-09-26)
+
+- An unusable deadline date or time is downgraded (to unresolved, or to a date) instead of
+  rejecting the analysis. An over-long summary or action is cut at a word and ends in "…",
+  while evidence stays strict. OpenAI failures are classified as rejected requests (retried
+  one message at a time, then left out), unavailability (server errors or unreadable
+  replies) and network errors.
