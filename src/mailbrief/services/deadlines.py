@@ -12,7 +12,9 @@ MAX_DEADLINE_TEXT_CHARS = 500
 _PAST_DAYS = 31
 _FUTURE_DAYS = 366
 _DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-_TIME_PATTERN = re.compile(r"([0-9]{2}):([0-9]{2})(?::([0-9]{2}))?")
+_TIME_PATTERN = re.compile(r"([0-9]{1,2}):([0-9]{2})(?::([0-9]{2}))?")
+_ZONE_KEY_PATTERN = re.compile(r"[A-Za-z]+(/[A-Za-z0-9_+-]+)+")
+_UTC_NAMES = {"utc": "UTC", "etc/utc": "Etc/UTC"}
 
 
 class InvalidDeadlineError(ValueError):
@@ -44,6 +46,20 @@ def _load_zone(name: str) -> ZoneInfo | None:
         return ZoneInfo(name)
     except (KeyError, ValueError, OSError):
         return None
+
+
+def _usable_stated_zone(value: str) -> str | None:
+    """A stated zone naming one IANA region, else None.
+
+    Abbreviations ("EST", "PT"), offsets ("UTC+2") and Etc/ zones are never resolved:
+    people write "EST" year-round to mean Eastern Time, which tzdata models as fixed UTC-5.
+    """
+    utc = _UTC_NAMES.get(value.casefold())
+    if utc is not None:
+        return utc
+    if _ZONE_KEY_PATTERN.fullmatch(value) is None or value.casefold().startswith("etc/"):
+        return None
+    return value if _load_zone(value) is not None else None
 
 
 def _parse_date(value: str) -> dt.date:
@@ -100,11 +116,16 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
         return ResolvedDeadline(text, DeadlinePrecision.DATE, due_date, None, request.timezone_name)
 
     due_time = _parse_time(raw_time)
-    zone_name = request.timezone_name if stated_zone is None else stated_zone
-    zone = _load_zone(zone_name)
-    if zone is None:
-        # An abbreviation such as "PT" names no single offset: keep the day, never guess.
-        return ResolvedDeadline(text, DeadlinePrecision.DATE, due_date, None, request.timezone_name)
+    zone_name = request.timezone_name
+    if stated_zone is not None:
+        usable = _usable_stated_zone(stated_zone)
+        if usable is None:
+            # The email names a zone we will not guess an offset for: keep only the day.
+            return ResolvedDeadline(
+                text, DeadlinePrecision.DATE, due_date, None, request.timezone_name
+            )
+        zone_name = usable
+    zone = ZoneInfo(zone_name)
     at_utc = dt.datetime.combine(due_date, due_time, tzinfo=zone).astimezone(dt.UTC)
     # Re-derive the day so a time inside a DST gap stays consistent with its instant.
     local_date = at_utc.astimezone(zone).date()

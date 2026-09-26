@@ -140,10 +140,19 @@ def test_d5_a_date_without_a_time_is_a_day_in_the_user_zone() -> None:
     )
 
 
-@pytest.mark.parametrize("raw", ["24:00", "23:60", "12:00:60", "7pm", "7:00", "17", "17:00 PM"])
-def test_d6_times_must_be_hh_mm_within_the_day(raw: str) -> None:
+@pytest.mark.parametrize(
+    "raw", ["24:00", "23:60", "12:00:60", "7pm", "123:00", ":30", "17", "17:00 PM"]
+)
+def test_d6_times_must_be_h_mm_within_the_day(raw: str) -> None:
     with pytest.raises(InvalidDeadlineError):
         resolve_deadline(friday(deadline_time=raw), request())
+
+
+def test_d6_a_one_digit_hour_parses() -> None:
+    resolved = resolve_deadline(friday(deadline_time="9:00"), request())
+
+    assert resolved.precision is DeadlinePrecision.DATETIME
+    assert resolved.at_utc == datetime(2026, 9, 4, 13, 0, tzinfo=UTC)
 
 
 def test_d6_d7_an_exact_time_resolves_in_the_user_zone_without_seconds() -> None:
@@ -174,8 +183,43 @@ def test_d6_a_stated_iana_zone_is_used() -> None:
     assert resolved.timezone == "Europe/London"
 
 
-@pytest.mark.parametrize("zone", ["PT", "Pacific Time"])
-def test_d6_an_unloadable_stated_zone_keeps_only_the_day(zone: str) -> None:
+@pytest.mark.parametrize(
+    ("zone", "canonical", "at_utc"),
+    [
+        ("UTC", "UTC", datetime(2026, 9, 4, 17, 0, tzinfo=UTC)),
+        ("utc", "UTC", datetime(2026, 9, 4, 17, 0, tzinfo=UTC)),
+        ("Etc/UTC", "Etc/UTC", datetime(2026, 9, 4, 17, 0, tzinfo=UTC)),
+        ("America/New_York", "America/New_York", datetime(2026, 9, 4, 21, 0, tzinfo=UTC)),
+        ("US/Eastern", "US/Eastern", datetime(2026, 9, 4, 21, 0, tzinfo=UTC)),
+    ],
+)
+def test_d6_utc_and_iana_region_zones_resolve_exactly(
+    zone: str, canonical: str, at_utc: datetime
+) -> None:
+    resolved = resolve_deadline(friday(deadline_time="17:00", stated_timezone=zone), request())
+
+    assert resolved.precision is DeadlinePrecision.DATETIME
+    assert resolved.at_utc == at_utc
+    assert resolved.timezone == canonical
+
+
+@pytest.mark.parametrize(
+    "zone",
+    [
+        "EST",
+        "MST",
+        "CET",
+        "GMT",
+        "PT",
+        "UTC+2",
+        "Etc/GMT+5",
+        "etc/gmt-3",
+        "Eastern Time",
+        "Pacific Time",
+        "Mars/Olympus_Mons",
+    ],
+)
+def test_d6_abbreviated_offset_and_unknown_zones_keep_only_the_day(zone: str) -> None:
     resolved = resolve_deadline(
         candidate(
             deadline_text="5 PM PT",
