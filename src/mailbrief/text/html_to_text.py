@@ -67,6 +67,9 @@ _HIDDEN_STYLE = re.compile(
     r"display:none|visibility:hidden|mso-hide:all"
     r"|opacity:0(?![.\d])|font-size:0(?![.\d])|max-height:0(?![.\d])"
 )
+# Quote markers stop growing past this depth, so deeply nested quotes can't multiply output.
+MAX_QUOTE_DEPTH = 5
+DEFAULT_MAX_CHARS = 1_000_000
 _INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"))
 _DECIMAL_REF = re.compile(r"&#(\d+)(;?)")
 
@@ -98,17 +101,38 @@ def _is_hidden(attrs: list[tuple[str, str | None]]) -> bool:
 class _TextBuilder(HTMLParser):
     """Collect visible text; quoted blocks become '> ' lines like plain-text replies."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_chars: int) -> None:
         super().__init__(convert_charrefs=True)
         self._open: list[tuple[str, bool]] = []
         self._open_counts: dict[str, int] = {}
         self._lines: list[tuple[int, list[str]]] = [(0, [])]
         self._quote_depth = 0
+        self._max_chars = max_chars
+        self._size = 0
+        self.truncated = False
+
+    def _append(self, fragment: str) -> None:
+        """Add text to the current line, stopping for good once the size budget is spent."""
+        room = self._max_chars - self._size
+        if len(fragment) > room:
+            self.truncated = self.truncated or bool(fragment[max(room, 0) :].strip())
+            fragment = fragment[: max(room, 0)]
+        if not fragment:
+            return
+        depth, fragments = self._lines[-1]
+        if not fragments and depth != self._quote_depth:
+            self._lines[-1] = (self._quote_depth, fragments)
+        fragments.append(fragment)
+        self._size += len(fragment)
 
     def _inside_hidden(self) -> bool:
         return bool(self._open) and self._open[-1][1]
 
     def _new_line(self) -> None:
+        # Two empty lines already render as a paragraph break; don't store more of them.
+        if len(self._lines) >= 2 and not self._lines[-1][1] and not self._lines[-2][1]:
+            self._lines[-1] = (self._quote_depth, self._lines[-1][1])
+            return
         self._lines.append((self._quote_depth, []))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -126,9 +150,9 @@ class _TextBuilder(HTMLParser):
         if tag in _BLOCK:
             self._new_line()
         if tag == "li":
-            self._lines[-1][1].append("- ")
+            self._append("- ")
         elif tag in {"td", "th"}:
-            self._lines[-1][1].append(" ")
+            self._append(" ")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
@@ -153,28 +177,30 @@ class _TextBuilder(HTMLParser):
             return
 
     def handle_data(self, data: str) -> None:
-        if self._inside_hidden():
-            return
-        depth, fragments = self._lines[-1]
-        if not fragments and depth != self._quote_depth:
-            self._lines[-1] = (self._quote_depth, fragments)
-        fragments.append(data)
+        if not self._inside_hidden():
+            self._append(data)
 
     def text(self) -> str:
         rendered: list[str] = []
         for depth, fragments in self._lines:
             line = " ".join("".join(fragments).translate(_INVISIBLE).split())
-            rendered.append("> " * depth + line if line else "")
+            rendered.append("> " * min(depth, MAX_QUOTE_DEPTH) + line if line else "")
         return re.sub(r"\n{3,}", "\n\n", "\n".join(rendered)).strip()
 
 
-def html_to_text(markup: str) -> str:
-    """Readable text from untrusted HTML, without scripts, styles, hidden text, images or URLs.
+def convert_html(markup: str, *, max_chars: int = DEFAULT_MAX_CHARS) -> tuple[str, bool]:
+    """Readable text from untrusted HTML, and whether conversion stopped at ``max_chars``.
 
-    Nothing is fetched. Text inside ``<blockquote>`` is prefixed with ``> `` so quoted
+    Nothing is fetched, and scripts, styles, hidden text, images and URLs are dropped. Text
+    inside ``<blockquote>`` is prefixed with ``> `` (at most MAX_QUOTE_DEPTH times) so quoted
     history can be recognized the same way as in plain-text replies.
     """
-    builder = _TextBuilder()
+    builder = _TextBuilder(max_chars)
     builder.feed(bound_numeric_refs(markup))
     builder.close()
-    return builder.text()
+    return builder.text(), builder.truncated
+
+
+def html_to_text(markup: str, *, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+    """Readable text from untrusted HTML; see ``convert_html``."""
+    return convert_html(markup, max_chars=max_chars)[0]
