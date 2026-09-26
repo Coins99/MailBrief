@@ -165,7 +165,7 @@ end of that day), then the rest by rank.
 
 A summary longer than 240 characters, or an action longer than 1,000, is cut at a word
 and ends in "…". The evidence quote must appear in the email, and is never stored as the
-whole body: it is kept to at most 300 characters and under 80% of the body, cut at a word
+whole body: it is kept to at most 300 characters and strictly under 80% of the body, cut at a word
 and ending in "…" when longer.
 
 If nothing could be analyzed, no brief is written and today's last saved brief stays.

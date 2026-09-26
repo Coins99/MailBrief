@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import secrets
 from collections.abc import Callable, Iterable, Sequence
@@ -109,7 +110,10 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
     evidence = _trim_evidence(candidate.evidence)
     if not appears_in(evidence, request.subject, request.body_text):
         raise ValueError("evidence must quote the email")
-    evidence_cap = min(EVIDENCE_STORE_CHARS, int(len(request.body_text) * EVIDENCE_BODY_SHARE))
+    # Strictly under the share: a 100-character body stores at most 79 characters.
+    evidence_cap = min(
+        EVIDENCE_STORE_CHARS, math.ceil(len(request.body_text) * EVIDENCE_BODY_SHARE) - 1
+    )
     if evidence_cap < 2:
         raise ValueError("the body is too short to store any evidence from it")
     deadline = resolve_deadline(candidate, request)

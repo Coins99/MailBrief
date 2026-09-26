@@ -19,7 +19,7 @@ ACTION_TEXT_MAX_CHARS: Final = 1_000
 DEADLINE_TEXT_MAX_CHARS: Final = 500
 EVIDENCE_MAX_CHARS: Final = 1_000  # Older rows may hold up to this much.
 EVIDENCE_STORE_CHARS: Final = 300  # New evidence is stored at most this long.
-EVIDENCE_BODY_SHARE: Final = 0.8  # ...and never longer than this share of the body.
+EVIDENCE_BODY_SHARE: Final = 0.8  # ...and always strictly shorter than this share of the body.
 MAX_ANALYSIS_BATCH: Final = 10  # Messages per provider call.
 
 

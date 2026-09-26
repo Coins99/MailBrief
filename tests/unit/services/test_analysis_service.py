@@ -777,6 +777,22 @@ def test_validate_candidate_stores_long_evidence_at_most_300_characters() -> Non
     assert long_body.startswith(analysis.evidence.removesuffix("…"))
 
 
+@pytest.mark.parametrize(
+    ("body_chars", "stored_chars"), [(100, 79), (101, 80)], ids=["exactly-80%", "under-80%"]
+)
+def test_validate_candidate_keeps_stored_evidence_strictly_under_80_percent(
+    body_chars: int, stored_chars: int
+) -> None:
+    body = "a" * body_chars
+    request = make_request(body_text=body)
+
+    analysis = validate_candidate(good_candidate(request, evidence="a" * 80), request)
+
+    assert len(analysis.evidence) == stored_chars
+    assert len(analysis.evidence) * 5 < body_chars * 4  # Strictly under 80%.
+    assert analysis.evidence.endswith("…") is (stored_chars < 80)
+
+
 def test_validate_candidate_rejects_evidence_from_a_body_too_short_to_quote() -> None:
     request = make_request(body_text="Ok")
 
