@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from mailbrief.domain.bodies import BodySource, MessageBody
 from mailbrief.domain.digests import (
     SyncProgress,
     SyncStage,
@@ -91,9 +92,13 @@ class FakeEmailProvider(EmailProvider):
                 continuation=f"page-{i + 1}" if i < len(self.pages) else None,
             )
 
-    async def fetch_plain_text_body(self, provider_message_id: str) -> str:
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
         self.body_fetch_called = True
-        return "Message body content"
+        return MessageBody(
+            provider_message_id=provider_message_id,
+            text="Message body content",
+            source=BodySource.PLAIN,
+        )
 
     async def disconnect(self) -> None:
         pass

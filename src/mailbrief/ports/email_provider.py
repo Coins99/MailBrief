@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from mailbrief.domain.bodies import MessageBody
 from mailbrief.domain.messages import AccountIdentity, MessagePage, ProviderKind
 
 
@@ -38,8 +39,11 @@ class EmailProvider(Protocol):
         """
         ...
 
-    async def fetch_plain_text_body(self, provider_message_id: str) -> str:
-        """Fetch a plain-text body for one shortlisted provider message."""
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        """Fetch readable text for one shortlisted message without downloading attachments.
+
+        Raises ``MessageUnavailableError`` when the message no longer exists.
+        """
         ...
 
     async def disconnect(self) -> None:

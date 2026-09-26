@@ -1,4 +1,4 @@
-"""Provider-neutral Gmail Inbox pagination and bounded metadata retrieval."""
+"""Gmail Inbox pagination, bounded metadata retrieval and shortlisted body reading."""
 
 import asyncio
 import math
@@ -6,9 +6,15 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Protocol
 
+from mailbrief.domain.bodies import MessageBody
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.messages import AccountIdentity, MessagePage, NormalizedMessage, ProviderKind
-from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
+from mailbrief.ports.errors import (
+    AuthenticationRequiredError,
+    MessageUnavailableError,
+    ProviderResponseError,
+)
+from mailbrief.providers.gmail.body import extract_body
 from mailbrief.providers.gmail.client import GmailClient, message_id
 from mailbrief.providers.gmail.mapper import map_metadata
 
@@ -44,8 +50,18 @@ class GmailProvider:
         self._account = None
         await self._auth.disconnect()
 
-    async def fetch_plain_text_body(self, provider_message_id: str) -> str:
-        raise ProviderResponseError("Gmail body retrieval is not implemented until M3.")
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        """Readable text of one shortlisted message; attachments are never downloaded."""
+        identifier = message_id(provider_message_id)
+        async with self._slots:
+            raw = await self._client.message(identifier)
+            if raw is None:
+                raise MessageUnavailableError("The Gmail message is no longer available.")
+
+            async def fetch_part(attachment: str) -> dict[str, object] | None:
+                return await self._client.part_data(identifier, attachment)
+
+            return await extract_body(raw, identifier, fetch_part)
 
     async def iter_message_pages(
         self,
