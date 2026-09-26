@@ -101,6 +101,7 @@ class _TextBuilder(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._open: list[tuple[str, bool]] = []
+        self._open_counts: dict[str, int] = {}
         self._lines: list[tuple[int, list[str]]] = [(0, [])]
         self._quote_depth = 0
 
@@ -117,6 +118,7 @@ class _TextBuilder(HTMLParser):
                 self._new_line()
             return
         self._open.append((tag, hidden))
+        self._open_counts[tag] = self._open_counts.get(tag, 0) + 1
         if hidden:
             return
         if tag == "blockquote":
@@ -134,7 +136,8 @@ class _TextBuilder(HTMLParser):
             self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _VOID:
+        # Unmatched end tags return at once, so crafted markup can't force a stack scan each.
+        if tag in _VOID or not self._open_counts.get(tag):
             return
         for index in range(len(self._open) - 1, -1, -1):
             if self._open[index][0] != tag:
@@ -142,6 +145,7 @@ class _TextBuilder(HTMLParser):
             closed = self._open[index:]
             del self._open[index:]
             for name, hidden in closed:
+                self._open_counts[name] -= 1
                 if name == "blockquote" and not hidden:
                     self._quote_depth -= 1
             if tag in _BLOCK and tag not in _LINE_ITEMS and not closed[0][1]:
