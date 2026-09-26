@@ -7,6 +7,8 @@ import pytest
 
 from tests.conftest import NETWORK_BLOCKED
 
+UNIX_FAMILY = getattr(socket, "AF_UNIX", None)  # Absent on Windows, where typeshed omits it.
+
 
 def test_a_public_hostname_cannot_be_resolved() -> None:
     with pytest.raises(RuntimeError, match=NETWORK_BLOCKED):
@@ -37,10 +39,11 @@ def test_a_loopback_connection_still_works() -> None:
                 assert accepted.recv(4) == b"ping"
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="needs Unix domain sockets")
+@pytest.mark.skipif(UNIX_FAMILY is None, reason="needs Unix domain sockets")
 def test_other_address_families_pass_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    assert UNIX_FAMILY is not None
     monkeypatch.chdir(tmp_path)  # A short relative path stays within the AF_UNIX length limit.
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    with socket.socket(UNIX_FAMILY, socket.SOCK_STREAM) as sock:
         assert sock.connect_ex("absent.sock") != 0
