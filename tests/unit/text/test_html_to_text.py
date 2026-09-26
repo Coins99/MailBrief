@@ -80,7 +80,7 @@ def test_malformed_markup_is_tolerated() -> None:
 
 def test_oversized_numeric_references_do_not_fail() -> None:
     markup = "<p>A&#" + "9" * 5_000 + ";B &#" + "0" * 5_000 + "65;</p>"
-    assert html_to_text(markup) == "A�B A"
+    assert html_to_text(markup) == "A\ufffdB A"
 
 
 def test_unmatched_end_tags_stay_fast() -> None:

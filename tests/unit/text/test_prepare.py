@@ -42,7 +42,7 @@ def test_link_addresses_are_removed() -> None:
 
 
 def test_oversized_numeric_reference_does_not_fail() -> None:
-    assert normalize_text("A&#" + "9" * 5_000 + ";B") == "A�B"
+    assert normalize_text("A&#" + "9" * 5_000 + ";B") == "A\ufffdB"
 
 
 @pytest.mark.parametrize("unclosed", ["<!--", "<https:", "(https:", "<v:shape"])
