@@ -101,35 +101,42 @@ def test_d3_blank_date_and_time_leave_an_unresolved_phrase() -> None:
     assert resolved == ResolvedDeadline("ASAP", DeadlinePrecision.UNRESOLVED, None, None, None)
 
 
-def test_d3_a_time_without_a_date_is_invalid() -> None:
-    with pytest.raises(InvalidDeadlineError):
-        resolve_deadline(candidate(deadline_text="ASAP", deadline_time="17:00"), request())
+def test_d3_a_time_without_a_date_leaves_an_unresolved_phrase() -> None:
+    resolved = resolve_deadline(candidate(deadline_text="ASAP", deadline_time="17:00"), request())
+
+    assert resolved == ResolvedDeadline("ASAP", DeadlinePrecision.UNRESOLVED, None, None, None)
 
 
 @pytest.mark.parametrize(
     "raw", ["2026/09/04", "Sept 4", "2026-9-4", "20260904", "2026-02-30", "２026-09-04"]
 )
-def test_d4_dates_must_be_real_iso_days(raw: str) -> None:
-    with pytest.raises(InvalidDeadlineError):
-        resolve_deadline(candidate(deadline_text="Friday 5 PM", deadline_date=raw), request())
+def test_d4_an_unusable_date_leaves_an_unresolved_phrase(raw: str) -> None:
+    resolved = resolve_deadline(friday(deadline_date=raw, deadline_time="17:00"), request())
+
+    assert resolved == ResolvedDeadline(
+        "Friday 5 PM", DeadlinePrecision.UNRESOLVED, None, None, None
+    )
 
 
 @pytest.mark.parametrize(
     ("raw", "valid"),
     [("2026-08-01", False), ("2026-08-02", True), ("2027-09-03", True), ("2027-09-04", False)],
 )
-def test_d4_dates_must_fall_in_the_window_around_the_local_received_day(
+def test_d4_dates_outside_the_window_around_the_local_received_day_are_unresolved(
     raw: str, valid: bool
 ) -> None:
     late_evening_in_toronto = datetime(2026, 9, 3, 2, 0, tzinfo=UTC)  # 2 September, 22:00
     deadline = candidate(deadline_text="Friday 5 PM", deadline_date=raw)
 
+    resolved = resolve_deadline(deadline, request(late_evening_in_toronto))
+
     if valid:
-        resolved = resolve_deadline(deadline, request(late_evening_in_toronto))
-        assert resolved.date == date.fromisoformat(raw)
+        assert (resolved.precision, resolved.date) == (
+            DeadlinePrecision.DATE,
+            date.fromisoformat(raw),
+        )
     else:
-        with pytest.raises(InvalidDeadlineError):
-            resolve_deadline(deadline, request(late_evening_in_toronto))
+        assert (resolved.precision, resolved.date) == (DeadlinePrecision.UNRESOLVED, None)
 
 
 def test_d5_a_date_without_a_time_is_a_day_in_the_user_zone() -> None:
@@ -143,9 +150,12 @@ def test_d5_a_date_without_a_time_is_a_day_in_the_user_zone() -> None:
 @pytest.mark.parametrize(
     "raw", ["24:00", "23:60", "12:00:60", "7pm", "123:00", ":30", "17", "17:00 PM"]
 )
-def test_d6_times_must_be_h_mm_within_the_day(raw: str) -> None:
-    with pytest.raises(InvalidDeadlineError):
-        resolve_deadline(friday(deadline_time=raw), request())
+def test_d6_an_unusable_time_keeps_only_the_date(raw: str) -> None:
+    resolved = resolve_deadline(friday(deadline_time=raw), request())
+
+    assert resolved == ResolvedDeadline(
+        "Friday 5 PM", DeadlinePrecision.DATE, date(2026, 9, 4), None, ZONE
+    )
 
 
 def test_d6_a_one_digit_hour_parses() -> None:
@@ -263,7 +273,7 @@ def test_d7_an_ambiguous_fall_back_time_uses_its_first_occurrence() -> None:
 
 def test_invalid_deadline_errors_are_static_value_errors() -> None:
     with pytest.raises(ValueError) as caught:
-        resolve_deadline(friday(deadline_date="not a date"), request())
+        resolve_deadline(candidate(deadline_text="not in the email"), request())
 
     assert isinstance(caught.value, InvalidDeadlineError)
-    assert "not a date" not in str(caught.value)
+    assert "not in the email" not in str(caught.value)

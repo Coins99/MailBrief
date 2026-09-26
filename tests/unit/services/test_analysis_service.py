@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import update
@@ -33,8 +34,10 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
@@ -49,7 +52,14 @@ from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
 from mailbrief.storage.tables import AnalysisTable
 from tests.factories import make_message
-from tests.unit.providers.groq.groq_fixtures import CHAT_URL, TEST_KEY, MemoryVault
+from tests.unit.providers.groq.groq_fixtures import (
+    CHAT_URL,
+    TEST_KEY,
+    MemoryVault,
+    answer_every_message,
+    error_body,
+    sent_messages,
+)
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all, good_candidate
 
 ZONE = "America/Toronto"
@@ -306,6 +316,8 @@ async def test_a_provider_error_keeps_committed_results_and_fails_the_rest(tmp_p
         (ProviderRateLimitError("slow down"), "AI_RATE_LIMITED"),
         (ProviderTimeoutError("too slow"), "AI_TIMEOUT"),
         (ProviderResponseError("odd reply"), "AI_PROVIDER_ERROR"),
+        (ProviderUnavailableError("down"), "AI_SERVER_ERROR"),
+        (ProviderError("unreachable"), "AI_NETWORK_ERROR"),
     ],
 )
 async def test_provider_errors_stop_the_run_with_a_code(
@@ -328,14 +340,75 @@ async def test_an_unreadable_groq_reply_fails_every_sent_message(
     respx_mock.post(CHAT_URL).respond(
         200, text="<html>maintenance</html>", headers={"content-type": "text/html"}
     )
-    key_store = GroqKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
 
-    async with groq_provider(Settings(groq_model="test-model"), key_store=key_store) as ai:
+    async with groq_provider(Settings(groq_model="test-model"), key_store=groq_key_store()) as ai:
         run = await analyze(session, ai, shortlist, account_id=account_id)
 
-    assert run.error_code == "AI_PROVIDER_ERROR"
+    assert run.error_code == "AI_SERVER_ERROR"
     assert outcomes(run) == [FAILED, FAILED]
     assert run.calls == 1
+
+
+def groq_key_store() -> GroqKeyStore:
+    return GroqKeyStore(MemoryVault({(SERVICE, ENTRY): TEST_KEY}))
+
+
+@pytest.mark.parametrize(
+    ("rejected_single", "expected", "error_code"),
+    [
+        (None, [ANALYZED, ANALYZED, ANALYZED], None),
+        (1, [ANALYZED, FAILED, ANALYZED], "AI_REQUEST_REJECTED"),
+    ],
+    ids=["all-singles-pass", "one-single-rejected"],
+)
+async def test_a_rejected_batch_is_retried_one_message_at_a_time(
+    session: AsyncSession,
+    respx_mock: respx.MockRouter,
+    rejected_single: int | None,
+    expected: list[AnalysisOutcome],
+    error_code: str | None,
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+
+    def reject_batches(request: httpx.Request) -> httpx.Response:
+        sent = sent_messages(request)
+        rejected = len(sent) > 1 or (
+            rejected_single is not None and f"Reference {rejected_single}." in sent[0]["body"]
+        )
+        if rejected:
+            return httpx.Response(400, json=error_body("invalid_prompt"))
+        return answer_every_message(request)
+
+    route = respx_mock.post(CHAT_URL).mock(side_effect=reject_batches)
+
+    async with groq_provider(Settings(groq_model="test-model"), key_store=groq_key_store()) as ai:
+        run = await analyze(session, ai, shortlist, account_id=account_id)
+
+    assert outcomes(run) == expected
+    assert run.error_code == error_code
+    assert run.calls == route.call_count == 4
+
+
+async def test_a_rejected_single_message_fails_alone(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 2)
+    provider = FakeAIProvider([ProviderRequestRejectedError("no"), answer_all()])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [FAILED, ANALYZED]
+    assert run.error_code == "AI_REQUEST_REJECTED"
+    assert provider.calls == run.calls == 2
+
+
+async def test_a_stopping_error_wins_over_an_earlier_rejection(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 3)
+    provider = FakeAIProvider([ProviderRequestRejectedError("no"), ProviderTimeoutError("slow")])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [FAILED, FAILED, FAILED]
+    assert run.error_code == "AI_TIMEOUT"
+    assert provider.calls == 2
 
 
 async def test_unexpected_errors_propagate(session: AsyncSession) -> None:
@@ -560,6 +633,54 @@ def test_validate_candidate_trims_quoted_evidence_and_blank_actions() -> None:
     assert plain.evidence == "Please approve"
 
 
+async def test_reprs_leave_out_email_text(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 1)
+    run = await analyze(
+        session,
+        FakeAIProvider([answer_all(deadline_text="Friday 5 PM", action_text="Approve it")]),
+        shortlist,
+        account_id=account_id,
+    )
+    (item,) = run.messages
+    assert item.request is not None and item.analysis is not None
+    candidate = good_candidate(item.request)
+
+    texts = [repr(item), repr(item.request), repr(item.analysis), repr(candidate)]
+
+    for text in texts:
+        for private in ("quarterly budget", "Budget item 0", "A short summary", "Approve it"):
+            assert private not in text
+
+
+def test_validate_candidate_shortens_a_long_summary_and_action() -> None:
+    request = make_request()
+    exact = "s" * 240
+    candidate = good_candidate(
+        request,
+        summary="word " * 60,
+        action_required=True,
+        action_text="step " * 250,
+    )
+
+    analysis = validate_candidate(candidate, request)
+    unchanged = validate_candidate(good_candidate(request, summary=exact), request)
+
+    assert len(analysis.summary) <= 240
+    assert analysis.summary.endswith("word…")
+    assert analysis.action_text is not None
+    assert len(analysis.action_text) <= 1_000
+    assert analysis.action_text.endswith("step…")
+    assert unchanged.summary == exact
+
+
+def test_validate_candidate_keeps_evidence_strict_about_length() -> None:
+    long_body = "Please approve the budget. " * 50
+    request = make_request(body_text=long_body)
+
+    with pytest.raises(ValueError):
+        validate_candidate(good_candidate(request, evidence=long_body[:1_001]), request)
+
+
 def test_validate_candidate_resolves_the_deadline() -> None:
     request = make_request()
     candidate = good_candidate(
@@ -577,17 +698,33 @@ def test_validate_candidate_resolves_the_deadline() -> None:
     assert analysis.message_key == request.message_key
 
 
+def test_validate_candidate_keeps_the_analysis_when_the_deadline_date_is_unusable() -> None:
+    request = make_request()
+    candidate = good_candidate(
+        request,
+        category="deadline",
+        deadline_text="Friday 5 PM",
+        deadline_date="Sept 4",
+        deadline_time="17:00",
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    assert analysis.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert (analysis.deadline_text, analysis.deadline_date) == ("Friday 5 PM", None)
+    assert analysis.summary == "A short summary."
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
         {"message_key": "ffffffff"},
         {"evidence": "Words that never appeared."},
-        {"summary": "x" * 241},
         {"deadline_text": "next Tuesday"},
         {"category": "deadline"},
         {"action_required": True},
     ],
-    ids=["key", "evidence", "summary", "deadline", "category", "action"],
+    ids=["key", "evidence", "deadline", "category", "action"],
 )
 def test_validate_candidate_rejects_unsupported_output(overrides: dict[str, object]) -> None:
     request = make_request()

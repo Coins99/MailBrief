@@ -188,7 +188,7 @@ Inspect persisted rows and captured logs for synthetic full-body markers.
 
 **Work**
 
-- Implement the AI adapter behind the existing port and accepted ADR 0004. Keep
+- Implement the AI adapter behind the existing port and accepted ADR 0010. Keep
   credentials in the OS store and model selection configurable.
 - Before transmitting content, show cloud-processing consent with included
   fields, selected count and truncation. Allow narrowing selection or cancelling.

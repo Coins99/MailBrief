@@ -9,12 +9,15 @@ import json
 import logging
 import secrets
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.analysis import (
+    ACTION_TEXT_MAX_CHARS,
     ANALYSIS_SCHEMA_VERSION,
+    MAX_ANALYSIS_BATCH,
+    SUMMARY_MAX_CHARS,
     AIUsage,
     AnalysisCandidate,
     AnalysisRequest,
@@ -32,19 +35,23 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
+    ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
     ProviderUsageLimitError,
 )
 from mailbrief.services.deadlines import resolve_deadline
 from mailbrief.storage.repositories import AnalysisRepository, MessageRepository
 from mailbrief.text.matching import appears_in
+from mailbrief.text.prepare import truncate_at_boundary
 
 logger = logging.getLogger(__name__)
 
-MAX_BATCH_SIZE = 10
 _KEY_ATTEMPTS = 64
 _QUOTES = "\"'‘’“”"
 _ELLIPSES = ("...", "…")
+REQUEST_REJECTED = "AI_REQUEST_REJECTED"
 
 
 def _random_key() -> str:
@@ -75,10 +82,19 @@ def _trim_evidence(evidence: str) -> str:
     return text
 
 
+def _fit(text: str, limit: int) -> str:
+    """Text within ``limit`` characters; longer text is cut at a word break and ends in "…"."""
+    if len(text) <= limit:
+        return text
+    return truncate_at_boundary(text, limit - 1)[0] + "…"
+
+
 def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -> MessageAnalysis:
     """Check an untrusted candidate against its request and build the validated analysis.
 
-    Raises ValueError (pydantic's ValidationError is one); messages never echo email text.
+    An over-long summary or action is shortened; the evidence must still quote the email
+    within its limit. Raises ValueError (pydantic's ValidationError is one); messages never
+    echo email text.
     """
     if candidate.message_key != request.message_key:
         raise ValueError("the candidate key does not match its request")
@@ -86,12 +102,13 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
     if not appears_in(evidence, request.subject, request.body_text):
         raise ValueError("evidence must quote the email")
     deadline = resolve_deadline(candidate, request)
+    action_text = (candidate.action_text or "").strip()
     return MessageAnalysis(
         message_key=request.message_key,
         category=candidate.category,
-        summary=candidate.summary,
+        summary=_fit(candidate.summary, SUMMARY_MAX_CHARS),
         action_required=candidate.action_required,
-        action_text=(candidate.action_text or "").strip() or None,
+        action_text=_fit(action_text, ACTION_TEXT_MAX_CHARS) if action_text else None,
         deadline_text=deadline.text,
         deadline_precision=deadline.precision,
         deadline_date=deadline.date,
@@ -119,12 +136,13 @@ def emit_progress(
 class PlannedMessage:
     """One shortlisted message and what happened to it in this run."""
 
-    ranked: RankedMessage
+    # The message, request and analysis carry email text, so they stay out of the repr.
+    ranked: RankedMessage = field(repr=False)
     message_row_id: int | None
-    request: AnalysisRequest | None
+    request: AnalysisRequest | None = field(repr=False)
     input_hash: str | None
     outcome: AnalysisOutcome | None = None
-    analysis: MessageAnalysis | None = None
+    analysis: MessageAnalysis | None = field(default=None, repr=False)
     analysis_row_id: int | None = None
 
 
@@ -142,7 +160,11 @@ class AnalysisPlan:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisRun:
-    """The executed plan with usage, call count, cancellation and the first error code."""
+    """The executed plan with usage, call count, cancellation and an error code.
+
+    ``error_code`` is the code of the error that stopped the run; otherwise
+    AI_REQUEST_REJECTED when a rejected request left a message out; otherwise None.
+    """
 
     messages: tuple[PlannedMessage, ...]
     usage: AIUsage | None
@@ -154,6 +176,7 @@ class AnalysisRun:
 @dataclass(slots=True)
 class _Tally:
     calls: int = 0
+    rejected: int = 0  # Messages left out because the provider rejected their request.
     reported: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -196,7 +219,13 @@ def _error_code(exc: ProviderError) -> str:
         return "AI_RATE_LIMITED"
     if isinstance(exc, ProviderTimeoutError):
         return "AI_TIMEOUT"
-    return "AI_PROVIDER_ERROR"
+    if isinstance(exc, ProviderUnavailableError):
+        return "AI_SERVER_ERROR"
+    if isinstance(exc, ProviderRequestRejectedError):
+        return REQUEST_REJECTED
+    if isinstance(exc, ProviderResponseError):
+        return "AI_PROVIDER_ERROR"
+    return "AI_NETWORK_ERROR"
 
 
 def _request(item: PlannedMessage) -> AnalysisRequest:
@@ -221,7 +250,7 @@ class AnalysisService:
         batch_size: int = 5,
         key_factory: Callable[[], str] = _random_key,
     ) -> None:
-        if not 1 <= batch_size <= MAX_BATCH_SIZE:
+        if not 1 <= batch_size <= MAX_ANALYSIS_BATCH:
             raise ValueError("batch_size must be between 1 and 10")
         self._session = session
         self._provider = provider
@@ -333,8 +362,10 @@ class AnalysisService:
         """Send unresolved messages in batches, cache valid results and retry misses alone.
 
         Cancellation is checked before every provider call and leaves unsent messages
-        without an outcome. An expected provider error stops all further calls and fails
-        every message still without an outcome; other exceptions propagate.
+        without an outcome. A rejected request is retried one message at a time, and a
+        rejected single message fails alone. Any other expected provider error stops all
+        further calls and fails every message still without an outcome; other exceptions
+        propagate.
         """
         pending = plan.to_send
         tally = _Tally()
@@ -354,6 +385,8 @@ class AnalysisService:
         except _ProviderStopped as stop:
             error_code = stop.error_code
             _fail(item for item in plan.messages if item.outcome is None)
+        if error_code is None and tally.rejected:
+            error_code = REQUEST_REJECTED
         analyzed = sum(item.outcome is AnalysisOutcome.ANALYZED for item in plan.messages)
         failed = sum(item.outcome is AnalysisOutcome.FAILED for item in plan.messages)
         logger.info(
@@ -389,10 +422,15 @@ class AnalysisService:
         except ProviderError as exc:
             code = _error_code(exc)
             logger.warning("AI provider call failed: %s", code)
-            raise _ProviderStopped(code) from None
-        tally.add(response.usage)
-        retry = await self._persist(batch, response)
-        await self._session.commit()
+            if code != REQUEST_REJECTED:
+                raise _ProviderStopped(code) from None
+            if len(batch) == 1:
+                tally.rejected += 1  # The caller fails a single message it cannot retry.
+            retry = list(batch)
+        else:
+            tally.add(response.usage)
+            retry = await self._persist(batch, response)
+            await self._session.commit()
         emit_progress(
             progress, SyncProgress(stage=SyncStage.ANALYZING, ai_batches_completed=tally.calls)
         )

@@ -56,8 +56,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 
 ## AI analysis rules (M4)
 
-- Send only shortlisted messages, and only minimized fields: subject, sender, received
-  time and a truncated plain-text body.
+- Send only shortlisted messages, and only these seven minimized fields: `message_key` (a
+  random per-run key), `subject`, `sender`, `received_local`, `time_zone`,
+  `body_truncated` and `body` (truncated plain text).
 - Never send tokens, account or tenant IDs, provider message IDs, source links or
   attachments.
 - Require explicit first-use consent, and disable provider-side response storage where

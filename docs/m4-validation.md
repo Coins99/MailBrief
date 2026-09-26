@@ -5,8 +5,9 @@ Date: 2026-09-26. Working branch: `feat/m4-analysis-digest`, based on draft PR #
 ## Groq migration
 
 Implemented locally on the existing branch at the owner's request, preserving the
-prior integration fixes and request-limit work. No commit or push was performed.
-The owner subsequently ran live checks, recorded below.
+prior integration fixes and request-limit work. The owner subsequently ran live checks,
+recorded below, and requested publication to PR #12 with automated review. Before pushing,
+the seven newer remote review-fix commits were merged into the Groq migration.
 
 - Groq Chat Completions via pinned httpx transport, strict JSON Schema and local
   Pydantic/domain validation; OpenAI SDK and runtime adapter removed.
@@ -27,11 +28,11 @@ The owner subsequently ran live checks, recorded below.
 Windows, Python 3.13.15, dependencies from `uv.lock`:
 
 - Initial focused Groq, analysis, brief, configuration and CLI tests: 159 passed.
-- Final full suite: **880 passed, 1 skipped** (Unix-domain-socket test on Windows).
-- Overall branch coverage: **95.44%**; synchronization 92%, ranking 97%, bodies and
+- Final full suite: **920 passed, 1 skipped** (Unix-domain-socket test on Windows).
+- Overall branch coverage: **95.57%**; synchronization 92%, ranking 97%, bodies and
   digest 100%; Groq provider 96%.
 - Ruff formatting and lint: passed.
-- Strict mypy: passed for native, Windows and macOS targets (138 source files each).
+- Strict mypy: passed for native, Windows and macOS targets (139 source files each).
 
 Tests use mocked HTTP, synthetic messages and an in-memory credential vault. The full
 run reported 21 MSAL deprecation warnings and one SQLAlchemy connection-cleanup warning,

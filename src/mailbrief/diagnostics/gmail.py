@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import contextlib
 import getpass
 import logging
+import threading
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,12 +28,19 @@ from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
 from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
 from mailbrief.providers.groq.factory import groq_provider
+from mailbrief.providers.groq.provider import PROVIDER_NAME
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
-from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
-from mailbrief.services.calendar import local_day_window, resolve_timezone
+from mailbrief.services.brief import (
+    CONSENT_DISCLOSURE_VERSION,
+    BriefService,
+    disclosure_lines,
+    provider_display_name,
+)
+from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.ranking import ShortlistReviewError
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -41,7 +50,6 @@ from mailbrief.storage.repositories import (
     SyncRunRepository,
 )
 
-GROQ = "groq"
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 _SETUP_UNAVAILABLE = (
     "Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md."
@@ -55,9 +63,31 @@ _AI_ERROR_MESSAGES = {
     "AI_PERMISSION_DENIED": "Groq denied access (permission, region or quota).",
     "AI_RATE_LIMITED": "Groq rate limit reached; retry later.",
     "AI_TIMEOUT": "Groq did not respond in time.",
+    "AI_SERVER_ERROR": "Groq had a server problem or sent an unreadable reply; retry later.",
+    "AI_REQUEST_REJECTED": (
+        "Groq rejected some messages, so they were left out. If every message is rejected, "
+        "check that MAILBRIEF_GROQ_MODEL supports Structured Outputs."
+    ),
+    "AI_NETWORK_ERROR": "Could not reach Groq; check your connection and retry.",
     "AI_PROVIDER_ERROR": "Groq request failed; check MAILBRIEF_GROQ_MODEL.",
     "ANALYSIS_FAILED": "No message could be analyzed.",
 }
+
+
+class SettingsError(ConfigurationError):
+    """A MailBrief setting is invalid. Messages name the settings, never their values."""
+
+
+def _load_settings() -> Settings:
+    """Build Settings, naming each invalid MAILBRIEF_* variable without its value."""
+    try:
+        return Settings()
+    except ValidationError as exc:
+        names = sorted(
+            {f"MAILBRIEF_{str(error['loc'][0]).upper()}" for error in exc.errors() if error["loc"]}
+        )
+        listed = ", ".join(names) or "MAILBRIEF_* settings"
+        raise SettingsError(f"Invalid setting: {listed}. See docs/ai-analysis.md.") from None
 
 
 async def run(command: str, *, silent_only: bool) -> int:
@@ -67,7 +97,7 @@ async def run(command: str, *, silent_only: bool) -> int:
         print("Local Gmail credentials removed. Google access and local app data are unchanged.")
         return 0
 
-    async with gmail_auth(Settings()) as auth:
+    async with gmail_auth(_load_settings()) as auth:
         await auth.connect(silent_only=silent_only)
         print("Gmail read-only connection verified. No messages downloaded (M1).")
         return 0
@@ -87,7 +117,7 @@ async def sync(
     now = datetime.now(UTC)
     window = local_day_window(now, tz)
     path = database_path or AppPaths.from_qt().database_path
-    async with gmail_provider(Settings(), silent_only=silent_only) as provider:
+    async with gmail_provider(_load_settings(), silent_only=silent_only) as provider:
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
         database = Database.from_path(path)
@@ -166,7 +196,7 @@ async def bodies(
     show_text: bool,
 ) -> int:
     """Sync today's metadata, then read and prepare the shortlist in memory only."""
-    settings = Settings()
+    settings = _load_settings()
     tz = resolve_timezone(timezone)
     now = datetime.now(UTC)
     path = database_path or AppPaths.from_qt().database_path
@@ -234,7 +264,9 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
                 if not accounts:
                     print("No accounts in this database.")
                 for account in accounts:
-                    active = await consents.get_active(account.id, GROQ, CONSENT_DISCLOSURE_VERSION)
+                    active = await consents.get_active(
+                        account.id, PROVIDER_NAME, CONSENT_DISCLOSURE_VERSION
+                    )
                     state = (
                         f"granted {active.granted_at_utc:%Y-%m-%d %H:%M} UTC"
                         if active is not None
@@ -245,7 +277,7 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
             now = datetime.now(UTC)
             revoked = 0
             for account in accounts:
-                revoked += await consents.revoke_all(account.id, GROQ, now)
+                revoked += await consents.revoke_all(account.id, PROVIDER_NAME, now)
             await session.commit()
             print(f"Groq consent revoked: {revoked}")
             return 0
@@ -254,11 +286,32 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
 
 
 async def _ask(prompt: str) -> str:
-    try:
-        answer = await asyncio.to_thread(input, prompt)
-    except EOFError:
-        return ""
-    return answer.strip()
+    """Read one answer in a daemon thread, so Ctrl+C never waits for Enter; EOF answers ""."""
+    loop = asyncio.get_running_loop()
+    answer: asyncio.Future[str] = loop.create_future()
+
+    def settle(result: str | Exception) -> None:
+        if answer.done():
+            return
+        if isinstance(result, Exception):
+            answer.set_exception(result)
+        else:
+            answer.set_result(result)
+
+    def read() -> None:
+        result: str | Exception
+        try:
+            result = input(prompt)
+        except EOFError:
+            result = ""
+        except Exception as exc:
+            result = exc
+        # After Ctrl+C the loop may be closed; nobody is waiting for this answer then.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(settle, result)
+
+    threading.Thread(target=read, name="mailbrief-prompt", daemon=True).start()
+    return (await answer).strip()
 
 
 class CliConsentGate:
@@ -299,6 +352,21 @@ def _outcome(result: BriefRunResult) -> str:
     return "Cancelled. No brief saved."
 
 
+def _ai_line(result: BriefRunResult, *, model: str) -> str:
+    """Say nothing was sent only when no provider request was made, even a failed one."""
+    if result.ai_calls == 0:
+        return "AI: nothing sent this run"
+    coverage = result.coverage
+    tokens_in = coverage.input_tokens if coverage is not None else None
+    tokens_out = coverage.output_tokens if coverage is not None else None
+    used_model = (coverage.ai_model if coverage is not None else None) or model
+    return (
+        f"AI: {provider_display_name(PROVIDER_NAME)} / {used_model}; "
+        f"requests: {result.ai_calls}; "
+        f"tokens in/out: {_count(tokens_in)} / {_count(tokens_out)}"
+    )
+
+
 def _print_result(result: BriefRunResult, *, model: str) -> None:
     """Counts only: never subjects, senders or text."""
     digest = result.digest
@@ -311,18 +379,19 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
             f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}; "
             f"sync complete: {'yes' if coverage.sync_complete else 'no'}"
         )
-        if result.ai_calls == 0:
-            print("AI: nothing sent this run")
-        else:
-            print(
-                f"AI: {GROQ} / {coverage.ai_model or model}; tokens in/out: "
-                f"{_count(coverage.input_tokens)} / {_count(coverage.output_tokens)}"
-            )
+    if coverage is not None or result.ai_calls > 0:
+        print(_ai_line(result, model=model))
     print(_outcome(result))
     # A partial brief still explains why the new messages failed (e.g. a wrong API key).
     partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")
     if result.status is BriefStatus.SAVED and partial_reason is not None:
         print(partial_reason)
+    if _sync_incomplete(result):
+        print("Inbox sync was incomplete, so this brief may be missing messages.")
+
+
+def _sync_incomplete(result: BriefRunResult) -> bool:
+    return result.coverage is not None and not result.coverage.sync_complete
 
 
 def _deadline(item: DigestItem, zone: ZoneInfo) -> str | None:
@@ -350,9 +419,11 @@ def _print_items(digest: DailyDigest) -> None:
 
 
 def _brief_exit_code(result: BriefRunResult) -> int:
+    """0 only for a complete brief, or an empty one after a complete sync."""
     if result.status is BriefStatus.SAVED:
         complete = (DigestStatus.COMPLETE, DigestStatus.EMPTY)
-        return 0 if result.digest is not None and result.digest.status in complete else 4
+        finished = result.digest is not None and result.digest.status in complete
+        return 0 if finished and not _sync_incomplete(result) else 4
     if result.status is BriefStatus.CONSENT_DECLINED:
         return 6
     if result.status is BriefStatus.CANCELLED:
@@ -371,7 +442,7 @@ async def brief(
     show: bool,
 ) -> int:
     """Sync, ask consent, analyze the shortlist with Groq and save today's brief."""
-    settings = Settings()
+    settings = _load_settings()
     tz = resolve_timezone(timezone)
     now = datetime.now(UTC)
     window = local_day_window(now, tz)
@@ -531,6 +602,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except GmailSetupError as exc:
         print(str(exc))
         return 3
+    except SettingsError as exc:
+        print(str(exc))
+        return 3
     except ConfigurationError as exc:
         # AI setup errors (model, key, vault) carry static, actionable messages.
         print(str(exc) if args.command in _AI_COMMANDS else _SETUP_UNAVAILABLE)
@@ -541,12 +615,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except ProviderError as exc:
         print(str(exc))
         return 4
-    except ValueError:
+    except (InvalidTimezoneError, ShortlistReviewError):
         print(
             "Invalid timezone or shortlist choices; "
             "IDs must belong to today's Inbox without overlap."
         )
         return 3
+    except ValueError as exc:
+        print(f"Unexpected error ({type(exc).__name__}).")
+        return 1
     except (SQLAlchemyError, OSError, CommandError):
         print(
             "Local database or file operation failed. "
@@ -554,7 +631,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         return 5
     except KeyboardInterrupt:
-        print("Gmail diagnostic cancelled.")
+        print("Cancelled.")
         return 130
 
 

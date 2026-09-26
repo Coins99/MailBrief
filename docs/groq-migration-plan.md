@@ -11,8 +11,8 @@ existing Gmail, ranking, evidence checking, deadline handling and digest pipelin
 Desktop UI work remains in M5.
 
 Implementation note: the owner subsequently requested implementation on the current
-working tree; existing local changes were preserved and no commits or branch switches
-were made. Live acceptance remains pending.
+working tree. Existing local changes and newer remote review fixes were preserved
+for publication to PR #12. The main live flow passed; edge-case acceptance remains pending.
 
 The baseline is draft PR #12 (`feat/m4-analysis-digest`) plus the local integration
 fixes and request-limit work. Preserve and checkpoint those changes before migration.

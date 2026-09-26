@@ -1,7 +1,7 @@
 """The brief, ai-key and ai-consent commands end to end, with Gmail and Groq over respx."""
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+import time_machine
 
 from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
@@ -34,6 +35,14 @@ MARKER = "BRIEF-BODY-MARKER-31f7"
 BODY = f"Please approve the quarterly budget by Friday. {MARKER} must stay private."
 EVIDENCE = BODY[:40]
 Responder = Callable[[httpx.Request], httpx.Response]
+MIDDAY = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def midday() -> Iterator[None]:
+    """One fixed day for the messages and the CLI, so no test can straddle midnight."""
+    with time_machine.travel(MIDDAY, tick=True):
+        yield
 
 
 class Mailbox:
@@ -43,6 +52,7 @@ class Mailbox:
         self.body = BODY
         self._router = router
         self._identifiers: list[str] = []
+        self._metadata: dict[str, respx.Route] = {}
         router.get(MESSAGES_URL).mock(side_effect=self._list)
         self.add("a1")
 
@@ -52,9 +62,13 @@ class Mailbox:
         self._router.get(f"{MESSAGES_URL}/{identifier}", params__contains={"format": "full"}).mock(
             side_effect=lambda request: self._full_message(identifier)
         )
-        self._router.get(f"{MESSAGES_URL}/{identifier}").respond(
+        self._metadata[identifier] = self._router.get(f"{MESSAGES_URL}/{identifier}").respond(
             json=metadata(identifier, received=received)
         )
+
+    def break_metadata(self, identifier: str) -> None:
+        """Serve another message's metadata, which the sync counts as a failed item."""
+        self._metadata[identifier].respond(json=metadata("mismatched"))
 
     def _list(self, request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"messages": [{"id": id_} for id_ in self._identifiers]})
@@ -95,14 +109,23 @@ def groq_answers(
     return router.post(CHAT_URL).mock(side_effect=responder)
 
 
-def replies(monkeypatch: pytest.MonkeyPatch, *answers: str) -> None:
-    """Answer input() prompts in order; an unexpected prompt fails the test."""
+def replies(monkeypatch: pytest.MonkeyPatch, *answers: str | EOFError) -> list[str]:
+    """Answer input() prompts in order and return the prompts shown.
+
+    An EOFError answer closes input; an unexpected prompt fails the test.
+    """
     queue = list(answers)
+    prompts: list[str] = []
 
     def fake_input(prompt: str = "") -> str:
-        return queue.pop(0)
+        prompts.append(prompt)
+        answer = queue.pop(0)
+        if isinstance(answer, EOFError):
+            raise answer
+        return answer
 
     monkeypatch.setattr("builtins.input", fake_input)
+    return prompts
 
 
 def run_brief(path: Path, *options: str) -> int:
@@ -124,13 +147,13 @@ def test_first_brief_asks_then_saves_and_prints_counts_only(
     assert run_brief(path) == 0
 
     output = capsys.readouterr().out
-    assert "MailBrief will send 1 message to groq (test-model)" in output
+    assert "MailBrief will send 1 message to Groq (test-model)" in output
     assert "Brief: saved (complete); items: 1" in output
     assert (
         "Coverage: shortlisted 1, analyzed 1, reused 0, failed 0, skipped 0; sync complete: yes"
         in output
     )
-    assert "AI: groq / test-model; tokens in/out: 1200 / 300" in output
+    assert "AI: Groq / test-model; requests: 1; tokens in/out: 1200 / 300" in output
     assert "Saved. Bodies were not stored." in output
     for private in ("Approval needed", "sender@example.com", EVIDENCE, MARKER):
         assert private not in output
@@ -191,14 +214,16 @@ def test_usage_limit_saves_partial_results_and_cached_results_use_no_budget(
     assert "AI: nothing sent this run" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("answer", ["no", "", "y", "YES"])
+@pytest.mark.parametrize(
+    "answer", ["no", "", "y", "YES", EOFError()], ids=["no", "empty", "y", "YES", "eof"]
+)
 def test_first_use_needs_exactly_yes(
     tmp_path: Path,
     mailbox: Mailbox,
     respx_mock: respx.MockRouter,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    answer: str,
+    answer: str | EOFError,
 ) -> None:
     route = groq_answers(respx_mock)
     replies(monkeypatch, answer)
@@ -207,6 +232,38 @@ def test_first_use_needs_exactly_yes(
 
     assert route.call_count == 0
     assert "Nothing was sent. No brief saved." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("answer", "code", "sent"),
+    [("y", 0, 1), ("n", 6, 0), ("", 6, 0), (EOFError(), 6, 0)],
+    ids=["y", "n", "empty", "eof"],
+)
+def test_a_later_brief_asks_before_sending(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    answer: str | EOFError,
+    code: int,
+    sent: int,
+) -> None:
+    route = groq_answers(respx_mock)
+    prompts = replies(monkeypatch, "yes", answer)
+    path = tmp_path / "brief.sqlite3"
+    assert run_brief(path) == 0
+    capsys.readouterr()
+    mailbox.body = f"{BODY} A follow-up line arrived."
+
+    assert run_brief(path) == code
+
+    output = capsys.readouterr().out
+    assert prompts[1] == "Send? [y/N] "
+    assert route.call_count == 1 + sent
+    assert "MailBrief will send 1 message to Groq (test-model)" in output
+    if code == 6:
+        assert "Nothing was sent. No brief saved." in output
 
 
 def test_yes_never_grants_first_use_consent(
@@ -264,8 +321,8 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
     output = capsys.readouterr().out
     assert route.call_count == 1
     assert "Brief: analysis_failed; items: 0" in output
-    assert "AI: nothing sent this run" not in output
-    assert "AI: groq / test-model; tokens in/out: ? / ?" in output
+    assert "AI: Groq / test-model; requests: 1; tokens in/out: ? / ?" in output
+    assert "nothing sent" not in output
     assert (
         "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set "
         "Your last saved brief for today is unchanged."
@@ -293,12 +350,33 @@ def test_a_partial_brief_names_the_provider_error(
     assert route.call_count == 2
     assert "Brief: saved (partial); items: 1" in lines
     assert "AI: nothing sent this run" not in lines
-    assert "AI: groq / test-model; tokens in/out: ? / ?" in lines
+    assert "AI: Groq / test-model; requests: 1; tokens in/out: ? / ?" in lines
     assert any("analyzed 0, reused 1, failed 1" in line for line in lines)
+    assert "AI: Groq / test-model; requests: 1; tokens in/out: ? / ?" in lines
+    assert not any("nothing sent" in line for line in lines)
     outcome = lines.index("Saved. Bodies were not stored.")
     assert lines[outcome + 1] == (
         "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
     )
+
+
+def test_an_empty_brief_after_an_incomplete_sync_exits_4(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = groq_answers(respx_mock)
+    mailbox.break_metadata("a1")
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 4
+
+    output = capsys.readouterr().out
+    assert route.call_count == 0
+    assert "Brief: saved (empty); items: 0" in output
+    assert "sync complete: no" in output
+    assert "AI: nothing sent this run" in output
+    assert "Inbox sync was incomplete, so this brief may be missing messages." in output
 
 
 def test_show_prints_the_items_but_never_evidence(

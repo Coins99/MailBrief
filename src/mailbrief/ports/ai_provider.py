@@ -26,7 +26,7 @@ class AIProvider(Protocol):
         ...
 
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
-        """Analyze one bounded batch with exactly one provider request per call.
+        """Analyze one bounded batch with one logical request per call (the adapter may retry it).
 
         The request message keys are unique within the batch. Candidates come back
         unvalidated; the analysis service validates them. Authentication, permission,

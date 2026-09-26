@@ -6,7 +6,13 @@ from typing import Self
 
 from pydantic import ConfigDict, Field, HttpUrl, field_validator, model_validator
 
-from mailbrief.domain.analysis import DeadlinePrecision
+from mailbrief.domain.analysis import (
+    ACTION_TEXT_MAX_CHARS,
+    DEADLINE_TEXT_MAX_CHARS,
+    EVIDENCE_MAX_CHARS,
+    SUMMARY_MAX_CHARS,
+    DeadlinePrecision,
+)
 from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.messages import EmailContact
 
@@ -36,15 +42,15 @@ class DigestItem(DomainModel):
     message_key: str = Field(min_length=1, max_length=512)
     section: DigestSection
     position: int = Field(ge=0)
-    subject: str = Field(default="", max_length=998)
+    subject: str = Field(default="", max_length=998, repr=False)
     sender: EmailContact
-    summary: str = Field(min_length=1, max_length=240)
-    action_text: str | None = Field(default=None, max_length=1_000)
-    deadline_text: str | None = Field(default=None, max_length=500)
+    summary: str = Field(min_length=1, max_length=SUMMARY_MAX_CHARS, repr=False)
+    action_text: str | None = Field(default=None, max_length=ACTION_TEXT_MAX_CHARS, repr=False)
+    deadline_text: str | None = Field(default=None, max_length=DEADLINE_TEXT_MAX_CHARS, repr=False)
     deadline_precision: DeadlinePrecision = DeadlinePrecision.NONE
     deadline_date: date | None = None
     deadline_at_utc: datetime | None = None
-    evidence: str | None = Field(default=None, max_length=1_000)
+    evidence: str | None = Field(default=None, max_length=EVIDENCE_MAX_CHARS, repr=False)
     source_url: HttpUrl
 
     @field_validator("deadline_at_utc")

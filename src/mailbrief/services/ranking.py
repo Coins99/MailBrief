@@ -210,6 +210,10 @@ def select_shortlist(
     return sorted_all[: min(min_size, len(sorted_all))]
 
 
+class ShortlistReviewError(ValueError):
+    """Manual shortlist choices are outside today's Inbox, overlap or are too many."""
+
+
 def review_shortlist(
     ranked: Sequence[RankedMessage],
     *,
@@ -220,9 +224,11 @@ def review_shortlist(
     include, exclude = set(include_ids), set(exclude_ids)
     available = {item.message.provider_message_id: item for item in ranked}
     if include & exclude or (include | exclude) - available.keys():
-        raise ValueError("Review IDs must belong to this Inbox window and cannot overlap.")
+        raise ShortlistReviewError(
+            "Review IDs must belong to this Inbox window and cannot overlap."
+        )
     if len(include) > MAX_SHORTLIST_SIZE:
-        raise ValueError("Too many manually included messages for one shortlist.")
+        raise ShortlistReviewError("Too many manually included messages for one shortlist.")
     automatic = select_shortlist(ranked)
     selected = [available[key] for key in include]
     selected.extend(

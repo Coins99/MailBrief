@@ -1,6 +1,7 @@
 """Scriptable AI provider fake and candidate helpers for service tests."""
 
 from collections.abc import Callable, Sequence
+from typing import ClassVar
 
 from mailbrief.domain.analysis import AIUsage, AnalysisCandidate, AnalysisRequest, AnalysisResponse
 
@@ -9,11 +10,18 @@ ScriptItem = AnalysisResponse | Exception | Respond
 
 
 class FakeAIProvider:
-    """AIProvider fake: consumes one script item per analyze() call and records each batch."""
+    """AIProvider fake: consumes one script item per analyze() call and records each batch.
+
+    Every instance is registered, and the services conftest fails a test that leaves
+    script items unused.
+    """
+
+    created: ClassVar[list["FakeAIProvider"]] = []
 
     def __init__(self, script: Sequence[ScriptItem] = ()) -> None:
         self.script = list(script)
         self.batches: list[tuple[AnalysisRequest, ...]] = []
+        FakeAIProvider.created.append(self)
 
     @property
     def provider_name(self) -> str:

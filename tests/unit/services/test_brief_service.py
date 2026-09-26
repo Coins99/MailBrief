@@ -175,7 +175,7 @@ async def test_an_unchanged_second_run_reuses_everything_without_asking(
 
     assert result.status is BriefStatus.SAVED
     assert gate.previews == []
-    assert provider.calls == 0
+    assert provider.calls == result.ai_calls == 0
     assert result.coverage is not None
     assert (result.coverage.reused, result.coverage.analyzed) == (2, 0)
     assert result.coverage.input_tokens is None
@@ -308,6 +308,7 @@ async def test_a_total_analysis_failure_keeps_the_earlier_brief(session: AsyncSe
 
     assert result.status is BriefStatus.ANALYSIS_FAILED
     assert result.error_code == "AI_AUTH_FAILED"
+    assert result.ai_calls == 1
     assert result.coverage is not None
     assert result.coverage.failed == 2
     assert result.coverage.ai_provider is None
@@ -336,7 +337,7 @@ async def test_a_partial_brief_reports_the_provider_error(session: AsyncSession)
     assert result.error_code == "AI_AUTH_FAILED"
     assert result.coverage is not None
     assert (result.coverage.reused, result.coverage.failed) == (1, 1)
-    assert provider.calls == 1
+    assert provider.calls == result.ai_calls == 1
 
 
 async def test_cancel_during_analysis_keeps_results_but_writes_no_brief(
@@ -357,7 +358,7 @@ async def test_cancel_during_analysis_keeps_results_but_writes_no_brief(
 
     account_id = await account_id_of(session)
     assert result.status is BriefStatus.CANCELLED
-    assert provider.calls == 1
+    assert provider.calls == result.ai_calls == 1
     assert await DigestRepository(session).get_by_account_and_date(account_id, TODAY) is None
     stored = []
     for message_id in ("m0", "m1"):
@@ -407,7 +408,7 @@ def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
 
     text = "\n".join(disclosure_lines(preview))
 
-    assert "send 3 messages to groq (model-1)" in text
+    assert "send 3 messages to Groq (model-1)" in text
     assert "1 message is cut" in text
     assert all(sent_field in text for sent_field in SENT_FIELDS)
     assert "attachments, recipients, message IDs, links, account IDs or credentials" in text
@@ -429,7 +430,7 @@ def test_disclosure_lines_for_a_returning_user_without_truncation() -> None:
 
     text = "\n".join(disclosure_lines(preview))
 
-    assert "send 1 message to groq" in text
+    assert "send 1 message to Groq" in text
     assert "No message is cut" in text
     assert "remembered" not in text
     assert "already analyzed" not in text

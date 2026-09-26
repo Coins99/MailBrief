@@ -27,6 +27,7 @@ from mailbrief.storage.repositories import ConsentRepository
 logger = logging.getLogger(__name__)
 
 CONSENT_DISCLOSURE_VERSION: Final = "2"
+_DISPLAY_NAMES: Final = {"openai": "OpenAI", "groq": "Groq"}
 
 
 class ConsentGate(Protocol):
@@ -39,9 +40,14 @@ def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
+def provider_display_name(name: str) -> str:
+    """The provider's name as people write it; unknown names pass through unchanged."""
+    return _DISPLAY_NAMES.get(name, name)
+
+
 def disclosure_lines(preview: TransmissionPreview) -> tuple[str, ...]:
     """Plain sentences describing what will be sent, shared by the CLI and the UI."""
-    provider = preview.provider_name
+    provider = provider_display_name(preview.provider_name)
     cut = preview.truncated_count
     lines = [
         f"MailBrief will send {_count(preview.message_count, 'message')} to {provider} "
@@ -147,16 +153,16 @@ class BriefService:
                 status=BriefStatus.ANALYSIS_FAILED,
                 sync=sync,
                 coverage=coverage,
-                ai_calls=run.calls,
                 error_code=run.error_code or "ANALYSIS_FAILED",
+                ai_calls=run.calls,
             )
         return BriefRunResult(
             status=BriefStatus.SAVED,
             sync=sync,
             digest=digest,
             coverage=coverage,
-            ai_calls=run.calls,
             error_code=run.error_code,
+            ai_calls=run.calls,
         )
 
     async def _consented(self, account_id: int, plan: AnalysisPlan, now: datetime) -> bool:

@@ -17,6 +17,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from mailbrief.domain.analysis import (
+    MAX_ANALYSIS_BATCH,
     AIUsage,
     AnalysisCandidate,
     AnalysisProblem,
@@ -29,8 +30,10 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
     ProviderUsageLimitError,
 )
 
@@ -38,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "groq-2026-09-26.1"
 CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
-MAX_REQUESTS_PER_CALL = 10
+PROVIDER_NAME = "groq"
 MAX_RETRIES = 3
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 MAX_RETRY_DELAY_SECONDS = 30.0
@@ -77,6 +80,8 @@ INSTRUCTIONS = (
 
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _ERROR_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+# Statuses that reject this particular request; other requests may still succeed.
+_REJECTED_STATUSES = frozenset({400, 413, 422})
 
 
 class AnalysisWireResult(BaseModel):
@@ -184,6 +189,8 @@ def _failure(
         message = RATE_LIMIT_MESSAGE
     elif issubclass(kind, ProviderTimeoutError):
         message = TIMEOUT_MESSAGE
+    elif issubclass(kind, ProviderUnavailableError):
+        message = f"Groq is unavailable (HTTP {status}); retry later."
     elif issubclass(kind, ProviderResponseError):
         message = f"Groq rejected the request (HTTP {status})."
     else:
@@ -201,6 +208,8 @@ def _status_outcome(
     if verdict.kind is not VerdictKind.RETRY:
         failure = verdict.exception
         kind = type(failure) if isinstance(failure, ProviderError) else ProviderResponseError
+        if status in _REJECTED_STATUSES and not issubclass(kind, ProviderPermissionError):
+            kind = ProviderRequestRejectedError
         return _failure(kind, status, request_id, code), None
     delay = verdict.retry_delay
     if delay is None:
@@ -214,7 +223,7 @@ def _status_outcome(
             provider_error_code=code,
         )
     else:
-        error = _failure(ProviderResponseError, status, request_id, code)
+        error = _failure(ProviderUnavailableError, status, request_id, code)
     if attempt >= MAX_RETRIES or delay > MAX_RETRY_DELAY_SECONDS:
         return error, None
     return error, delay
@@ -265,7 +274,7 @@ class GroqProvider:
 
     @property
     def provider_name(self) -> str:
-        return "groq"
+        return PROVIDER_NAME
 
     @property
     def model_name(self) -> str:
@@ -278,7 +287,7 @@ class GroqProvider:
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
         """One logical chat completion for 1-10 requests, retrying transient failures."""
         keys = [request.message_key for request in requests]
-        if not 1 <= len(keys) <= MAX_REQUESTS_PER_CALL or len(set(keys)) != len(keys):
+        if not 1 <= len(keys) <= MAX_ANALYSIS_BATCH or len(set(keys)) != len(keys):
             raise ValueError("a Groq call needs 1 to 10 requests with unique message keys")
         request_id = str(uuid.uuid4())
         payload = _request_input(requests)
@@ -333,8 +342,8 @@ class GroqProvider:
                         body = raw.json()
                     except ValueError:
                         body = None
-                    if not isinstance(body, dict):
-                        raise ProviderResponseError(
+                    if not isinstance(body, dict) or "choices" not in body:
+                        raise ProviderUnavailableError(
                             UNREADABLE_MESSAGE, client_request_id=request_id
                         )
                     return _to_response(body)

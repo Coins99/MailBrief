@@ -1,6 +1,7 @@
 """Groq adapter: strict request shape, response mapping, retries and error hygiene."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -20,8 +21,10 @@ from mailbrief.ports.errors import (
     ProviderError,
     ProviderPermissionError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
     ProviderUsageLimitError,
 )
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
@@ -31,6 +34,7 @@ from mailbrief.providers.groq.provider import (
     INSTRUCTIONS,
     PROMPT_VERSION,
     UNREADABLE_MESSAGE,
+    AnalysisWireBatch,
     GroqProvider,
 )
 from tests.unit.providers.groq.groq_fixtures import (
@@ -48,6 +52,11 @@ from tests.unit.providers.groq.groq_fixtures import (
 
 BODY = "Please approve the quarterly budget by Friday 5 PM."
 MARKER = "GROQ-ERROR-MARKER-5d2e"
+REQUEST_KEYS = {"model", "messages", "response_format", "max_completion_tokens"}
+PINNED_PROMPT = (
+    "groq-2026-09-26.1",
+    "0454a48e855e876090802d43f7e8f919cf7f029916323748cff486f79d5a2b58",
+)
 STEP_5_3_KEYS = {
     "message_key",
     "subject",
@@ -114,6 +123,7 @@ async def test_the_request_is_strict_and_minimized(
     sent = route.calls.last.request
     body = json.loads(sent.content)
     assert sent.url == CHAT_URL
+    assert set(body) == REQUEST_KEYS
     assert body["model"] == "test-model"
     assert "store" not in body
     assert sent.headers["Authorization"] == f"Bearer {TEST_KEY}"
@@ -133,6 +143,17 @@ async def test_the_request_is_strict_and_minimized(
     assert messages[0]["received_local"] == "2026-09-04 (Friday) 09:30"
     assert (messages[0]["time_zone"], messages[0]["body_truncated"]) == ("America/Toronto", True)
     assert re.fullmatch(r"[0-9a-f-]{36}", sent.headers["X-Client-Request-Id"])
+
+
+def test_the_prompt_version_changes_with_the_prompt_or_schema() -> None:
+    schema = json.dumps(
+        AnalysisWireBatch.model_json_schema(), sort_keys=True, separators=(",", ":")
+    )
+    fingerprint = hashlib.sha256(f"{INSTRUCTIONS}\n{schema}".encode()).hexdigest()
+
+    assert (PROMPT_VERSION, fingerprint) == PINNED_PROMPT, (
+        "prompt or schema changed: bump PROMPT_VERSION and this hash"
+    )
 
 
 async def test_a_valid_answer_becomes_candidates_with_usage(
@@ -186,6 +207,26 @@ async def test_problem_responses_keep_their_usage(
 
     assert response.problem is problem
     assert response.candidates == ()
+    assert response.usage == AIUsage(input_tokens=1_200, output_tokens=300)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        [{"type": "message", "role": "assistant", "content": None}],
+        [{"type": "message", "role": "assistant", "content": ["just text"]}],
+    ],
+    ids=["content-not-a-list", "content-item-not-an-object"],
+)
+async def test_a_malformed_output_list_is_invalid_output(
+    respx_mock: respx.MockRouter, provider: GroqProvider, output: list[dict[str, Any]]
+) -> None:
+    payload = {**response_body([]), "choices": output}
+    respx_mock.post(CHAT_URL).respond(json=payload)
+
+    response = await provider.analyze([make_request()])
+
+    assert response.problem is AnalysisProblem.INVALID_OUTPUT
     assert response.usage == AIUsage(input_tokens=1_200, output_tokens=300)
 
 
@@ -266,10 +307,12 @@ async def test_a_long_rate_limit_fails_at_once(
     [
         (429, "insufficient_quota", ProviderPermissionError, "Groq denied access"),
         (400, "blocked_api_access", ProviderPermissionError, "Groq denied access"),
-        (413, "request_too_large", ProviderResponseError, "HTTP 413"),
         (401, "invalid_api_key", AIAuthenticationError, AUTH_MESSAGE),
         (403, "unsupported_country_region_territory", ProviderPermissionError, "denied access"),
-        (400, "invalid_json_schema", ProviderResponseError, "rejected the request (HTTP 400)"),
+        (400, "invalid_prompt", ProviderRequestRejectedError, "rejected the request (HTTP 400)"),
+        (413, "request_too_large", ProviderRequestRejectedError, "rejected the request (HTTP 413)"),
+        (422, "unprocessable", ProviderRequestRejectedError, "rejected the request (HTTP 422)"),
+        (404, "model_not_found", ProviderResponseError, "rejected the request (HTTP 404)"),
     ],
 )
 async def test_terminal_errors_carry_static_messages_and_safe_codes(
@@ -285,6 +328,7 @@ async def test_terminal_errors_carry_static_messages_and_safe_codes(
     with pytest.raises(error_type, match=re.escape(message)) as caught:
         await provider.analyze([make_request()])
 
+    assert type(caught.value) is error_type
     assert route.call_count == 1
     assert caught.value.provider_error_code == code
     assert caught.value.client_request_id is not None
@@ -295,10 +339,11 @@ async def test_terminal_errors_carry_static_messages_and_safe_codes(
     [
         httpx.Response(200, text="<html>maintenance</html>", headers={"content-type": "text/html"}),
         httpx.Response(200, json=["not", "an", "object"]),
+        httpx.Response(200, json={"error": {"message": "Something went wrong."}}),
     ],
-    ids=["html", "json-array"],
+    ids=["html", "json-array", "no-output-list"],
 )
-async def test_an_unreadable_reply_is_a_provider_error_without_retry(
+async def test_an_unreadable_reply_is_unavailable_without_retry(
     respx_mock: respx.MockRouter,
     provider: GroqProvider,
     sleeps: RecordedSleeps,
@@ -306,10 +351,9 @@ async def test_an_unreadable_reply_is_a_provider_error_without_retry(
 ) -> None:
     route = respx_mock.post(CHAT_URL).mock(return_value=reply)
 
-    with pytest.raises(ProviderResponseError) as caught:
+    with pytest.raises(ProviderUnavailableError) as caught:
         await provider.analyze([make_request()])
 
-    assert type(caught.value) is ProviderResponseError
     assert str(caught.value) == UNREADABLE_MESSAGE == "Groq returned an unreadable response."
     assert caught.value.client_request_id is not None
     assert route.call_count == 1
@@ -327,14 +371,16 @@ async def test_an_unsafe_error_code_is_dropped(
     assert caught.value.provider_error_code is None
 
 
-async def test_server_errors_are_retried_three_times(
-    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
+@pytest.mark.parametrize("status", [500, 503, 408])
+async def test_server_errors_are_retried_three_times_then_unavailable(
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps, status: int
 ) -> None:
-    route = respx_mock.post(CHAT_URL).respond(500, json=error_body("server_error"))
+    route = respx_mock.post(CHAT_URL).respond(status, json=error_body("server_error"))
 
-    with pytest.raises(ProviderResponseError, match=re.escape("(HTTP 500)")):
+    with pytest.raises(ProviderUnavailableError) as caught:
         await provider.analyze([make_request()])
 
+    assert str(caught.value) == f"Groq is unavailable (HTTP {status}); retry later."
     assert route.call_count == 4
     assert sleeps.delays == [1.0, 2.0, 4.0]
 
