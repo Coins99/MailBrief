@@ -65,6 +65,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   supported; enable Groq Zero Data Retention in Console Data Controls before live mail use.
 - Accept only responses that validate against the versioned Pydantic schema. Cache by
   input hash, provider, model, prompt version and schema version.
+- Store evidence at most 300 characters long and never as a whole body (under 80% of it).
 
 ## Dependencies
 

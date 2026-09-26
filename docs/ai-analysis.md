@@ -48,6 +48,12 @@ The key is saved across sessions in the OS vault. The `$env:` settings above app
 PowerShell session. `ai-key status` confirms storage, not API validity; a consented brief
 verifies access. Never pass the key as a command argument or put it into a repository file.
 
+The key is read from the vault only when a brief has something to send, and then only once
+per run. A fully cached rerun or an empty Inbox works without it. Without a usable key
+(none saved, or the credential store cannot be read), MailBrief asks nothing and sends
+nothing: new messages are left out with "No usable Groq API key is saved. Run:
+mailbrief-gmail-diagnostic ai-key set", and cached items still make a brief.
+
 ## Usage and spending limits
 
 MailBrief enforces the request cap on each Groq provider connection, which is one `brief`
@@ -65,6 +71,13 @@ for `openai/gpt-oss-120b` are 30 requests/minute, 1,000/day, 8,000 tokens/minute
 200,000/day; check your dashboard for actual limits. Character counts do not guarantee
 that prompts, schemas and output reservations fit the token allowance. See
 [Groq rate limits](https://console.groq.com/docs/rate-limits).
+
+MailBrief paces itself from Groq's rate-limit headers. After each call, if the remaining
+token allowance (`x-ratelimit-remaining-tokens`) is smaller than that call used (prompt
+plus completion), the next call first waits for the token window to reset
+(`x-ratelimit-reset-tokens`). An exhausted request or token allowance does the same. A
+wait longer than 30 seconds stops the run with "Groq rate limit reached; retry later." and
+keeps the results already saved.
 
 If you later enable paid usage, an organization owner can set a monthly USD limit in
 **Groq Console > Settings > Billing > Limits** and add alerts. This applies across all
@@ -115,11 +128,18 @@ evidence quote from the email, never the body.
 The model copies the deadline phrase and reports its date, time and zone as written.
 MailBrief checks that the phrase appears in the email and resolves it itself:
 
-- **Exact**: a date and a time, in your zone, UTC, or a region zone the email names such as
-  `America/Chicago`.
+- **Exact**: a date and a time, in UTC or a region zone such as `America/Chicago` that the
+  email itself writes, or in your zone when the phrase names no zone.
 - **Date**: a day without a time. Abbreviated or offset zones such as "EST", "PT" or
   "UTC+2" always stay date-only, because they are ambiguous in everyday use.
 - **Unresolved**: a phrase with no specific day, such as "ASAP".
+
+A zone counts only when the email's subject or body contains it. A zone the model supplied
+on its own keeps only the date. When a time comes without a reported zone but the phrase
+names one (ET, PT, PST, CEST, UTC+2, GMT, Eastern, Pacific, 北京时间, 东八区 and similar),
+only the date is kept, rather than assuming your zone. Any upper-case word ending in T
+counts, so "SUBMIT IT BY 5PM" also keeps only the date; such a false positive only drops
+the time.
 
 An unusable date or time never discards the analysis: the quoted phrase stays. A date that
 is malformed, not a real day, or more than 31 days before or 366 days after the email makes
@@ -138,7 +158,9 @@ end of that day), then the rest by rank.
 - **empty**: nothing to brief today.
 
 A summary longer than 240 characters, or an action longer than 1,000, is cut at a word
-and ends in "…". The evidence quote is never shortened: it must appear in the email.
+and ends in "…". The evidence quote must appear in the email, and is never stored as the
+whole body: it is kept to at most 300 characters and under 80% of the body, cut at a word
+and ending in "…" when longer.
 
 If nothing could be analyzed, no brief is written and today's last saved brief stays.
 By default the command prints counts only. `--show` also prints each item's sender, subject,
@@ -162,11 +184,14 @@ this brief may be missing messages."
 
 ## Tokens
 
-Each run prints the input and output tokens Groq reported, or `?` when it reported none.
-"AI: nothing sent this run" means no AI provider call was attempted (for example, all results
-were cached or all bodies were empty). A failed call with no reported usage prints `? / ?`;
-missing token counts do not mean nothing was sent. MailBrief shows no cost estimates; check
-usage in your Groq dashboard.
+Each run that sent anything prints a line such as
+`AI: Groq / openai/gpt-oss-120b; requests: 2; tokens in/out: 2317 / 1051`. `requests`
+counts HTTP attempts, including failed and retried ones, so it matches what
+`MAILBRIEF_AI_MAX_REQUESTS_PER_RUN` limits: a 500 followed by a success is 2 requests,
+and a call refused by that limit before sending is none. Token counts are `?` when Groq
+reported none. "AI: nothing sent this run" means no HTTP request was made (for example,
+all results were cached, all bodies were empty or no key was available). MailBrief shows no
+cost estimates; check usage in your Groq dashboard.
 
 ## Troubleshooting
 

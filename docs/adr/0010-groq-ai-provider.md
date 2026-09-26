@@ -33,3 +33,11 @@ are not a dollar cap. Existing OpenAI data and keys remain intact.
 
 See [the implementation plan](../groq-migration-plan.md) and
 [setup, privacy and usage limits](../ai-analysis.md) for details and official sources.
+
+## Amendment (2026-09-26)
+
+- After a Codex review: the key is read only when a request is needed. "requests" counts
+  HTTP attempts. A stated time zone is used only when the email writes it, and a phrase
+  naming an unreported zone keeps only the date. Stored evidence is at most 300 characters
+  and never a whole body (schema version 3). Legacy deadline rows load without being
+  hidden. Calls are paced when the token window is smaller than the last call.

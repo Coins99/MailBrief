@@ -43,6 +43,17 @@ Test temporary files, cache and coverage output are under ignored `out/`.
 The pre-migration baseline had 868 passing tests and 95.40% coverage. Its fixes for
 attempted-request reporting and per-run limits remain covered by the Groq tests.
 
+### Codex review follow-up
+
+macOS (Darwin), Python 3.13.15, dependencies from `uv.lock`:
+
+- Baseline after the Groq merge (0d83330): 919 passed, 2 skipped.
+- After the follow-up: **965 passed, 2 skipped** (the Qt GUI tests need a WindowServer
+  session). Overall coverage **95.47%**; synchronization 92%, ranking 97%, bodies, digest
+  and deadlines 100%, analysis 99%, brief 99%, Groq provider 97%.
+- Ruff formatting and lint: passed. Strict mypy: passed for native, Windows and macOS
+  targets (139 source files each).
+
 ## Owner live acceptance: partially verified
 
 Owner-provided terminal output on 2026-09-26 confirms a successful live Gmail sync,
