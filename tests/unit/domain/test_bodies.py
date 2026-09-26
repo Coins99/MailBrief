@@ -3,7 +3,14 @@
 import pytest
 from pydantic import ValidationError
 
-from mailbrief.domain.bodies import MAX_EXTRACTED_CHARS, BodySource, MessageBody
+from mailbrief.domain.bodies import (
+    MAX_ANALYSIS_CHARS,
+    MAX_EXTRACTED_CHARS,
+    BodySource,
+    BodyStatus,
+    MessageBody,
+    PreparedBody,
+)
 
 
 def test_text_and_source_must_agree() -> None:
@@ -24,3 +31,27 @@ def test_body_text_never_appears_in_repr_or_errors() -> None:
             source=BodySource.PLAIN,
         )
     assert "SECRET-BODY-MARKER" not in str(error.value)
+
+
+def test_prepared_text_exists_only_when_ready() -> None:
+    ready = PreparedBody(provider_message_id="m1", status=BodyStatus.READY, text="Hello")
+    assert ready.text == "Hello"
+    assert PreparedBody(provider_message_id="m1", status=BodyStatus.FAILED).text == ""
+    with pytest.raises(ValidationError):
+        PreparedBody(provider_message_id="m1", status=BodyStatus.READY)
+    with pytest.raises(ValidationError):
+        PreparedBody(provider_message_id="m1", status=BodyStatus.EMPTY, text="text")
+
+
+def test_prepared_text_is_bounded_and_hidden() -> None:
+    body = PreparedBody(
+        provider_message_id="m1", status=BodyStatus.READY, text="SECRET-PREPARED-MARKER"
+    )
+    assert "SECRET-PREPARED-MARKER" not in repr(body)
+    with pytest.raises(ValidationError) as error:
+        PreparedBody(
+            provider_message_id="m1",
+            status=BodyStatus.READY,
+            text="SECRET-PREPARED-MARKER" * MAX_ANALYSIS_CHARS,
+        )
+    assert "SECRET-PREPARED-MARKER" not in str(error.value)

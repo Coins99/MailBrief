@@ -68,3 +68,9 @@ def test_settings_reject_unsafe_graph_url(url: str) -> None:
 def test_settings_accept_public_graph_url_with_trailing_slash() -> None:
     settings = Settings(graph_base_url="https://graph.microsoft.com/v1.0/")
     assert str(settings.graph_base_url) == "https://graph.microsoft.com/v1.0/"
+
+
+def test_body_limit_cannot_exceed_the_analysis_limit() -> None:
+    assert Settings().ai_body_character_limit == 8_000
+    with pytest.raises(ValidationError):
+        Settings(ai_body_character_limit=8_001)

@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     graph_base_url: HttpUrl = HttpUrl("https://graph.microsoft.com/v1.0")
     openai_model: str | None = None
     ai_batch_size: int = Field(default=5, ge=1, le=10)
-    ai_body_character_limit: int = Field(default=8_000, ge=1, le=20_000)
+    ai_body_character_limit: int = Field(default=8_000, ge=1, le=8_000)
 
     @field_validator("graph_base_url")
     @classmethod
