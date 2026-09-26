@@ -100,6 +100,12 @@ message outside the shortlist. Empty or unreadable bodies are skipped. Requests 
 environment variables. Groq privacy controls are configured in its console, not with
 an OpenAI `store=false` request parameter.
 
+What is stored: MailBrief never stores full email bodies, beyond the short preview snippet
+Gmail supplies with each message's metadata, which has been kept since M2; for a very
+short email that snippet can be the whole text. Derived content is bounded: a summary is
+at most 240 characters, an action at most 1,000, and evidence at most 300 and strictly
+under 80% of the body. A summary of a very short email may restate it.
+
 ## Consent
 
 - The first time, the brief lists what it will send and continues only if you type `yes`.

@@ -37,11 +37,16 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 
 ## Invariants (never break these)
 
-- Never write full email bodies, OAuth tokens or API keys to SQLite, logs, exceptions,
-  printed output or files. The one exception is `mailbrief-gmail-diagnostic bodies
-  --show-text`, which prints prepared text to the owner's terminal on explicit request.
-  `brief --show` prints derived brief content (sender, subject, summary, action, deadline,
-  link) on explicit request, never evidence or bodies.
+- Never write OAuth tokens or API keys to SQLite, logs, exceptions, printed output or
+  files. Never write full email bodies there either, beyond the short preview snippet Gmail
+  supplies, which SQLite has kept since M2; for a very short email that snippet can be the
+  whole text. The one exception is `mailbrief-gmail-diagnostic bodies --show-text`, which
+  prints prepared text to the owner's terminal on explicit request. `brief --show` prints
+  derived brief content (sender, subject, summary, action, deadline, link) on explicit
+  request, never evidence or bodies.
+- Derived content is bounded: a summary is at most 240 characters, an action at most
+  1,000, and evidence at most 300 and strictly under 80% of the body. A summary of a very
+  short email may restate it.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.

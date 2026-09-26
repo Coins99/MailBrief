@@ -1,6 +1,7 @@
 # OpenAI to Groq migration plan
 
-Status: implemented locally; automated verification and live acceptance tracked in
+Status: implemented, and landed in PR #12 (`feat/m4-analysis-digest`) rather than a
+separate migration PR; automated verification and live acceptance tracked in
 [m4-validation.md](m4-validation.md). Reviewed 2026-09-26.
 
 ## Outcome and baseline

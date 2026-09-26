@@ -25,12 +25,12 @@ the seven newer remote review-fix commits were merged into the Groq migration.
 
 ## Automated verification
 
-Windows, Python 3.13.15, dependencies from `uv.lock`:
+macOS (Darwin), Python 3.13.15, dependencies from `uv.lock`, at the head of PR #12:
 
-- Initial focused Groq, analysis, brief, configuration and CLI tests: 159 passed.
-- Final full suite: **920 passed, 1 skipped** (Unix-domain-socket test on Windows).
-- Overall branch coverage: **95.57%**; synchronization 92%, ranking 97%, bodies and
-  digest 100%; Groq provider 96%.
+- Full suite: **1009 passed, 2 skipped** (the two Qt GUI tests need a WindowServer
+  session).
+- Overall branch coverage: **95.56%**; synchronization 92%, ranking 97%, bodies, digest
+  and deadlines 100%, analysis 99%, brief 99%; Groq provider 97%.
 - Ruff formatting and lint: passed.
 - Strict mypy: passed for native, Windows and macOS targets (139 source files each).
 
