@@ -420,7 +420,8 @@ class GroqProvider:
                 error, delay = _status_outcome(raw, attempt, request_id)
                 reason = f"HTTP {raw.status_code}"
             if delay is None:
-                logger.warning("Groq call failed after %d attempts: %s", attempt + 1, reason)
+                # INFO: the caller reports the failure; the CLI shows it with its detail.
+                logger.info("Groq call failed after %d attempts: %s", attempt + 1, reason)
                 raise error
             self._check_budget()
             attempt += 1

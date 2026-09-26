@@ -555,6 +555,26 @@ async def test_a_rejection_that_leaves_a_message_out_records_its_detail(
     assert run.provider_detail == "HTTP 400, code invalid_prompt"
 
 
+async def test_a_provider_failure_is_logged_at_info(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    account_id, shortlist = await seed(session, 1)
+
+    await analyze(
+        session,
+        FakeAIProvider([AIAuthenticationError("bad key")]),
+        shortlist,
+        account_id=account_id,
+    )
+
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("AI provider call failed")]
+    assert (record.levelno, record.getMessage()) == (
+        logging.INFO,
+        "AI provider call failed: AI_AUTH_FAILED",
+    )
+
+
 async def test_unexpected_errors_propagate(session: AsyncSession) -> None:
     account_id, shortlist = await seed(session, 1)
 

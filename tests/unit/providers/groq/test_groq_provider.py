@@ -376,6 +376,22 @@ async def test_an_unreadable_reply_is_unavailable_without_retry(
     assert sleeps.delays == []
 
 
+async def test_a_failed_call_is_logged_at_info(
+    respx_mock: respx.MockRouter, provider: GroqProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    respx_mock.post(CHAT_URL).respond(401, json=error_body("invalid_api_key"))
+
+    with pytest.raises(AIAuthenticationError):
+        await provider.analyze([make_request()])
+
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("Groq call failed")]
+    assert (record.levelno, record.getMessage()) == (
+        logging.INFO,
+        "Groq call failed after 1 attempts: HTTP 401",
+    )
+
+
 async def test_an_unsafe_error_code_is_dropped(
     respx_mock: respx.MockRouter, provider: GroqProvider
 ) -> None:

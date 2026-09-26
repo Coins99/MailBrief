@@ -496,7 +496,8 @@ class AnalysisService:
             response = await self._provider.analyze(requests)
         except ProviderError as exc:
             code = _error_code(exc)
-            logger.warning("AI provider call failed: %s", code)
+            # INFO: the CLI already reports the failure and its detail to the owner.
+            logger.info("AI provider call failed: %s", code)
             if code != REQUEST_REJECTED:
                 raise _ProviderStopped(code, provider_detail(exc)) from None
             if len(batch) > 1:
