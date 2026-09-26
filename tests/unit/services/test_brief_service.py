@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,7 @@ from mailbrief.domain.briefs import SENT_FIELDS, BriefStatus, TransmissionPrevie
 from mailbrief.domain.digests import DigestStatus, SyncProgress, SyncStage
 from mailbrief.domain.messages import NormalizedMessage
 from mailbrief.ports.errors import AIAuthenticationError, ProviderPermissionError
-from mailbrief.services.analysis import AnalysisService
+from mailbrief.services.analysis import AnalysisPlan, AnalysisRun, AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
@@ -364,6 +365,41 @@ async def test_without_credentials_new_messages_fail_and_cached_ones_still_brief
     assert gate.previews == []
     assert result.coverage is not None
     assert (result.coverage.reused, result.coverage.failed) == (1, 1)
+
+
+async def test_cancel_during_planning_stops_before_the_missing_key_path(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancel = asyncio.Event()
+    real_plan = AnalysisService.plan
+    real_fail_unsent = AnalysisService.fail_unsent
+    unsent_failures: list[str] = []
+
+    async def plan_then_cancel(self: AnalysisService, **options: Any) -> AnalysisPlan:
+        plan = await real_plan(self, **options)
+        cancel.set()  # The owner cancels while the run is planning.
+        return plan
+
+    def record_fail_unsent(
+        self: AnalysisService, plan: AnalysisPlan, error_code: str
+    ) -> AnalysisRun:
+        unsent_failures.append(error_code)
+        return real_fail_unsent(self, plan, error_code)
+
+    monkeypatch.setattr(AnalysisService, "plan", plan_then_cancel)
+    monkeypatch.setattr(AnalysisService, "fail_unsent", record_fail_unsent)
+    provider = FakeAIProvider(credentials=False)
+    gate = RecordingGate(answer=True)
+
+    result = await build(session, provider, gate).generate(tz_key=ZONE, cancel=cancel)
+
+    assert result.status is BriefStatus.CANCELLED
+    assert result.ai_calls == provider.calls == 0
+    assert unsent_failures == []
+    assert provider.credential_checks == 0
+    assert gate.previews == []
+    account_id = await account_id_of(session)
+    assert await DigestRepository(session).get_by_account_and_date(account_id, TODAY) is None
 
 
 async def test_credentials_are_checked_only_when_something_must_be_sent(

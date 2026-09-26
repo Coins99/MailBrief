@@ -138,6 +138,9 @@ class BriefService:
             bodies=prepared,
             timezone_name=window.timezone_name,
         )
+        if cancel is not None and cancel.is_set():
+            # Before the key check and consent, so a cancelled run writes no brief.
+            return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
         if plan.to_send and not await self._analysis.credentials_available():
             # Nothing can be sent, so there is nothing to consent to; cached and skipped
             # messages still make a brief.
