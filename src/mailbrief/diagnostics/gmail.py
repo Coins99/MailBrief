@@ -28,10 +28,16 @@ from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
 from mailbrief.providers.openai.credentials import OpenAIKeyStore, parse_api_key
 from mailbrief.providers.openai.factory import openai_provider
+from mailbrief.providers.openai.provider import PROVIDER_NAME
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
-from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
+from mailbrief.services.brief import (
+    CONSENT_DISCLOSURE_VERSION,
+    BriefService,
+    disclosure_lines,
+    provider_display_name,
+)
 from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
 from mailbrief.services.ranking import ShortlistReviewError
@@ -44,7 +50,6 @@ from mailbrief.storage.repositories import (
     SyncRunRepository,
 )
 
-OPENAI = "openai"
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 _SETUP_UNAVAILABLE = (
     "Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md."
@@ -256,7 +261,7 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
                     print("No accounts in this database.")
                 for account in accounts:
                     active = await consents.get_active(
-                        account.id, OPENAI, CONSENT_DISCLOSURE_VERSION
+                        account.id, PROVIDER_NAME, CONSENT_DISCLOSURE_VERSION
                     )
                     state = (
                         f"granted {active.granted_at_utc:%Y-%m-%d %H:%M} UTC"
@@ -268,7 +273,7 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
             now = datetime.now(UTC)
             revoked = 0
             for account in accounts:
-                revoked += await consents.revoke_all(account.id, OPENAI, now)
+                revoked += await consents.revoke_all(account.id, PROVIDER_NAME, now)
             await session.commit()
             print(f"OpenAI consent revoked: {revoked}")
             return 0
@@ -352,7 +357,8 @@ def _ai_line(result: BriefRunResult, *, model: str) -> str:
     tokens_out = coverage.output_tokens if coverage is not None else None
     used_model = (coverage.ai_model if coverage is not None else None) or model
     return (
-        f"AI: OpenAI / {used_model}; requests: {result.ai_calls}; "
+        f"AI: {provider_display_name(PROVIDER_NAME)} / {used_model}; "
+        f"requests: {result.ai_calls}; "
         f"tokens in/out: {_count(tokens_in)} / {_count(tokens_out)}"
     )
 

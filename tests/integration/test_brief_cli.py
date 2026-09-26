@@ -129,7 +129,7 @@ def test_first_brief_asks_then_saves_and_prints_counts_only(
     assert run_brief(path) == 0
 
     output = capsys.readouterr().out
-    assert "MailBrief will send 1 message to openai (test-model)" in output
+    assert "MailBrief will send 1 message to OpenAI (test-model)" in output
     assert "Brief: saved (complete); items: 1" in output
     assert (
         "Coverage: shortlisted 1, analyzed 1, reused 0, failed 0, skipped 0; sync complete: yes"

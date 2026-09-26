@@ -637,6 +637,25 @@ def test_validate_candidate_trims_quoted_evidence_and_blank_actions() -> None:
     assert plain.evidence == "Please approve"
 
 
+async def test_reprs_leave_out_email_text(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 1)
+    run = await analyze(
+        session,
+        FakeAIProvider([answer_all(deadline_text="Friday 5 PM", action_text="Approve it")]),
+        shortlist,
+        account_id=account_id,
+    )
+    (item,) = run.messages
+    assert item.request is not None and item.analysis is not None
+    candidate = good_candidate(item.request)
+
+    texts = [repr(item), repr(item.request), repr(item.analysis), repr(candidate)]
+
+    for text in texts:
+        for private in ("quarterly budget", "Budget item 0", "A short summary", "Approve it"):
+            assert private not in text
+
+
 def test_validate_candidate_shortens_a_long_summary_and_action() -> None:
     request = make_request()
     exact = "s" * 240

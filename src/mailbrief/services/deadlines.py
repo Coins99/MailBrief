@@ -5,10 +5,14 @@ import re
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
-from mailbrief.domain.analysis import AnalysisCandidate, AnalysisRequest, DeadlinePrecision
+from mailbrief.domain.analysis import (
+    DEADLINE_TEXT_MAX_CHARS,
+    AnalysisCandidate,
+    AnalysisRequest,
+    DeadlinePrecision,
+)
 from mailbrief.text.matching import appears_in
 
-MAX_DEADLINE_TEXT_CHARS = 500
 _PAST_DAYS = 31
 _FUTURE_DAYS = 366
 _DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -103,7 +107,7 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
         if raw_date is not None or raw_time is not None:
             raise InvalidDeadlineError("a deadline date or time requires deadline text")
         return _NO_DEADLINE
-    if len(text) > MAX_DEADLINE_TEXT_CHARS or not appears_in(
+    if len(text) > DEADLINE_TEXT_MAX_CHARS or not appears_in(
         text, request.subject, request.body_text
     ):
         raise InvalidDeadlineError("deadline text must quote the email")

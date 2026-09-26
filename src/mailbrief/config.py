@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
 from mailbrief.domain.messages import ProviderKind
 from mailbrief.errors import ConfigurationError
 
@@ -19,7 +20,7 @@ class Settings(BaseSettings):
     microsoft_client_id: str | None = None
     graph_base_url: HttpUrl = HttpUrl("https://graph.microsoft.com/v1.0")
     openai_model: str | None = None
-    ai_batch_size: int = Field(default=5, ge=1, le=10)
+    ai_batch_size: int = Field(default=5, ge=1, le=MAX_ANALYSIS_BATCH)
     ai_body_character_limit: int = Field(default=8_000, ge=1, le=8_000)
     ai_max_output_tokens: int = Field(default=8_000, ge=256, le=64_000)
     ai_timeout_seconds: float = Field(default=120, ge=10, le=600)

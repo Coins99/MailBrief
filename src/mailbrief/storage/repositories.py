@@ -9,7 +9,12 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
+from mailbrief.domain.analysis import (
+    SUMMARY_MAX_CHARS,
+    AnalysisCategory,
+    DeadlinePrecision,
+    MessageAnalysis,
+)
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.digests import (
     DailyDigest,
@@ -40,8 +45,6 @@ from mailbrief.text.prepare import truncate_at_boundary
 
 # Batch size limit for bulk SQLite inserts to safeguard parameter limits
 MAX_SQLITE_BATCH_SIZE = 100
-# DigestItem.summary max_length; previews (up to 255 characters in Outlook) can exceed it.
-_SUMMARY_LIMIT = 240
 _NO_SUMMARY = "No summary available"
 
 
@@ -529,7 +532,8 @@ def _fallback_summary(preview: str, subject: str) -> str:
     """Summarize an unanalyzed item from its preview, else its subject, within the item limit."""
     for text in (preview.strip(), subject.strip()):
         if text:
-            return truncate_at_boundary(text, _SUMMARY_LIMIT)[0]
+            # Previews (up to 255 characters in Outlook) can exceed the summary limit.
+            return truncate_at_boundary(text, SUMMARY_MAX_CHARS)[0]
     return _NO_SUMMARY
 
 

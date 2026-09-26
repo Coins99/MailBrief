@@ -57,11 +57,11 @@ class AnalysisRequest(DomainModel):
     model_config = ConfigDict(hide_input_in_errors=True)
 
     message_key: str = Field(min_length=1, max_length=64)
-    subject: str = Field(default="", max_length=998)
+    subject: str = Field(default="", max_length=998, repr=False)
     sender: EmailContact
     received_at_utc: datetime
     timezone_name: str = Field(min_length=1, max_length=128)
-    body_text: str = Field(min_length=1, max_length=MAX_ANALYSIS_CHARS)
+    body_text: str = Field(min_length=1, max_length=MAX_ANALYSIS_CHARS, repr=False)
     body_truncated: bool = False
 
     @field_validator("received_at_utc")
@@ -78,22 +78,23 @@ class AnalysisRequest(DomainModel):
 class AnalysisCandidate(DomainModel):
     """Untrusted provider output for one request, before the analysis service validates it.
 
-    Fields are typed but unbounded, and every field is required.
+    Fields are typed but unbounded, and every field is required. Text fields stay out of
+    the repr because they paraphrase or quote the email.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
 
     message_key: str
     category: AnalysisCategory
-    summary: str
+    summary: str = Field(repr=False)
     action_required: bool
-    action_text: str | None
-    deadline_text: str | None
+    action_text: str | None = Field(repr=False)
+    deadline_text: str | None = Field(repr=False)
     deadline_date: str | None  # "YYYY-MM-DD" as returned.
     deadline_time: str | None  # "HH:MM" as returned.
     stated_timezone: str | None  # A zone the email itself states.
     confidence: float
-    evidence: str
+    evidence: str = Field(repr=False)
 
 
 class AnalysisProblem(StrEnum):
@@ -134,18 +135,20 @@ class MessageAnalysis(DomainModel):
 
     message_key: str = Field(min_length=1, max_length=64)
     category: AnalysisCategory
-    summary: str = Field(min_length=1, max_length=SUMMARY_MAX_CHARS)
+    summary: str = Field(min_length=1, max_length=SUMMARY_MAX_CHARS, repr=False)
     action_required: bool
-    action_text: str | None = Field(default=None, min_length=1, max_length=ACTION_TEXT_MAX_CHARS)
+    action_text: str | None = Field(
+        default=None, min_length=1, max_length=ACTION_TEXT_MAX_CHARS, repr=False
+    )
     deadline_text: str | None = Field(
-        default=None, min_length=1, max_length=DEADLINE_TEXT_MAX_CHARS
+        default=None, min_length=1, max_length=DEADLINE_TEXT_MAX_CHARS, repr=False
     )
     deadline_precision: DeadlinePrecision = DeadlinePrecision.NONE
     deadline_date: date | None = None
     deadline_at_utc: datetime | None = None
     deadline_timezone: str | None = None  # The zone used to resolve the date or instant.
     confidence: float = Field(ge=0, le=1)
-    evidence: str = Field(min_length=1, max_length=EVIDENCE_MAX_CHARS)
+    evidence: str = Field(min_length=1, max_length=EVIDENCE_MAX_CHARS, repr=False)
 
     @field_validator("deadline_at_utc")
     @classmethod

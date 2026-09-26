@@ -9,13 +9,14 @@ import json
 import logging
 import secrets
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.analysis import (
     ACTION_TEXT_MAX_CHARS,
     ANALYSIS_SCHEMA_VERSION,
+    MAX_ANALYSIS_BATCH,
     SUMMARY_MAX_CHARS,
     AIUsage,
     AnalysisCandidate,
@@ -46,7 +47,6 @@ from mailbrief.text.prepare import truncate_at_boundary
 
 logger = logging.getLogger(__name__)
 
-MAX_BATCH_SIZE = 10
 _KEY_ATTEMPTS = 64
 _QUOTES = "\"'‘’“”"
 _ELLIPSES = ("...", "…")
@@ -135,12 +135,13 @@ def emit_progress(
 class PlannedMessage:
     """One shortlisted message and what happened to it in this run."""
 
-    ranked: RankedMessage
+    # The message, request and analysis carry email text, so they stay out of the repr.
+    ranked: RankedMessage = field(repr=False)
     message_row_id: int | None
-    request: AnalysisRequest | None
+    request: AnalysisRequest | None = field(repr=False)
     input_hash: str | None
     outcome: AnalysisOutcome | None = None
-    analysis: MessageAnalysis | None = None
+    analysis: MessageAnalysis | None = field(default=None, repr=False)
     analysis_row_id: int | None = None
 
 
@@ -246,7 +247,7 @@ class AnalysisService:
         batch_size: int = 5,
         key_factory: Callable[[], str] = _random_key,
     ) -> None:
-        if not 1 <= batch_size <= MAX_BATCH_SIZE:
+        if not 1 <= batch_size <= MAX_ANALYSIS_BATCH:
             raise ValueError("batch_size must be between 1 and 10")
         self._session = session
         self._provider = provider

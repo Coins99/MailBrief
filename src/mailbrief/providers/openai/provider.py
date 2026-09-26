@@ -20,6 +20,7 @@ from openai.types.responses import ParsedResponse
 from pydantic import BaseModel, ConfigDict
 
 from mailbrief.domain.analysis import (
+    MAX_ANALYSIS_BATCH,
     AIUsage,
     AnalysisCandidate,
     AnalysisProblem,
@@ -40,8 +41,8 @@ from mailbrief.ports.errors import (
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_NAME = "openai"
 PROMPT_VERSION = "2026-09-26.1"
-MAX_REQUESTS_PER_CALL = 10
 MAX_RETRIES = 3
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 MAX_RETRY_DELAY_SECONDS = 30.0
@@ -265,7 +266,7 @@ class OpenAIProvider:
 
     @property
     def provider_name(self) -> str:
-        return "openai"
+        return PROVIDER_NAME
 
     @property
     def model_name(self) -> str:
@@ -278,7 +279,7 @@ class OpenAIProvider:
     async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
         """One logical Responses call for 1-10 requests, retrying transient failures."""
         keys = [request.message_key for request in requests]
-        if not 1 <= len(keys) <= MAX_REQUESTS_PER_CALL or len(set(keys)) != len(keys):
+        if not 1 <= len(keys) <= MAX_ANALYSIS_BATCH or len(set(keys)) != len(keys):
             raise ValueError("an OpenAI call needs 1 to 10 requests with unique message keys")
         request_id = str(uuid.uuid4())
         payload = _request_input(requests)

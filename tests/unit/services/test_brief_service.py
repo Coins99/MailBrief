@@ -362,7 +362,7 @@ def test_disclosure_lines_cover_counts_truncation_fields_and_storage() -> None:
 
     text = "\n".join(disclosure_lines(preview))
 
-    assert "send 3 messages to openai (model-1)" in text
+    assert "send 3 messages to OpenAI (model-1)" in text
     assert "1 message is cut" in text
     assert all(sent_field in text for sent_field in SENT_FIELDS)
     assert "attachments, recipients, message IDs, links, account IDs or credentials" in text
@@ -383,7 +383,7 @@ def test_disclosure_lines_for_a_returning_user_without_truncation() -> None:
 
     text = "\n".join(disclosure_lines(preview))
 
-    assert "send 1 message to openai" in text
+    assert "send 1 message to OpenAI" in text
     assert "No message is cut" in text
     assert "remembered" not in text
     assert "already analyzed" not in text

@@ -157,6 +157,16 @@ def test_digest_item_deadline_details_default_to_none() -> None:
     assert item.evidence is None
 
 
+def test_digest_item_repr_leaves_out_email_text() -> None:
+    item = make_digest_item(deadline_text="by Friday", evidence="Please approve the proposal")
+
+    text = repr(item)
+
+    for private in ("Approval needed", "Approve the proposal", "by Friday", "Please approve"):
+        assert private not in text
+    assert "local-1" in text
+
+
 def test_digest_with_coverage_round_trips_as_json() -> None:
     digest = DailyDigest(
         account_id="account-1",

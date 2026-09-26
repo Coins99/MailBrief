@@ -27,6 +27,7 @@ from mailbrief.storage.repositories import ConsentRepository
 logger = logging.getLogger(__name__)
 
 CONSENT_DISCLOSURE_VERSION: Final = "1"
+_DISPLAY_NAMES: Final = {"openai": "OpenAI"}
 
 
 class ConsentGate(Protocol):
@@ -39,9 +40,14 @@ def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
+def provider_display_name(name: str) -> str:
+    """The provider's name as people write it; unknown names pass through unchanged."""
+    return _DISPLAY_NAMES.get(name, name)
+
+
 def disclosure_lines(preview: TransmissionPreview) -> tuple[str, ...]:
     """Plain sentences describing what will be sent, shared by the CLI and the UI."""
-    provider = preview.provider_name
+    provider = provider_display_name(preview.provider_name)
     cut = preview.truncated_count
     lines = [
         f"MailBrief will send {_count(preview.message_count, 'message')} to {provider} "
