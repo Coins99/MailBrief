@@ -161,6 +161,22 @@ def test_a_datetime_deadline_is_overdue_from_its_instant() -> None:
     assert action.is_overdue(instant)
 
 
+def test_a_late_evening_deadline_is_overdue_from_its_local_minute_not_its_utc_day() -> None:
+    """23:30 on Friday in Toronto is 03:30 on Saturday in UTC."""
+    deadline = datetime(2026, 9, 4, 23, 30, tzinfo=TORONTO)
+    action = make_action(
+        deadline_text="Friday 11:30 PM",
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_date=FRIDAY,
+        deadline_at_utc=deadline.astimezone(UTC),
+        deadline_timezone="America/Toronto",
+    )
+
+    assert action.due_at_utc() == datetime(2026, 9, 5, 3, 30, tzinfo=UTC)
+    assert not action.is_overdue(datetime(2026, 9, 4, 23, 29, tzinfo=TORONTO).astimezone(UTC))
+    assert action.is_overdue(deadline.astimezone(UTC))
+
+
 @pytest.mark.parametrize(
     "deadline",
     [{}, {"deadline_text": "ASAP", "deadline_precision": DeadlinePrecision.UNRESOLVED}],
@@ -222,6 +238,19 @@ def test_an_action_created_later_the_same_day_is_not_carried_over() -> None:
 
     assert not action.carried_over(date(2026, 8, 31), TORONTO)
     assert action.carried_over(date(2026, 9, 1), TORONTO)
+
+
+def test_carried_over_flips_exactly_at_local_midnight_on_the_fall_back_day() -> None:
+    """1 November 2026 starts at 04:00 UTC, in daylight time; clocks fall back at 02:00."""
+    midnight = datetime(2026, 11, 1, 4, 0, tzinfo=UTC)
+    fall_back_day = date(2026, 11, 1)
+
+    def created(at: datetime) -> Action:
+        return make_action(created_at_utc=at, updated_at_utc=at)
+
+    assert midnight.astimezone(TORONTO).replace(tzinfo=None) == datetime(2026, 11, 1)
+    assert created(midnight - timedelta(microseconds=1)).carried_over(fall_back_day, TORONTO)
+    assert not created(midnight).carried_over(fall_back_day, TORONTO)
 
 
 @pytest.mark.parametrize(

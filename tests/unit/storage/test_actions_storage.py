@@ -7,17 +7,24 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, event, insert, update
+from sqlalchemy import delete, event, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.actions import SuggestionState
 from mailbrief.domain.analysis import ActionSuggestion
-from mailbrief.domain.messages import AccountIdentity, ProviderKind
+from mailbrief.domain.messages import AccountIdentity, EmailContact, ProviderKind
 from mailbrief.storage import actions as storage_actions
-from mailbrief.storage.actions import suggestion_views
+from mailbrief.storage.actions import ActionRepository, suggestion_views
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
-from mailbrief.storage.tables import ActionSuggestionTable, ActionTable, SuggestionDecisionTable
+from mailbrief.storage.tables import (
+    ActionSourceTable,
+    ActionStepTable,
+    ActionSuggestionTable,
+    ActionTable,
+    MessageTable,
+    SuggestionDecisionTable,
+)
 from tests.factories import fingerprint_of, make_analysis, make_message, make_suggestion
 
 NOW = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
@@ -311,3 +318,116 @@ async def test_large_requests_are_chunked(
     assert states(views[message_id]) == EVERY_STATE
     for other in others:
         assert states(views[other]) == [("A", SuggestionState.ACCEPTED, f"{other:036d}")]
+
+
+async def test_loading_many_actions_takes_one_query_for_steps_and_one_for_sources(
+    database: Database, selects: list[str]
+) -> None:
+    async with database.session() as session:
+        (message_id,) = await messages(session, 1)
+        message = await session.get(MessageTable, message_id)
+        assert message is not None
+        public_ids = (LIVE_ID, SOFT_DELETED_ID, HARD_DELETED_ID)
+        rows = [await session.get(ActionTable, await action(session, key)) for key in public_ids]
+        repository = ActionRepository(session)
+        for row in rows:
+            assert row is not None
+            for position in range(3):
+                session.add(
+                    ActionStepTable(
+                        action_id=row.id, position=position, text=f"Step {position}", done=False
+                    )
+                )
+            assert await repository.add_source(row.id, message)
+            assert not await repository.add_source(row.id, message)  # Already linked.
+        await session.commit()
+        selects.clear()
+
+        loaded = await repository.load([row for row in rows if row is not None])
+
+    assert len(selects) == 2
+    assert [len(item.steps) for item in loaded] == [3, 3, 3]
+    assert [[source.available for source in item.sources] for item in loaded] == [[True]] * 3
+
+
+async def test_pending_cannot_be_saved_as_a_decision(database: Database) -> None:
+    async with database.session() as session:
+        (message_id,) = await messages(session, 1)
+
+        with pytest.raises(ValueError, match="absence of a decision"):
+            await ActionRepository(session).save_decision(
+                message_id=message_id,
+                fingerprint=fingerprint_of("A"),
+                decision=SuggestionState.PENDING,
+                action_id=None,
+                decided_at_utc=NOW,
+            )
+        stored = await session.scalar(select(func.count()).select_from(SuggestionDecisionTable))
+
+    assert stored == 0
+
+
+async def test_deleting_a_decision_that_was_never_stored_changes_nothing(
+    database: Database,
+) -> None:
+    async with database.session() as session:
+        message_id, analysis_id = await seed_every_state(session)
+        repository = ActionRepository(session)
+
+        await repository.delete_decision(message_id, fingerprint_of("A"))  # A is pending.
+        await repository.delete_decision(message_id + 1, fingerprint_of("B"))  # No such message.
+        await session.commit()
+
+        views = await suggestion_views(session, [(message_id, analysis_id)])
+        stored = await session.scalar(select(func.count()).select_from(SuggestionDecisionTable))
+
+    assert states(views[message_id]) == EVERY_STATE
+    assert stored == 4
+
+
+async def test_a_source_copies_the_message_row_exactly(database: Database) -> None:
+    received = datetime(2026, 9, 26, 23, 59, 59, 999_999, tzinfo=UTC)
+    async with database.session() as session:
+        account = await AccountRepository(session).upsert(
+            AccountIdentity(
+                provider=ProviderKind.GMAIL, provider_account_id="gmail-1", email_address="me@x.com"
+            )
+        )
+        (message,) = await MessageRepository(session).upsert_messages(
+            account.id,
+            [
+                make_message(
+                    provider_message_id="msg-snapshot",
+                    subject="  Re: Budget — ✅ “final” 🚀  ",
+                    sender=EmailContact(name="Ana", address="Ana.Ops+q3@Example.COM"),
+                    received_at_utc=received,
+                    web_link="https://mail.google.com/mail/u/?authuser=me%40x.com#all/msg-snapshot",
+                )
+            ],
+        )
+        action_id = await action(session, LIVE_ID)
+        assert await ActionRepository(session).add_source(action_id, message)
+        await session.commit()
+        session.expunge_all()  # Compare what was written, not the objects in memory.
+
+        stored = await session.get(MessageTable, message.id)
+        source = await session.scalar(select(ActionSourceTable))
+
+    assert stored is not None
+    assert source is not None
+    assert (
+        source.message_id,
+        source.provider_message_id,
+        source.subject,
+        source.sender_address,
+        source.web_link,
+        source.received_at_utc,
+    ) == (
+        stored.id,
+        stored.provider_message_id,
+        stored.subject,
+        stored.sender_address,
+        stored.web_link,
+        stored.received_at_utc,
+    )
+    assert source.received_at_utc == received
