@@ -41,7 +41,7 @@ from mailbrief.ports.errors import (
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "groq-2026-09-26.1"
+PROMPT_VERSION = "groq-2026-09-27.1"
 CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 PROVIDER_NAME = "groq"
 MAX_RETRIES = 3
@@ -84,13 +84,39 @@ INSTRUCTIONS = (
     '"UTC+2" or "America/Chicago"); null if the email states none.\n'
     "- confidence: 0 to 1.\n"
     "- evidence: one short passage copied exactly from the subject or body that supports the "
-    "result, at most 300 characters, without ellipses."
+    "result, at most 300 characters, without ellipses.\n"
+    "- actions: every separate thing the email asks the recipient to do, and anything the "
+    "recipient is waiting for someone else to deliver; at most 5; an empty list when there are "
+    "none. For each action: title, a short imperative phrase of at most 120 characters in the "
+    "email's language; "
+    'ownership, "mine" if the recipient must do it or "waiting_for" if someone else said they '
+    'will; effort, "minutes", "hours" or "days", or null if unclear; deadline_text, '
+    "deadline_date, deadline_time and stated_timezone, as above but for this action only; "
+    "steps, up to 5 short preparation steps in your own words of at most 120 characters each, "
+    "or an empty list for a simple action; evidence, one short passage copied exactly from the "
+    "subject or body that supports this action, at most 160 characters, without ellipses."
 )
 
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _ERROR_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 # Statuses that reject this particular request; other requests may still succeed.
 _REJECTED_STATUSES = frozenset({400, 413, 422})
+
+
+class ActionWireResult(BaseModel):
+    """One suggested action as Groq returns it; strict mode forbids defaults and constraints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    ownership: Literal["mine", "waiting_for"]
+    effort: Literal["minutes", "hours", "days"] | None
+    deadline_text: str | None
+    deadline_date: str | None
+    deadline_time: str | None
+    stated_timezone: str | None
+    steps: list[str]
+    evidence: str
 
 
 class AnalysisWireResult(BaseModel):
@@ -109,6 +135,7 @@ class AnalysisWireResult(BaseModel):
     stated_timezone: str | None
     confidence: float
     evidence: str
+    actions: list[ActionWireResult]  # Python enforces the limits, not the schema.
 
 
 class AnalysisWireBatch(BaseModel):

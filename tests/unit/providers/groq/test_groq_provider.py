@@ -14,7 +14,14 @@ import pytest
 import respx
 
 from mailbrief.config import Settings
-from mailbrief.domain.analysis import AIUsage, AnalysisProblem, AnalysisRequest
+from mailbrief.domain.analysis import (
+    ActionCandidate,
+    ActionEffort,
+    ActionOwnership,
+    AIUsage,
+    AnalysisProblem,
+    AnalysisRequest,
+)
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ports.errors import (
     AIAuthenticationError,
@@ -49,6 +56,7 @@ from tests.unit.providers.groq.groq_fixtures import (
     results_body,
     sent_messages,
     usage,
+    wire_action,
     wire_result,
 )
 
@@ -56,8 +64,8 @@ BODY = "Please approve the quarterly budget by Friday 5 PM."
 MARKER = "GROQ-ERROR-MARKER-5d2e"
 REQUEST_KEYS = {"model", "messages", "response_format", "max_completion_tokens"}
 PINNED_PROMPT = (
-    "groq-2026-09-26.1",
-    "0454a48e855e876090802d43f7e8f919cf7f029916323748cff486f79d5a2b58",
+    "groq-2026-09-27.1",
+    "dcb4f920ac7c811790f6ec9f3e0573c0ce8f38face4c6a0672e766573e585a10",
 )
 STEP_5_3_KEYS = {
     "message_key",
@@ -135,7 +143,7 @@ async def test_the_request_is_strict_and_minimized(
     text_format = body["response_format"]["json_schema"]
     assert text_format["strict"] is True
     levels = object_schemas(text_format["schema"])
-    assert len(levels) == 2
+    assert len(levels) == 3  # The batch, each result and each suggested action.
     for level in levels:
         assert level["additionalProperties"] is False
         assert sorted(level["required"]) == sorted(level["properties"])
@@ -168,6 +176,87 @@ def test_the_prompt_version_changes_with_the_prompt_or_schema() -> None:
     assert (PROMPT_VERSION, fingerprint) == PINNED_PROMPT, (
         "prompt or schema changed: bump PROMPT_VERSION and this hash"
     )
+
+
+def test_actions_are_a_required_array_of_strict_objects_without_limits() -> None:
+    schema = AnalysisWireBatch.model_json_schema()
+    result = schema["$defs"]["AnalysisWireResult"]
+    action = schema["$defs"]["ActionWireResult"]
+
+    assert "actions" in result["required"]
+    assert result["properties"]["actions"]["type"] == "array"
+    assert result["properties"]["actions"]["items"] == {"$ref": "#/$defs/ActionWireResult"}
+    assert action["additionalProperties"] is False
+    assert sorted(action["required"]) == sorted(action["properties"])
+    assert not any("default" in field for field in action["properties"].values())
+    assert action["properties"]["steps"]["items"] == {"type": "string"}
+    limits = r'"(maxItems|minItems|maxLength|minLength|pattern|maximum|minimum)"'
+    assert re.search(limits, json.dumps(schema)) is None
+    assert INSTRUCTIONS.split("\n")[-1].startswith("- actions: every separate thing")
+
+
+async def test_suggested_actions_become_action_candidates(
+    respx_mock: respx.MockRouter, provider: GroqProvider
+) -> None:
+    actions = [
+        wire_action(
+            "approve the quarterly budget",
+            effort="minutes",
+            deadline_text="Friday 5 PM",
+            deadline_date="2026-09-04",
+            deadline_time="17:00",
+            steps=["Read the numbers", "Reply to Alex"],
+        ),
+        wire_action("the quarterly budget", title="Budget from finance", ownership="waiting_for"),
+    ]
+    respx_mock.post(CHAT_URL).respond(
+        json=results_body([wire_result("0000abcd", BODY[:40], actions=actions)])
+    )
+
+    response = await provider.analyze([make_request()])
+
+    (candidate,) = response.candidates
+    first, second = candidate.actions
+    assert isinstance(first, ActionCandidate)
+    assert (first.title, first.ownership, first.effort, first.deadline_date) == (
+        "Approve the budget",
+        ActionOwnership.MINE,
+        ActionEffort.MINUTES,
+        "2026-09-04",
+    )
+    assert first.steps == ("Read the numbers", "Reply to Alex")
+    assert (second.title, second.ownership, second.effort, second.steps) == (
+        "Budget from finance",
+        ActionOwnership.WAITING_FOR,
+        None,
+        (),
+    )
+
+
+def without(values: dict[str, Any], key: str) -> dict[str, Any]:
+    return {name: value for name, value in values.items() if name != key}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        without(wire_result("0000abcd", BODY[:40]), "actions"),
+        wire_result("0000abcd", BODY[:40], actions=[without(wire_action(BODY[:20]), "steps")]),
+        wire_result("0000abcd", BODY[:40], actions=[{**wire_action(BODY[:20]), "extra": 1}]),
+        wire_result("0000abcd", BODY[:40], actions=[wire_action(BODY[:20], ownership="theirs")]),
+        wire_result("0000abcd", BODY[:40], actions=[wire_action(BODY[:20], effort="weeks")]),
+    ],
+    ids=["no-actions", "action-without-steps", "extra-key", "bad-ownership", "bad-effort"],
+)
+async def test_a_result_that_breaks_the_action_schema_is_invalid_output(
+    respx_mock: respx.MockRouter, provider: GroqProvider, result: dict[str, Any]
+) -> None:
+    respx_mock.post(CHAT_URL).respond(json=results_body([result]))
+
+    response = await provider.analyze([make_request()])
+
+    assert response.problem is AnalysisProblem.INVALID_OUTPUT
+    assert response.candidates == ()
 
 
 async def test_a_valid_answer_becomes_candidates_with_usage(
