@@ -6,6 +6,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from mailbrief.storage.database import sqlite_url
 from mailbrief.storage.migrate import upgrade_database
@@ -124,4 +125,113 @@ def test_account_addresses_migration_tolerates_existing_column(tmp_path: Path) -
     assert "account_addresses" in _account_columns(path)
     with closing(sqlite3.connect(path)) as connection:
         version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert version == ("20260925_0003",)
+    assert version == (ScriptDirectory.from_config(_alembic_config(path)).get_current_head(),)
+
+
+_ANALYSIS_COLUMNS = (
+    "id,message_id,input_hash,provider,model,prompt_version,schema_version,category,summary,"
+    "action_required,action_text,deadline_text,deadline_at_utc,confidence,evidence,analyzed_at_utc"
+)
+
+
+def _analyses_sql(path: Path) -> str:
+    with closing(sqlite3.connect(path)) as connection:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'analyses'"
+        ).fetchone()
+    return str(row[0])
+
+
+def test_analysis_rebuild_keeps_rows_references_constraints_and_index(tmp_path: Path) -> None:
+    path = tmp_path / "m3.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0003")
+    with closing(sqlite3.connect(path)) as connection:
+        account_id = connection.execute(
+            "INSERT INTO accounts(provider,provider_account_id,email_address,created_at_utc) "
+            "VALUES('gmail','account-1','me@example.com','2026-09-25 00:00:00')"
+        ).lastrowid
+        message_id = connection.execute(
+            "INSERT INTO messages(account_id,provider_message_id,subject,sender_address,"
+            "to_recipients_json,received_at_utc,is_read,importance,has_attachments,body_preview,"
+            "web_link,rank_reasons_json,synced_at_utc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                account_id,
+                "message-1",
+                "Subject",
+                "sender@example.com",
+                "[]",
+                "2026-09-25 00:00:00",
+                0,
+                "normal",
+                0,
+                "",
+                "https://example.com",
+                "[]",
+                "2026-09-25 00:00:00",
+            ),
+        ).lastrowid
+        connection.execute(
+            f"INSERT INTO analyses({_ANALYSIS_COLUMNS}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                7,
+                message_id,
+                "hash-1",
+                "openai",
+                "model-1",
+                "prompt-1",
+                "1",
+                "action",
+                "Approve the proposal.",
+                1,
+                "Approve it.",
+                "Friday",
+                "2026-09-04 21:00:00.000000",
+                0.75,
+                "Please approve it by Friday.",
+                "2026-09-25 00:00:00.000000",
+            ),
+        )
+        digest_id = connection.execute(
+            "INSERT INTO digests(account_id,local_date,timezone_name,status,generated_at_utc) "
+            "VALUES(?,'2026-09-25','America/Toronto','complete','2026-09-25 00:00:00')",
+            (account_id,),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO digest_items(digest_id,message_id,analysis_id,position,section) "
+            "VALUES(?,?,7,0,'actions')",
+            (digest_id, message_id),
+        )
+        connection.commit()
+        before = connection.execute(f"SELECT {_ANALYSIS_COLUMNS} FROM analyses").fetchall()
+
+    upgrade_database(path)
+
+    with closing(sqlite3.connect(path)) as connection:
+        after = connection.execute(f"SELECT {_ANALYSIS_COLUMNS} FROM analyses").fetchall()
+        precision = connection.execute("SELECT deadline_precision FROM analyses").fetchall()
+        references = connection.execute("SELECT analysis_id FROM digest_items").fetchall()
+        indexes = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'analyses'"
+            )
+        }
+    table_sql = _analyses_sql(path)
+    assert after == before
+    assert precision == [("none",)]
+    assert references == [(7,)]
+    assert "ck_analyses_confidence_range CHECK (confidence >= 0 AND confidence <= 1)" in table_sql
+    assert "ck_analyses_deadline_precision_known CHECK" in table_sql
+    assert "uq_analyses_cache_identity UNIQUE" in table_sql
+    assert "uq_analyses_cache_key" not in table_sql
+    assert "REFERENCES messages (id) ON DELETE CASCADE" in table_sql
+    assert "ix_analyses_message_id" in indexes
+
+    command.downgrade(config, "20260925_0003")
+    downgraded_sql = _analyses_sql(path)
+    assert "uq_analyses_cache_key UNIQUE" in downgraded_sql
+    assert "deadline_precision" not in downgraded_sql
+
+    command.upgrade(config, "head")
+    assert "uq_analyses_cache_identity UNIQUE" in _analyses_sql(path)

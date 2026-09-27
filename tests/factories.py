@@ -2,7 +2,7 @@
 
 from datetime import UTC, date, datetime
 
-from mailbrief.domain.analysis import AnalysisCategory, MessageAnalysis
+from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
 from mailbrief.domain.digests import DigestItem, DigestSection
 from mailbrief.domain.messages import (
     EmailContact,
@@ -35,14 +35,17 @@ def make_message(**overrides: object) -> NormalizedMessage:
 
 
 def make_analysis(**overrides: object) -> MessageAnalysis:
-    """Build a valid structured analysis with optional overrides."""
+    """Build a valid structured analysis with a consistent exact deadline by default."""
     values: dict[str, object] = {
         "message_key": "local-1",
         "category": AnalysisCategory.ACTION,
         "summary": "Approve the proposal.",
         "action_required": True,
         "action_text": "Approve the proposal by Friday.",
-        "deadline_text": "Friday",
+        "deadline_text": "Friday 5 PM",
+        "deadline_precision": DeadlinePrecision.DATETIME,
+        "deadline_date": date(2026, 9, 4),
+        "deadline_timezone": "America/Toronto",
         "deadline_at_utc": datetime(2026, 9, 4, 21, 0, tzinfo=UTC),
         "confidence": 0.9,
         "evidence": "Please approve the attached proposal by Friday.",

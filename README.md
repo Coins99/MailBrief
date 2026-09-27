@@ -13,10 +13,11 @@ later use after Microsoft Entra access is resolved.
   diagnostic. The owner verified sign-in, restoration, disconnect and reconnect.
 - Implemented for M2: Gmail Inbox metadata, pagination, safe reconciliation,
   local ranking and a metadata sync/review diagnostic.
-- In progress for M3: shortlisted body reading and preparation, awaiting live
-  acceptance ([Gmail bodies](docs/gmail-bodies.md)).
-- Next: AI analysis (M4), once M3 is accepted.
-- Pending: digest assembly, desktop workflow, and packaging.
+- Implemented for M3, live acceptance recorded in [M3 validation](docs/m3-validation.md):
+  shortlisted body reading and preparation ([Gmail bodies](docs/gmail-bodies.md)).
+- Implemented for M4, awaiting live acceptance: consented Groq analysis and the saved
+  daily brief ([AI analysis](docs/ai-analysis.md)).
+- Next: the desktop workflow and Windows and macOS packages (M5).
 
 ## Start here
 
@@ -27,6 +28,7 @@ later use after Microsoft Entra access is resolved.
 - [Gmail setup and authentication diagnostic](docs/gmail-setup.md)
 - [Gmail metadata synchronization and shortlist review](docs/gmail-metadata.md)
 - [Gmail bodies (M3) and live acceptance](docs/gmail-bodies.md)
+- [AI analysis, consent and the daily brief (M4)](docs/ai-analysis.md)
 - [File change map](docs/change-map.md)
 - [Microsoft work retained for later](docs/microsoft-setup.md)
 

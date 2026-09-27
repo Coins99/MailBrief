@@ -5,10 +5,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
-from mailbrief.domain.analysis import AnalysisCategory, MessageAnalysis
-from mailbrief.domain.digests import DigestSection, DigestStatus, SyncStatus
+from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
+from mailbrief.domain.digests import DigestCoverage, DigestSection, DigestStatus, SyncStatus
 from mailbrief.domain.messages import (
     AccountIdentity,
     MessageImportance,
@@ -20,11 +20,12 @@ from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
     AccountRepository,
     AnalysisRepository,
+    ConsentRepository,
     DigestRepository,
     MessageRepository,
     SyncRunRepository,
 )
-from mailbrief.storage.tables import MessageTable
+from mailbrief.storage.tables import AnalysisTable, MessageTable
 from tests.factories import make_analysis, make_message
 
 
@@ -298,8 +299,10 @@ async def test_analysis_repository_caching_and_queries(database: Database) -> No
         cached = await repo.get_cached_analysis(
             message_id=msg_id,
             input_hash="hash-123456",
+            provider="openai",
             model="gpt-4o-mini",
             prompt_version="v1",
+            schema_version="v1",
         )
         assert cached is not None
         assert cached.summary == "Submit quarterly budget report"
@@ -308,8 +311,10 @@ async def test_analysis_repository_caching_and_queries(database: Database) -> No
         miss = await repo.get_cached_analysis(
             message_id=msg_id,
             input_hash="different-hash",
+            provider="openai",
             model="gpt-4o-mini",
             prompt_version="v1",
+            schema_version="v1",
         )
         assert miss is None
 
@@ -492,3 +497,343 @@ async def test_sync_run_repository_lifecycle(database: Database) -> None:
         assert latest.id == sync_run_id
         assert latest.status == "complete"
         assert await repo.get_by_id(sync_run_id) is not None
+
+
+async def _account_and_messages(database: Database, *message_ids: str) -> tuple[int, list[int]]:
+    async with database.transaction() as session:
+        account = await AccountRepository(session).upsert(
+            AccountIdentity(
+                provider=ProviderKind.MICROSOFT,
+                provider_account_id="ms-1",
+                email_address="a@example.com",
+            )
+        )
+        messages = await MessageRepository(session).upsert_messages(
+            account.id,
+            [make_message(provider_message_id=message_id) for message_id in message_ids],
+        )
+        return account.id, [message.id for message in messages]
+
+
+@pytest.mark.asyncio
+async def test_analysis_cache_identity_separates_provider_and_schema(database: Database) -> None:
+    _, (message_id,) = await _account_and_messages(database, "msg-1")
+    identities = [("openai", "2"), ("other-ai", "2"), ("openai", "3")]
+
+    async with database.transaction() as session:
+        repo = AnalysisRepository(session)
+        for provider, schema_version in identities:
+            await repo.upsert_analysis(
+                message_id=message_id,
+                input_hash="hash-1",
+                provider=provider,
+                model="model-1",
+                prompt_version="prompt-1",
+                schema_version=schema_version,
+                analysis=make_analysis(summary=f"{provider} {schema_version}"),
+            )
+
+    async with database.transaction() as session:
+        await AnalysisRepository(session).upsert_analysis(
+            message_id=message_id,
+            input_hash="hash-1",
+            provider="openai",
+            model="model-1",
+            prompt_version="prompt-1",
+            schema_version="2",
+            analysis=make_analysis(
+                summary="updated",
+                deadline_text="ASAP",
+                deadline_precision=DeadlinePrecision.UNRESOLVED,
+                deadline_date=None,
+                deadline_at_utc=None,
+                deadline_timezone=None,
+            ),
+        )
+
+    async with database.session() as session:
+        repo = AnalysisRepository(session)
+        assert len(await repo.get_by_message_id(message_id)) == 3
+        found: dict[tuple[str, str], MessageAnalysis] = {}
+        for provider, schema_version in identities:
+            row = await repo.get_cached_analysis(
+                message_id=message_id,
+                input_hash="hash-1",
+                provider=provider,
+                model="model-1",
+                prompt_version="prompt-1",
+                schema_version=schema_version,
+            )
+            assert row is not None
+            found[(provider, schema_version)] = AnalysisRepository.to_domain(row, "local-1")
+        missing = await repo.get_cached_analysis(
+            message_id=message_id,
+            input_hash="hash-1",
+            provider="openai",
+            model="model-1",
+            prompt_version="prompt-1",
+            schema_version="1",
+        )
+
+    assert missing is None
+    assert found[("other-ai", "2")].summary == "other-ai 2"
+    assert found[("openai", "3")].summary == "openai 3"
+    exact = found[("openai", "3")]
+    assert exact.deadline_precision is DeadlinePrecision.DATETIME
+    assert exact.deadline_date == date(2026, 9, 4)
+    assert exact.deadline_timezone == "America/Toronto"
+    updated = found[("openai", "2")]
+    assert updated.summary == "updated"
+    assert updated.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert updated.deadline_date is None
+    assert updated.deadline_timezone is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_deadline_rows_still_show_their_deadline(database: Database) -> None:
+    account_id, message_ids = await _account_and_messages(database, "msg-1", "msg-2", "msg-3")
+    due = datetime(2026, 9, 4, 21, 0, tzinfo=UTC)
+    # Shape rows as migration 0004 left rows saved before it: precision "none", and a
+    # phrase and instant each kept or not.
+    legacy = {"deadline_precision": "none", "deadline_date": None, "deadline_timezone": None}
+    shapes = [legacy, {**legacy, "deadline_text": None}, {**legacy, "deadline_at_utc": None}]
+
+    async with database.transaction() as session:
+        analyses = AnalysisRepository(session)
+        rows = [
+            await analyses.upsert_analysis(
+                message_id=message_id,
+                input_hash=f"hash-{message_id}",
+                provider="openai",
+                model="model-1",
+                prompt_version="prompt-1",
+                schema_version="1",
+                analysis=make_analysis(),
+            )
+            for message_id in message_ids
+        ]
+        for analysis_row, shape in zip(rows, shapes, strict=True):
+            await session.execute(
+                update(AnalysisTable).where(AnalysisTable.id == analysis_row.id).values(**shape)
+            )
+        digest = await DigestRepository(session).save_digest(
+            account_id=account_id,
+            local_date=date(2026, 9, 4),
+            timezone_name="America/Toronto",
+            status=DigestStatus.COMPLETE,
+            items=[
+                (message_id, analysis_row.id, position, DigestSection.ACTIONS)
+                for position, (message_id, analysis_row) in enumerate(
+                    zip(message_ids, rows, strict=True)
+                )
+            ],
+        )
+        digest_id = digest.id
+
+    async with database.session() as session:
+        repo = DigestRepository(session)
+        row = await repo.get_by_id(digest_id)
+        assert row is not None
+        items = await repo.get_digest_items(digest_id)
+        restored = DigestRepository.to_domain(row, items, "ms-1")
+        stored = [analysis for _, _, analysis in items if analysis is not None]
+        loaded = [AnalysisRepository.to_domain(item, message_key="local-1") for item in stored]
+
+    both, instant_only, phrase_only = restored.items
+    assert both.deadline_precision is DeadlinePrecision.DATETIME  # The instant wins...
+    assert (both.deadline_at_utc, both.deadline_text) == (due, "Friday 5 PM")  # ...with its phrase.
+    assert instant_only.deadline_precision is DeadlinePrecision.DATETIME
+    assert (instant_only.deadline_at_utc, instant_only.deadline_text) == (due, None)
+    assert phrase_only.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert (phrase_only.deadline_at_utc, phrase_only.deadline_text) == (None, "Friday 5 PM")
+    # Validated analyses need a zone for an instant, so a legacy phrase stays unresolved there.
+    loaded_both, loaded_instant, loaded_phrase = loaded
+    assert loaded_both.deadline_precision is DeadlinePrecision.UNRESOLVED
+    assert (loaded_both.deadline_text, loaded_both.deadline_at_utc) == ("Friday 5 PM", None)
+    assert loaded_instant.deadline_precision is DeadlinePrecision.NONE
+    assert (loaded_instant.deadline_text, loaded_instant.deadline_at_utc) == (None, None)
+    assert loaded_phrase.deadline_precision is DeadlinePrecision.UNRESOLVED
+
+
+@pytest.mark.asyncio
+async def test_digest_round_trip_with_coverage_and_deadline_details(database: Database) -> None:
+    account_id, (first_id, second_id) = await _account_and_messages(database, "msg-1", "msg-2")
+    coverage = DigestCoverage(
+        sync_complete=False,
+        shortlisted=3,
+        analyzed=1,
+        reused=1,
+        failed=0,
+        skipped=1,
+        input_tokens=900,
+        output_tokens=120,
+        ai_provider="openai",
+        ai_model="model-1",
+    )
+    local_date = date(2026, 9, 4)
+
+    async with database.transaction() as session:
+        analysis = await AnalysisRepository(session).upsert_analysis(
+            message_id=first_id,
+            input_hash="hash-1",
+            provider="openai",
+            model="model-1",
+            prompt_version="prompt-1",
+            schema_version="2",
+            analysis=make_analysis(),
+        )
+        digest = await DigestRepository(session).save_digest(
+            account_id=account_id,
+            local_date=local_date,
+            timezone_name="America/Toronto",
+            status=DigestStatus.PARTIAL,
+            items=[
+                (first_id, analysis.id, 0, DigestSection.DEADLINES),
+                (second_id, None, 1, DigestSection.HIGHLIGHTS),
+            ],
+            coverage=coverage,
+        )
+        digest_id = digest.id
+
+    async with database.session() as session:
+        repo = DigestRepository(session)
+        row = await repo.get_by_id(digest_id)
+        assert row is not None
+        restored = DigestRepository.to_domain(row, await repo.get_digest_items(digest_id), "ms-1")
+
+    assert restored.coverage == coverage
+    analyzed_item, preview_item = restored.items
+    assert analyzed_item.deadline_text == "Friday 5 PM"
+    assert analyzed_item.deadline_precision is DeadlinePrecision.DATETIME
+    assert analyzed_item.deadline_date == local_date
+    assert analyzed_item.deadline_at_utc == datetime(2026, 9, 4, 21, 0, tzinfo=UTC)
+    assert analyzed_item.evidence == "Please approve the attached proposal by Friday."
+    assert preview_item.deadline_precision is DeadlinePrecision.NONE
+    assert preview_item.evidence is None
+
+    async with database.transaction() as session:
+        await DigestRepository(session).save_digest(
+            account_id=account_id,
+            local_date=local_date,
+            timezone_name="America/Toronto",
+            status=DigestStatus.EMPTY,
+        )
+
+    async with database.session() as session:
+        row = await DigestRepository(session).get_by_id(digest_id)
+        assert row is not None
+        assert row.shortlisted_count is None
+        assert DigestRepository.to_domain(row, [], "ms-1").coverage is None
+
+
+@pytest.mark.asyncio
+async def test_consent_grant_revoke_and_reactivate(database: Database) -> None:
+    account_id, _ = await _account_and_messages(database)
+    granted_at = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
+    revoked_at = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+    regranted_at = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+
+    async with database.transaction() as session:
+        repo = ConsentRepository(session)
+        consent_id = (await repo.grant(account_id, "openai", "disclosure-1", granted_at)).id
+        active = await repo.get_active(account_id, "openai", "disclosure-1")
+        assert active is not None
+        assert active.id == consent_id
+        assert active.granted_at_utc == granted_at
+        assert await repo.get_active(account_id, "openai", "disclosure-2") is None
+
+        assert await repo.revoke_all(account_id, "openai", revoked_at) == 1
+        assert await repo.get_active(account_id, "openai", "disclosure-1") is None
+        assert await repo.revoke_all(account_id, "openai", revoked_at) == 0
+
+        again = await repo.grant(account_id, "openai", "disclosure-1", regranted_at)
+        assert again.id == consent_id
+        assert again.revoked_at_utc is None
+        assert again.granted_at_utc == regranted_at
+
+    async with database.session() as session:
+        active = await ConsentRepository(session).get_active(account_id, "openai", "disclosure-1")
+        assert active is not None
+        assert active.granted_at_utc == regranted_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preview", "subject", "expected_start"),
+    [
+        (("Please review the attached plan " * 8)[:255], "Plan", "Please review the attached"),
+        ("   ", "Quarterly plan " * 20, "Quarterly plan"),
+        ("", "", "No summary available"),
+    ],
+    ids=["long-preview", "subject-fallback", "nothing-available"],
+)
+async def test_unanalyzed_digest_item_summary_stays_within_item_limit(
+    database: Database,
+    preview: str,
+    subject: str,
+    expected_start: str,
+) -> None:
+    async with database.transaction() as session:
+        account = await AccountRepository(session).upsert(
+            AccountIdentity(
+                provider=ProviderKind.MICROSOFT,
+                provider_account_id="ms-1",
+                email_address="a@example.com",
+            )
+        )
+        (message,) = await MessageRepository(session).upsert_messages(
+            account.id,
+            [make_message(provider_message_id="msg-1", body_preview=preview, subject=subject)],
+        )
+        digest = await DigestRepository(session).save_digest(
+            account_id=account.id,
+            local_date=date(2026, 9, 4),
+            timezone_name="America/Toronto",
+            status=DigestStatus.COMPLETE,
+            items=[(message.id, None, 0, DigestSection.HIGHLIGHTS)],
+        )
+        digest_id = digest.id
+
+    async with database.session() as session:
+        repo = DigestRepository(session)
+        row = await repo.get_by_id(digest_id)
+        assert row is not None
+        restored = DigestRepository.to_domain(row, await repo.get_digest_items(digest_id), "ms-1")
+
+    summary = restored.items[0].summary
+    assert len(summary) <= 240
+    assert summary.startswith(expected_start)
+
+
+@pytest.mark.asyncio
+async def test_a_brief_with_a_provider_length_message_id_loads(database: Database) -> None:
+    long_id = "AAMkAD" + "x" * 144
+    account_id, (message_id,) = await _account_and_messages(database, long_id)
+
+    async with database.transaction() as session:
+        analysis = await AnalysisRepository(session).upsert_analysis(
+            message_id=message_id,
+            input_hash="hash-1",
+            provider="openai",
+            model="model-1",
+            prompt_version="prompt-1",
+            schema_version="2",
+            analysis=make_analysis(),
+        )
+        digest = await DigestRepository(session).save_digest(
+            account_id=account_id,
+            local_date=date(2026, 9, 4),
+            timezone_name="America/Toronto",
+            status=DigestStatus.COMPLETE,
+            items=[(message_id, analysis.id, 0, DigestSection.ACTIONS)],
+        )
+        digest_id = digest.id
+
+    async with database.session() as session:
+        repo = DigestRepository(session)
+        row = await repo.get_by_id(digest_id)
+        assert row is not None
+        restored = DigestRepository.to_domain(row, await repo.get_digest_items(digest_id), "ms-1")
+
+    assert len(long_id) == 150
+    assert [item.message_key for item in restored.items] == [long_id]

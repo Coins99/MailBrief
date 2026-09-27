@@ -12,32 +12,44 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   compiling and its tests passing, but do not extend it unless a task says so.
 - Done: M1 Gmail OAuth and secure restore; M2 Inbox metadata sync, ranking and
   shortlist review (`mailbrief-gmail-diagnostic sync`).
-- In progress: M3 shortlisted-body reading and preparation
-  (`mailbrief-gmail-diagnostic bodies`, `docs/gmail-bodies.md`). M4 AI analysis and digest
-  starts only after M3's live acceptance passes, then M5 desktop UI with Windows and macOS
-  packages. See `docs/mvp-plan.md` and `docs/email-implementation-plan.md`.
+- Implemented, live acceptance recorded in `docs/m3-validation.md`: M3 shortlisted-body
+  reading and preparation (`mailbrief-gmail-diagnostic bodies`, `docs/gmail-bodies.md`).
+- Implemented, awaiting live acceptance: M4 consented AI analysis and the saved daily brief
+  (`mailbrief-gmail-diagnostic brief`, `docs/ai-analysis.md`).
+- Next: M5 desktop UI with Windows and macOS packages. See `docs/mvp-plan.md` and
+  `docs/email-implementation-plan.md`.
 
 ## Layout (ports and adapters)
 
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
 - `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` protocols and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
-  `providers/openai/`: empty until M4.
-- `src/mailbrief/services/`: calendar, sync, ranking, bodies, application; `digest.py` arrives
-  in M4.
+  `providers/groq/`: active AI adapter (Structured Outputs), API key store and factory.
+- `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
+  analysis, deadlines, digest and brief.
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`.
   Alembic revisions live in `migrations/versions/`.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
-  quote trimming, length limits).
+  quote trimming, length limits, and `matching.py` for checking quotes against the email).
+- `src/mailbrief/infra/`: HTTP retry classification and `vault.py`, the explicit OS
+  credential vault.
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 shell until M5.
 
 ## Invariants (never break these)
 
-- Never write full email bodies, OAuth tokens or API keys to SQLite, logs, exceptions,
-  printed output or files. The one exception is `mailbrief-gmail-diagnostic bodies
-  --show-text`, which prints prepared text to the owner's terminal on explicit request.
+- Never write OAuth tokens or API keys to SQLite, logs, exceptions, printed output or
+  files. Never write full email bodies there either, beyond the short preview snippet Gmail
+  supplies, which SQLite has kept since M2; for a very short email that snippet can be the
+  whole text. The one exception is `mailbrief-gmail-diagnostic bodies --show-text`, which
+  prints prepared text to the owner's terminal on explicit request. `brief --show` prints
+  derived brief content (sender, subject, summary, action, deadline, link) on explicit
+  request, never evidence or bodies.
+- Derived content is bounded: a summary is at most 240 characters, an action at most
+  1,000, and evidence at most 300 and strictly under 80% of the body. A summary of a very
+  short email may restate it.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
+- The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
 - Provider JSON stays inside its adapter; services and storage use domain models only.
 - Timestamps are timezone-aware UTC. Never use naive datetimes or `datetime.utcnow()`.
 - Gmail access is read-only (`gmail.readonly`). No mailbox writes or sends.
@@ -50,14 +62,16 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 
 ## AI analysis rules (M4)
 
-- Send only shortlisted messages, and only minimized fields: subject, sender, received
-  time and a truncated plain-text body.
+- Send only shortlisted messages, and only these seven minimized fields: `message_key` (a
+  random per-run key), `subject`, `sender`, `received_local`, `time_zone`,
+  `body_truncated` and `body` (truncated plain text).
 - Never send tokens, account or tenant IDs, provider message IDs, source links or
   attachments.
 - Require explicit first-use consent, and disable provider-side response storage where
-  supported (OpenAI: `store=False`).
+  supported; enable Groq Zero Data Retention in Console Data Controls before live mail use.
 - Accept only responses that validate against the versioned Pydantic schema. Cache by
   input hash, provider, model, prompt version and schema version.
+- Store evidence at most 300 characters long and never as a whole body (under 80% of it).
 
 ## Dependencies
 
@@ -90,8 +104,12 @@ uv sync --locked --all-groups
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
+uv run mypy --platform win32 src tests
+uv run mypy --platform darwin src tests
 uv run pytest
 ```
+
+CI type-checks on both Windows and macOS, so run mypy for both platforms before pushing.
 
 ## Git workflow
 

@@ -28,6 +28,7 @@ def test_metadata_contains_all_initial_tables() -> None:
         "digests",
         "digest_items",
         "sync_runs",
+        "ai_consents",
     }
     assert "body" not in Base.metadata.tables["messages"].columns
 

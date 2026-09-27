@@ -12,6 +12,10 @@ from mailbrief.domain.common import normalize_utc
 logger = logging.getLogger(__name__)
 
 
+class InvalidTimezoneError(ValueError):
+    """An explicit time zone key is unknown or invalid."""
+
+
 @dataclass(frozen=True, slots=True)
 class DayWindow:
     """Represents a local calendar day converted to UTC boundaries."""
@@ -25,7 +29,7 @@ class DayWindow:
 def resolve_timezone(tz_key: str | None = None) -> ZoneInfo:
     """Resolve an IANA timezone key or discover the system local timezone.
 
-    Raises ValueError if an explicit tz_key is invalid or not found.
+    Raises InvalidTimezoneError if an explicit tz_key is invalid or not found.
     Falls back to UTC if system timezone discovery fails.
     """
     if tz_key and tz_key.strip():
@@ -33,7 +37,7 @@ def resolve_timezone(tz_key: str | None = None) -> ZoneInfo:
         try:
             return ZoneInfo(cleaned_key)
         except (ZoneInfoNotFoundError, ValueError, KeyError) as exc:
-            raise ValueError(f"Unknown or invalid timezone: '{tz_key}'") from exc
+            raise InvalidTimezoneError(f"Unknown or invalid timezone: '{tz_key}'") from exc
 
     try:
         return tzlocal.get_localzone()

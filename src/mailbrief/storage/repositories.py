@@ -9,10 +9,16 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.analysis import AnalysisCategory, MessageAnalysis
+from mailbrief.domain.analysis import (
+    SUMMARY_MAX_CHARS,
+    AnalysisCategory,
+    DeadlinePrecision,
+    MessageAnalysis,
+)
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.digests import (
     DailyDigest,
+    DigestCoverage,
     DigestItem,
     DigestSection,
     DigestStatus,
@@ -28,15 +34,18 @@ from mailbrief.domain.messages import (
 )
 from mailbrief.storage.tables import (
     AccountTable,
+    AIConsentTable,
     AnalysisTable,
     DigestItemTable,
     DigestTable,
     MessageTable,
     SyncRunTable,
 )
+from mailbrief.text.prepare import truncate_at_boundary
 
 # Batch size limit for bulk SQLite inserts to safeguard parameter limits
 MAX_SQLITE_BATCH_SIZE = 100
+_NO_SUMMARY = "No summary available"
 
 
 class AccountRepository:
@@ -402,20 +411,32 @@ class AnalysisRepository:
             action_text=analysis.action_text,
             deadline_text=analysis.deadline_text,
             deadline_at_utc=analysis.deadline_at_utc,
+            deadline_precision=analysis.deadline_precision.value,
+            deadline_date=analysis.deadline_date,
+            deadline_timezone=analysis.deadline_timezone,
             confidence=analysis.confidence,
             evidence=analysis.evidence,
             analyzed_at_utc=datetime.now(UTC),
         )
         stmt = base_stmt.on_conflict_do_update(
-            index_elements=["message_id", "input_hash", "model", "prompt_version"],
+            index_elements=[
+                "message_id",
+                "input_hash",
+                "provider",
+                "model",
+                "prompt_version",
+                "schema_version",
+            ],
             set_={
-                "schema_version": base_stmt.excluded.schema_version,
                 "category": base_stmt.excluded.category,
                 "summary": base_stmt.excluded.summary,
                 "action_required": base_stmt.excluded.action_required,
                 "action_text": base_stmt.excluded.action_text,
                 "deadline_text": base_stmt.excluded.deadline_text,
                 "deadline_at_utc": base_stmt.excluded.deadline_at_utc,
+                "deadline_precision": base_stmt.excluded.deadline_precision,
+                "deadline_date": base_stmt.excluded.deadline_date,
+                "deadline_timezone": base_stmt.excluded.deadline_timezone,
                 "confidence": base_stmt.excluded.confidence,
                 "evidence": base_stmt.excluded.evidence,
                 "analyzed_at_utc": base_stmt.excluded.analyzed_at_utc,
@@ -429,15 +450,19 @@ class AnalysisRepository:
         self,
         message_id: int,
         input_hash: str,
+        provider: str,
         model: str,
         prompt_version: str,
+        schema_version: str,
     ) -> AnalysisTable | None:
-        """Retrieve a cached analysis matching the unique versioned cache key."""
+        """Retrieve the cached analysis matching all six cache-identity columns."""
         stmt = select(AnalysisTable).where(
             AnalysisTable.message_id == message_id,
             AnalysisTable.input_hash == input_hash,
+            AnalysisTable.provider == provider,
             AnalysisTable.model == model,
             AnalysisTable.prompt_version == prompt_version,
+            AnalysisTable.schema_version == schema_version,
         )
         result = await self._session.scalars(stmt)
         return result.first()
@@ -454,18 +479,111 @@ class AnalysisRepository:
 
     @staticmethod
     def to_domain(row: AnalysisTable, message_key: str) -> MessageAnalysis:
-        """Map an AnalysisTable ORM entity to a MessageAnalysis domain model."""
+        """Map an AnalysisTable ORM entity to a MessageAnalysis domain model.
+
+        Rows saved before migration 0004 read precision "none" even when they kept a
+        deadline. A kept phrase becomes unresolved, and an instant without its phrase is
+        dropped, so these rows still validate.
+        """
+        precision = DeadlinePrecision(row.deadline_precision)
+        deadline_text = row.deadline_text or None
+        deadline_date, deadline_at_utc, deadline_timezone = (
+            row.deadline_date,
+            row.deadline_at_utc,
+            row.deadline_timezone,
+        )
+        if precision is DeadlinePrecision.NONE:
+            if deadline_text is not None:
+                precision = DeadlinePrecision.UNRESOLVED
+            deadline_date = deadline_at_utc = deadline_timezone = None
         return MessageAnalysis(
             message_key=message_key,
             category=AnalysisCategory(row.category),
             summary=row.summary,
             action_required=row.action_required,
             action_text=row.action_text,
-            deadline_text=row.deadline_text,
-            deadline_at_utc=row.deadline_at_utc,
+            deadline_text=deadline_text,
+            deadline_precision=precision,
+            deadline_date=deadline_date,
+            deadline_at_utc=deadline_at_utc,
+            deadline_timezone=deadline_timezone,
             confidence=row.confidence,
             evidence=row.evidence,
         )
+
+
+_COVERAGE_COLUMNS = (
+    "sync_complete",
+    "shortlisted_count",
+    "analyzed_count",
+    "reused_count",
+    "failed_count",
+    "skipped_count",
+    "input_tokens",
+    "output_tokens",
+    "ai_provider",
+    "ai_model",
+)
+
+
+def _coverage_columns(coverage: DigestCoverage | None) -> dict[str, bool | int | str | None]:
+    """Map brief coverage onto digest columns; no coverage leaves every column NULL."""
+    if coverage is None:
+        return dict.fromkeys(_COVERAGE_COLUMNS)
+    return {
+        "sync_complete": coverage.sync_complete,
+        "shortlisted_count": coverage.shortlisted,
+        "analyzed_count": coverage.analyzed,
+        "reused_count": coverage.reused,
+        "failed_count": coverage.failed,
+        "skipped_count": coverage.skipped,
+        "input_tokens": coverage.input_tokens,
+        "output_tokens": coverage.output_tokens,
+        "ai_provider": coverage.ai_provider,
+        "ai_model": coverage.ai_model,
+    }
+
+
+def _fallback_summary(preview: str, subject: str) -> str:
+    """Summarize an unanalyzed item from its preview, else its subject, within the item limit."""
+    for text in (preview.strip(), subject.strip()):
+        if text:
+            # Previews (up to 255 characters in Outlook) can exceed the summary limit.
+            return truncate_at_boundary(text, SUMMARY_MAX_CHARS)[0]
+    return _NO_SUMMARY
+
+
+def _displayed_precision(analysis: AnalysisTable) -> DeadlinePrecision:
+    """The precision to show; rows saved before migration 0004 read "none" even with a deadline.
+
+    A legacy instant shows as exact, keeping its phrase; a legacy phrase alone shows as
+    unresolved.
+    """
+    precision = DeadlinePrecision(analysis.deadline_precision)
+    if precision is DeadlinePrecision.NONE:
+        if analysis.deadline_at_utc is not None:
+            return DeadlinePrecision.DATETIME
+        if analysis.deadline_text:
+            return DeadlinePrecision.UNRESOLVED
+    return precision
+
+
+def _coverage_from_row(digest: DigestTable) -> DigestCoverage | None:
+    """Rebuild brief coverage; briefs saved before M4 have none."""
+    if digest.shortlisted_count is None:
+        return None
+    return DigestCoverage(
+        sync_complete=bool(digest.sync_complete),
+        shortlisted=digest.shortlisted_count,
+        analyzed=digest.analyzed_count or 0,
+        reused=digest.reused_count or 0,
+        failed=digest.failed_count or 0,
+        skipped=digest.skipped_count or 0,
+        input_tokens=digest.input_tokens,
+        output_tokens=digest.output_tokens,
+        ai_provider=digest.ai_provider,
+        ai_model=digest.ai_model,
+    )
 
 
 class DigestRepository:
@@ -481,24 +599,33 @@ class DigestRepository:
         timezone_name: str,
         status: str | DigestStatus,
         items: Sequence[tuple[int, int | None, int, str | DigestSection]] = (),
+        coverage: DigestCoverage | None = None,
     ) -> DigestTable:
-        """Create or update a daily digest and its ordered items atomically."""
+        """Create or update a daily digest, its coverage and its ordered items atomically."""
         status_val = status.value if isinstance(status, DigestStatus) else str(status)
+        coverage_values = _coverage_columns(coverage)
         base_stmt = sqlite_insert(DigestTable).values(
             account_id=account_id,
             local_date=local_date,
             timezone_name=timezone_name,
             status=status_val,
             generated_at_utc=datetime.now(UTC),
+            **coverage_values,
         )
-        stmt = base_stmt.on_conflict_do_update(
-            index_elements=["account_id", "local_date"],
-            set_={
-                "timezone_name": base_stmt.excluded.timezone_name,
-                "status": base_stmt.excluded.status,
-                "generated_at_utc": base_stmt.excluded.generated_at_utc,
-            },
-        ).returning(DigestTable)
+        stmt = (
+            base_stmt.on_conflict_do_update(
+                index_elements=["account_id", "local_date"],
+                set_={
+                    "timezone_name": base_stmt.excluded.timezone_name,
+                    "status": base_stmt.excluded.status,
+                    "generated_at_utc": base_stmt.excluded.generated_at_utc,
+                    **{name: base_stmt.excluded[name] for name in coverage_values},
+                },
+            )
+            .returning(DigestTable)
+            # Refresh a digest already loaded in this session instead of returning it stale.
+            .execution_options(populate_existing=True)
+        )
         digest = await self._session.scalar(stmt)
         assert digest is not None
 
@@ -567,9 +694,10 @@ class DigestRepository:
         """Map a DigestTable and its joined item records to a DailyDigest domain model."""
         domain_items: list[DigestItem] = []
         for item_table, msg_table, analysis_table in items_with_relations:
-            summary_val = analysis_table.summary if analysis_table else msg_table.body_preview
-            action_text_val = analysis_table.action_text if analysis_table else None
-            deadline_val = analysis_table.deadline_at_utc if analysis_table else None
+            if analysis_table is None:
+                summary_val = _fallback_summary(msg_table.body_preview, msg_table.subject)
+            else:
+                summary_val = analysis_table.summary or _NO_SUMMARY
             domain_items.append(
                 DigestItem(
                     message_key=msg_table.provider_message_id,
@@ -580,9 +708,17 @@ class DigestRepository:
                         name=msg_table.sender_name,
                         address=msg_table.sender_address,
                     ),
-                    summary=summary_val or "No summary available",
-                    action_text=action_text_val,
-                    deadline_at_utc=deadline_val,
+                    summary=summary_val,
+                    action_text=analysis_table.action_text if analysis_table else None,
+                    deadline_text=analysis_table.deadline_text if analysis_table else None,
+                    deadline_precision=(
+                        _displayed_precision(analysis_table)
+                        if analysis_table
+                        else DeadlinePrecision.NONE
+                    ),
+                    deadline_date=analysis_table.deadline_date if analysis_table else None,
+                    deadline_at_utc=analysis_table.deadline_at_utc if analysis_table else None,
+                    evidence=analysis_table.evidence if analysis_table else None,
                     source_url=HttpUrl(msg_table.web_link),
                 )
             )
@@ -594,7 +730,76 @@ class DigestRepository:
             generated_at_utc=digest.generated_at_utc,
             status=DigestStatus(digest.status),
             items=tuple(domain_items),
+            coverage=_coverage_from_row(digest),
         )
+
+
+class ConsentRepository:
+    """Repository recording per-account consent to send minimized content to an AI provider."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_active(
+        self,
+        account_id: int,
+        provider: str,
+        disclosure_version: str,
+    ) -> AIConsentTable | None:
+        """Return the consent for this disclosure version unless it has been revoked."""
+        stmt = select(AIConsentTable).where(
+            AIConsentTable.account_id == account_id,
+            AIConsentTable.provider == provider,
+            AIConsentTable.disclosure_version == disclosure_version,
+            AIConsentTable.revoked_at_utc.is_(None),
+        )
+        result = await self._session.scalars(stmt.execution_options(populate_existing=True))
+        return result.first()
+
+    async def grant(
+        self,
+        account_id: int,
+        provider: str,
+        disclosure_version: str,
+        now_utc: datetime,
+    ) -> AIConsentTable:
+        """Record consent, reactivating a revoked grant of the same disclosure version."""
+        base_stmt = sqlite_insert(AIConsentTable).values(
+            account_id=account_id,
+            provider=provider,
+            disclosure_version=disclosure_version,
+            granted_at_utc=normalize_utc(now_utc),
+            revoked_at_utc=None,
+        )
+        stmt = (
+            base_stmt.on_conflict_do_update(
+                index_elements=["account_id", "provider", "disclosure_version"],
+                set_={
+                    "granted_at_utc": base_stmt.excluded.granted_at_utc,
+                    "revoked_at_utc": None,
+                },
+            )
+            .returning(AIConsentTable)
+            .execution_options(populate_existing=True)
+        )
+        consent = await self._session.scalar(stmt)
+        assert consent is not None
+        return consent
+
+    async def revoke_all(self, account_id: int, provider: str, now_utc: datetime) -> int:
+        """Revoke every active consent for the provider and return how many were revoked."""
+        stmt = (
+            update(AIConsentTable)
+            .where(
+                AIConsentTable.account_id == account_id,
+                AIConsentTable.provider == provider,
+                AIConsentTable.revoked_at_utc.is_(None),
+            )
+            .values(revoked_at_utc=normalize_utc(now_utc))
+            .returning(AIConsentTable.id)
+        )
+        revoked = await self._session.scalars(stmt)
+        return len(revoked.all())
 
 
 class SyncRunRepository:

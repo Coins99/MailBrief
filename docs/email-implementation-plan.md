@@ -188,7 +188,7 @@ Inspect persisted rows and captured logs for synthetic full-body markers.
 
 **Work**
 
-- Implement the AI adapter behind the existing port and accepted ADR 0004. Keep
+- Implement the AI adapter behind the existing port and accepted ADR 0010. Keep
   credentials in the OS store and model selection configurable.
 - Before transmitting content, show cloud-processing consent with included
   fields, selected count and truncation. Allow narrowing selection or cancelling.
@@ -206,7 +206,7 @@ Inspect persisted rows and captured logs for synthetic full-body markers.
 - Bound batches, retries and per-run usage. Record usage when available; avoid
   claiming dollar costs without known pricing.
 
-**Files:** analysis models/port, `providers/openai/provider.py`, analysis service,
+**Files:** analysis models/port, `providers/groq/provider.py`, analysis service,
 `services/digest.py`, repositories and version/cache migrations.
 
 **Tests:** fake AI results, schema/context cache invalidation, unchanged-input

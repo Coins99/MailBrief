@@ -137,6 +137,38 @@ async def test_failed_second_page_preserves_first(
     assert result.error_code == "PERMISSION_DENIED"
 
 
+async def test_ambiguous_no_content_preserves_cached_inbox_and_last_success(
+    session: AsyncSession, respx_mock: respx.MockRouter
+) -> None:
+    listing = respx_mock.get(MESSAGES_URL).respond(json={"messages": [{"id": "a"}]})
+    respx_mock.get(MESSAGES_URL + "/a").respond(json=metadata("a"))
+    messages, accounts = MessageRepository(session), AccountRepository(session)
+    async with httpx.AsyncClient() as http:
+        app = ApplicationService(
+            GmailProvider(FakeSession(), GmailClient(http, FakeSession())),
+            messages,
+            SyncRunRepository(session),
+            accounts,
+        )
+        result, _ = await app.prepare_daily_shortlist(now_utc=NOW, tz_key="UTC")
+        assert result.status is SyncStatus.COMPLETE
+        account = await accounts.get_by_provider_identity(
+            ACCOUNT.provider, ACCOUNT.provider_account_id
+        )
+        assert account is not None
+        await session.refresh(account)
+        last_success = account.last_sync_at_utc
+        listing.respond(204)
+        result, _ = await app.prepare_daily_shortlist(now_utc=NOW, tz_key="UTC")
+        assert result.status is SyncStatus.FAILED
+        await session.refresh(account)
+        assert account.last_sync_at_utc == last_success
+        rows = await messages.get_messages_in_range(
+            account.id, NOW - timedelta(days=1), NOW + timedelta(days=1), inbox_only=True
+        )
+        assert [row.provider_message_id for row in rows] == ["a"]
+
+
 async def test_cancel_event_preserves_old_membership(
     session: AsyncSession, respx_mock: respx.MockRouter
 ) -> None:

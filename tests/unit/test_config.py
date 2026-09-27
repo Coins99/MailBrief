@@ -71,6 +71,40 @@ def test_settings_accept_public_graph_url_with_trailing_slash() -> None:
 
 
 def test_body_limit_cannot_exceed_the_analysis_limit() -> None:
-    assert Settings().ai_body_character_limit == 8_000
+    assert Settings().ai_body_character_limit == 4_000
     with pytest.raises(ValidationError):
         Settings(ai_body_character_limit=8_001)
+
+
+@pytest.mark.parametrize("model", [None, "", "   "])
+def test_groq_model_is_required_only_on_demand(model: str | None) -> None:
+    with pytest.raises(ConfigurationError, match="MAILBRIEF_GROQ_MODEL"):
+        Settings(groq_model=model).require_groq_model()
+
+
+def test_groq_model_is_returned_stripped() -> None:
+    assert Settings(groq_model=" gpt-test ").require_groq_model() == "gpt-test"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"ai_max_output_tokens": 255},
+        {"ai_max_output_tokens": 64_001},
+        {"ai_max_requests_per_run": 0},
+        {"ai_max_requests_per_run": 1_001},
+        {"ai_timeout_seconds": 9.9},
+        {"ai_timeout_seconds": 600.1},
+    ],
+)
+def test_ai_limits_are_bounded(values: dict[str, float]) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate(values)
+
+
+def test_ai_limits_accept_their_bounds() -> None:
+    low = Settings(ai_max_output_tokens=256, ai_timeout_seconds=10)
+    high = Settings(ai_max_output_tokens=64_000, ai_timeout_seconds=600)
+
+    assert (low.ai_max_output_tokens, low.ai_timeout_seconds) == (256, 10)
+    assert (high.ai_max_output_tokens, high.ai_timeout_seconds) == (64_000, 600)

@@ -4,8 +4,15 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Self
 
-from pydantic import Field, HttpUrl, field_validator, model_validator
+from pydantic import ConfigDict, Field, HttpUrl, field_validator, model_validator
 
+from mailbrief.domain.analysis import (
+    ACTION_TEXT_MAX_CHARS,
+    DEADLINE_TEXT_MAX_CHARS,
+    EVIDENCE_MAX_CHARS,
+    SUMMARY_MAX_CHARS,
+    DeadlinePrecision,
+)
 from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.messages import EmailContact
 
@@ -30,14 +37,20 @@ class DigestStatus(StrEnum):
 class DigestItem(DomainModel):
     """One user-visible item in a daily brief."""
 
-    message_key: str = Field(min_length=1, max_length=64)
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    message_key: str = Field(min_length=1, max_length=512)
     section: DigestSection
     position: int = Field(ge=0)
-    subject: str = Field(default="", max_length=998)
+    subject: str = Field(default="", max_length=998, repr=False)
     sender: EmailContact
-    summary: str = Field(min_length=1, max_length=240)
-    action_text: str | None = Field(default=None, max_length=1_000)
+    summary: str = Field(min_length=1, max_length=SUMMARY_MAX_CHARS, repr=False)
+    action_text: str | None = Field(default=None, max_length=ACTION_TEXT_MAX_CHARS, repr=False)
+    deadline_text: str | None = Field(default=None, max_length=DEADLINE_TEXT_MAX_CHARS, repr=False)
+    deadline_precision: DeadlinePrecision = DeadlinePrecision.NONE
+    deadline_date: date | None = None
     deadline_at_utc: datetime | None = None
+    evidence: str | None = Field(default=None, max_length=EVIDENCE_MAX_CHARS, repr=False)
     source_url: HttpUrl
 
     @field_validator("deadline_at_utc")
@@ -46,8 +59,37 @@ class DigestItem(DomainModel):
         return None if value is None else normalize_utc(value)
 
 
+class DigestCoverage(DomainModel):
+    """How a brief accounts for every shortlisted message.
+
+    - analyzed: new provider results from this run.
+    - reused: valid cached analyses.
+    - failed: body or analysis failures.
+    - skipped: empty or unavailable bodies, which are never sent.
+    """
+
+    sync_complete: bool
+    shortlisted: int = Field(ge=0)
+    analyzed: int = Field(ge=0)
+    reused: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    ai_provider: str | None = Field(default=None, max_length=64)
+    ai_model: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> Self:
+        if self.analyzed + self.reused + self.failed + self.skipped != self.shortlisted:
+            raise ValueError("coverage counts must add up to the shortlist size")
+        return self
+
+
 class DailyDigest(DomainModel):
     """A complete, partial, or empty brief for one local calendar day."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     account_id: str = Field(min_length=1, max_length=255)
     local_date: date
@@ -55,6 +97,7 @@ class DailyDigest(DomainModel):
     generated_at_utc: datetime
     status: DigestStatus
     items: tuple[DigestItem, ...] = ()
+    coverage: DigestCoverage | None = None  # None only for briefs saved before M4.
 
     @field_validator("generated_at_utc")
     @classmethod

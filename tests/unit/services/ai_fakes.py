@@ -1,0 +1,101 @@
+"""Scriptable AI provider fake and candidate helpers for service tests."""
+
+from collections.abc import Callable, Sequence
+from typing import ClassVar
+
+from mailbrief.domain.analysis import AIUsage, AnalysisCandidate, AnalysisRequest, AnalysisResponse
+
+Respond = Callable[[Sequence[AnalysisRequest]], AnalysisResponse]
+ScriptItem = AnalysisResponse | Exception | Respond
+
+
+class FakeAIProvider:
+    """AIProvider fake: consumes one script item per analyze() call and records each batch.
+
+    Every instance is registered, and the services conftest fails a test that leaves
+    script items unused.
+    """
+
+    created: ClassVar[list["FakeAIProvider"]] = []
+
+    def __init__(
+        self,
+        script: Sequence[ScriptItem] = (),
+        *,
+        credentials: bool = True,
+        attempts_per_call: int = 1,
+    ) -> None:
+        self.script = list(script)
+        self.batches: list[tuple[AnalysisRequest, ...]] = []
+        self.credentials = credentials
+        self.attempts_per_call = attempts_per_call  # HTTP attempts each call simulates.
+        self.credential_checks = 0
+        FakeAIProvider.created.append(self)
+
+    @property
+    def provider_name(self) -> str:
+        return "fake"
+
+    @property
+    def model_name(self) -> str:
+        return "fake-model"
+
+    @property
+    def prompt_version(self) -> str:
+        return "fake-1"
+
+    @property
+    def calls(self) -> int:
+        return len(self.batches)
+
+    @property
+    def privacy_notice(self) -> str:
+        return "The fake provider keeps nothing."
+
+    @property
+    def requests_sent(self) -> int:
+        return self.calls * self.attempts_per_call
+
+    async def credentials_available(self) -> bool:
+        self.credential_checks += 1
+        return self.credentials
+
+    async def analyze(self, requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+        self.batches.append(tuple(requests))
+        if not self.script:
+            raise AssertionError("unexpected analyze() call")
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, AnalysisResponse):
+            return item
+        return item(requests)
+
+
+def good_candidate(request: AnalysisRequest, **overrides: object) -> AnalysisCandidate:
+    """A candidate that passes validation; its evidence is a slice of the request body."""
+    values: dict[str, object] = {
+        "message_key": request.message_key,
+        "category": "information",
+        "summary": "A short summary.",
+        "action_required": False,
+        "action_text": None,
+        "deadline_text": None,
+        "deadline_date": None,
+        "deadline_time": None,
+        "stated_timezone": None,
+        "confidence": 0.8,
+        "evidence": request.body_text[:40],
+    }
+    values.update(overrides)
+    return AnalysisCandidate.model_validate(values)
+
+
+def answer_all(usage: AIUsage | None = None, **overrides: object) -> Respond:
+    """A script item that answers every request in its batch with a good candidate."""
+
+    def respond(requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+        candidates = tuple(good_candidate(request, **overrides) for request in requests)
+        return AnalysisResponse(candidates=candidates, usage=usage)
+
+    return respond

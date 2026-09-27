@@ -16,6 +16,7 @@ from mailbrief.ports.errors import (
 )
 from mailbrief.providers.gmail.body import extract_body
 from mailbrief.providers.gmail.client import GmailClient, message_id
+from mailbrief.providers.gmail.errors import response_error
 from mailbrief.providers.gmail.mapper import map_metadata
 
 
@@ -81,7 +82,7 @@ class GmailProvider:
         token: str | None = None
         if continuation is not None:
             if not continuation or len(continuation) > 4096:
-                raise ProviderResponseError("Invalid Gmail continuation token.")
+                raise response_error("Invalid Gmail continuation token.")
             seen_tokens.add(continuation)
             token = continuation
         number = 0
@@ -95,7 +96,7 @@ class GmailProvider:
                         return None  # Mail deleted between list and get.
                     message = map_metadata(raw, account)
                     if message.provider_message_id != identifier:
-                        raise ProviderResponseError("Gmail returned mismatched message metadata.")
+                        raise response_error("Gmail returned mismatched message metadata.")
                     if not message.is_in_inbox or not start <= message.received_at_utc < end:
                         return None
                     return message
@@ -116,11 +117,11 @@ class GmailProvider:
                     )
                 )
             ):
-                raise ProviderResponseError("Gmail returned an invalid message page.")
+                raise response_error("Gmail returned an invalid message page.")
             identifiers: list[str] = []
             for item in raw_ids:
                 if not isinstance(item, dict):
-                    raise ProviderResponseError("Gmail returned an invalid message list.")
+                    raise response_error("Gmail returned an invalid message list.")
                 identifier = message_id(item.get("id"))
                 if identifier not in seen_ids:
                     seen_ids.add(identifier)
@@ -145,8 +146,6 @@ class GmailProvider:
             if next_token is None:
                 break
             if next_token in seen_tokens:
-                raise ProviderResponseError(
-                    "Gmail repeated a pagination token; retry synchronization."
-                )
+                raise response_error("Gmail repeated a pagination token; retry synchronization.")
             seen_tokens.add(next_token)
             token = next_token

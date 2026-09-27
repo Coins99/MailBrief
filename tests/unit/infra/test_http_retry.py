@@ -11,13 +11,14 @@ from mailbrief.infra.http_retry import (
     RetryPolicy,
     RetryTracker,
     VerdictKind,
-    classify_openai_response,
+    classify_groq_response,
     current_retry_tracker,
     execute_with_retry,
-    parse_openai_ratelimit_reset,
+    parse_ai_ratelimit_reset,
     parse_retry_delay,
 )
 from mailbrief.ports.errors import (
+    NETWORK_BLOCKED_CODE,
     AIAuthenticationError,
     AuthenticationRequiredError,
     ProviderError,
@@ -259,16 +260,16 @@ def test_parse_retry_delay_table(header: str | None, expected: float | None) -> 
         assert result == pytest.approx(expected)
 
 
-def test_parse_openai_ratelimit_reset_prefers_retry_after() -> None:
+def test_parse_ai_ratelimit_reset_prefers_retry_after() -> None:
     headers = {
         "retry-after": "12",
         "x-ratelimit-reset-requests": "100ms",
         "x-ratelimit-reset-tokens": "200ms",
     }
-    assert parse_openai_ratelimit_reset(headers) == 12.0
+    assert parse_ai_ratelimit_reset(headers) == 12.0
 
 
-def test_parse_openai_ratelimit_reset_binding_constraints() -> None:
+def test_parse_ai_ratelimit_reset_binding_constraints() -> None:
     # Tokens exhausted -> pick reset-tokens
     headers_token = {
         "x-ratelimit-remaining-requests": "100",
@@ -276,7 +277,7 @@ def test_parse_openai_ratelimit_reset_binding_constraints() -> None:
         "x-ratelimit-reset-requests": "5s",
         "x-ratelimit-reset-tokens": "12s",
     }
-    assert parse_openai_ratelimit_reset(headers_token) == 12.0
+    assert parse_ai_ratelimit_reset(headers_token) == 12.0
 
     # Requests exhausted -> pick reset-requests
     headers_req = {
@@ -285,36 +286,36 @@ def test_parse_openai_ratelimit_reset_binding_constraints() -> None:
         "x-ratelimit-reset-requests": "15s",
         "x-ratelimit-reset-tokens": "2s",
     }
-    assert parse_openai_ratelimit_reset(headers_req) == 15.0
+    assert parse_ai_ratelimit_reset(headers_req) == 15.0
 
     # Both exhausted or neither explicitly 0 -> select max
     headers_both = {
         "x-ratelimit-reset-requests": "6s",
         "x-ratelimit-reset-tokens": "18s",
     }
-    assert parse_openai_ratelimit_reset(headers_both) == 18.0
+    assert parse_ai_ratelimit_reset(headers_both) == 18.0
 
 
-def test_classify_openai_response_success() -> None:
+def test_classify_groq_response_success() -> None:
     response = httpx.Response(200, json={"id": "chat-1"})
-    verdict = classify_openai_response(response, "client-req")
+    verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.SUCCESS
     assert verdict.exception is None
 
 
-def test_classify_openai_response_401_unauthorized() -> None:
+def test_classify_groq_response_401_unauthorized() -> None:
     response = httpx.Response(
         401,
         json={"error": {"message": "Invalid API key", "code": "invalid_api_key"}},
     )
-    verdict = classify_openai_response(response, "client-req")
+    verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
     assert isinstance(verdict.exception, AIAuthenticationError)
     assert not isinstance(verdict.exception, AuthenticationRequiredError)
-    assert "Invalid API key" in str(verdict.exception)
+    assert "Invalid API key" not in str(verdict.exception)
 
 
-def test_classify_openai_response_403_forbidden_region() -> None:
+def test_classify_groq_response_403_forbidden_region() -> None:
     response = httpx.Response(
         403,
         json={
@@ -324,51 +325,79 @@ def test_classify_openai_response_403_forbidden_region() -> None:
             }
         },  # noqa: E501
     )
-    verdict = classify_openai_response(response, "client-req")
+    verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
     assert isinstance(verdict.exception, ProviderPermissionError)
-    assert "not supported" in str(verdict.exception)
+    assert verdict.exception.provider_error_code is None
+    assert "Country or territory" not in str(verdict.exception)
 
 
-def test_classify_openai_response_429_insufficient_quota_is_terminal() -> None:
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Access denied. Please check your network settings.",
+        "ACCESS DENIED. PLEASE CHECK YOUR NETWORK SETTINGS",
+    ],
+)
+def test_classify_groq_response_403_network_block_gets_a_mailbrief_code(message: str) -> None:
+    response = httpx.Response(403, json={"error": {"message": message}})
+
+    verdict = classify_groq_response(response, "client-req")
+
+    assert verdict.kind == VerdictKind.FAIL
+    assert isinstance(verdict.exception, ProviderPermissionError)
+    assert verdict.exception.provider_error_code == NETWORK_BLOCKED_CODE == "network_blocked"
+    assert "network settings" not in str(verdict.exception).casefold()
+
+
+def test_classify_groq_response_network_text_outside_a_403_is_not_a_block() -> None:
+    body = {"error": {"message": "Please check your network settings.", "code": "bad_request"}}
+
+    verdict = classify_groq_response(httpx.Response(400, json=body), "client-req")
+
+    assert verdict.exception is not None
+    assert getattr(verdict.exception, "provider_error_code", None) == "bad_request"
+
+
+def test_classify_groq_response_429_insufficient_quota_is_terminal() -> None:
     response = httpx.Response(
         429,
         json={
             "error": {"message": "You exceeded your current quota", "code": "insufficient_quota"}
         },  # noqa: E501
     )
-    verdict = classify_openai_response(response, "client-req")
+    verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
     assert isinstance(verdict.exception, ProviderPermissionError)
-    assert "quota" in str(verdict.exception).lower()
+    assert verdict.exception.provider_error_code == "insufficient_quota"
 
 
-def test_classify_openai_response_429_rate_limit_is_retryable() -> None:
+def test_classify_groq_response_429_rate_limit_is_retryable() -> None:
     response = httpx.Response(
         429,
         headers={"x-ratelimit-reset-requests": "15s"},
         json={"error": {"message": "Rate limit reached", "code": "rate_limit_exceeded"}},
     )
-    verdict = classify_openai_response(response, "client-req")
+    verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.RETRY
     assert verdict.retry_delay == 15.0
     assert isinstance(verdict.exception, ProviderRateLimitError)
 
 
 @pytest.mark.parametrize("status", [408, 409, 500, 502, 503, 504])
-def test_classify_openai_response_transient_retries(status: int) -> None:
+def test_classify_groq_response_transient_retries(status: int) -> None:
     response = httpx.Response(status, text="<html>Gateway Error</html>")
-    verdict = classify_openai_response(response, "client-req")
+    verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.RETRY
     assert isinstance(verdict.exception, ProviderError)
 
 
-def test_classify_openai_response_other_4xx_terminal() -> None:
+def test_classify_groq_response_other_4xx_terminal() -> None:
     response = httpx.Response(
         400,
         json={"error": {"message": "Bad request", "code": "invalid_request_error"}},
     )
-    verdict = classify_openai_response(response, "client-req")
+    verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
     assert isinstance(verdict.exception, ProviderResponseError)
 
