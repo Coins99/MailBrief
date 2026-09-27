@@ -1,4 +1,4 @@
-"""Resolve provider-reported deadlines against the email, in Python and without guessing."""
+"""Resolve provider-reported deadlines against the email without guessing, and suggest targets."""
 
 import datetime as dt
 import re
@@ -10,11 +10,13 @@ from mailbrief.domain.analysis import (
     AnalysisCandidate,
     AnalysisRequest,
     DeadlinePrecision,
+    TargetReason,
 )
 from mailbrief.text.matching import appears_in
 
 _PAST_DAYS = 31
 _FUTURE_DAYS = 366
+_SATURDAY = 5  # date.weekday() of the first weekend day.
 _DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _TIME_PATTERN = re.compile(r"([0-9]{1,2}):([0-9]{2})(?::([0-9]{2}))?")
 _ZONE_KEY_PATTERN = re.compile(r"[A-Za-z]+(/[A-Za-z0-9_+-]+)+")
@@ -125,18 +127,35 @@ def _parse_time(value: str) -> dt.time | None:
 
 
 def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> ResolvedDeadline:
-    """Check the candidate's deadline against its email and resolve it to a day or instant.
+    """Resolve the candidate's own deadline; see resolve_deadline_fields."""
+    return resolve_deadline_fields(
+        candidate.deadline_text,
+        candidate.deadline_date,
+        candidate.deadline_time,
+        candidate.stated_timezone,
+        request,
+    )
 
-    Raises InvalidDeadlineError, whose messages are static, when a date or time comes
-    without a phrase or the phrase is not in the email. An unusable date keeps the phrase
-    as unresolved, and an unusable time keeps only the date. The zone for a time is
-    chosen by _zone_for_time; when there is none, only the day is kept. Offsets are never
-    guessed.
+
+def resolve_deadline_fields(
+    text: str | None,
+    raw_date: str | None,
+    raw_time: str | None,
+    stated_zone: str | None,
+    request: AnalysisRequest,
+) -> ResolvedDeadline:
+    """Check provider-reported deadline fields against the email and resolve them.
+
+    The result is a day or an instant. Raises InvalidDeadlineError, whose messages are
+    static, when a date or time comes without a phrase or the phrase is not in the email.
+    An unusable date keeps the phrase as unresolved, and an unusable time keeps only the
+    date. The zone for a time is chosen by _zone_for_time; when there is none, only the day
+    is kept. Offsets are never guessed.
     """
-    text = _clean(candidate.deadline_text)
-    raw_date = _clean(candidate.deadline_date)
-    raw_time = _clean(candidate.deadline_time)
-    stated_zone = _clean(candidate.stated_timezone)
+    text = _clean(text)
+    raw_date = _clean(raw_date)
+    raw_time = _clean(raw_time)
+    stated_zone = _clean(stated_zone)
 
     if text is None:
         if raw_date is not None or raw_time is not None:
@@ -167,3 +186,30 @@ def resolve_deadline(candidate: AnalysisCandidate, request: AnalysisRequest) -> 
     # Re-derive the day so a time inside a DST gap stays consistent with its instant.
     local_date = at_utc.astimezone(zone).date()
     return ResolvedDeadline(text, DeadlinePrecision.DATETIME, local_date, at_utc, zone_name)
+
+
+def suggest_target(
+    deadline: ResolvedDeadline, request: AnalysisRequest
+) -> tuple[dt.date | None, TargetReason | None]:
+    """A day to finish work due at the deadline, and why; (None, None) without a dated one.
+
+    Days are taken in the owner's zone. The target is the last working day (Monday to
+    Friday) before the deadline's day, unless that day is before the email arrived; then
+    it is the deadline's day. There is no holiday calendar.
+    """
+    zone = ZoneInfo(request.timezone_name)
+    if deadline.precision is DeadlinePrecision.DATE and deadline.date is not None:
+        due = deadline.date
+    elif deadline.precision is DeadlinePrecision.DATETIME and deadline.at_utc is not None:
+        due = deadline.at_utc.astimezone(zone).date()
+    else:
+        return None, None
+    received = request.received_at_utc.astimezone(zone).date()
+    if due <= received:
+        return due, TargetReason.ON_DEADLINE
+    working_day = due - dt.timedelta(days=1)
+    while working_day.weekday() >= _SATURDAY:
+        working_day -= dt.timedelta(days=1)
+    if working_day >= received:
+        return working_day, TargetReason.WORKING_DAY_BEFORE
+    return due, TargetReason.ON_DEADLINE

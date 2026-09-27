@@ -1,11 +1,13 @@
 """Analysis service: planning, caching, batching, retries, errors and minimized requests."""
 
 import asyncio
+import hashlib
 import itertools
 import logging
+import math
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
@@ -17,11 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.config import Settings
 from mailbrief.domain.analysis import (
+    ActionEffort,
+    ActionOwnership,
     AIUsage,
     AnalysisProblem,
     AnalysisRequest,
     AnalysisResponse,
     DeadlinePrecision,
+    TargetReason,
 )
 from mailbrief.domain.bodies import BodySource, BodyStatus, PreparedBody
 from mailbrief.domain.briefs import AnalysisOutcome
@@ -49,8 +54,10 @@ from mailbrief.services.analysis import (
     AnalysisService,
     PlannedMessage,
     input_hash,
+    suggestion_fingerprint,
     validate_candidate,
 )
+from mailbrief.services.deadlines import ResolvedDeadline, suggest_target
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
 from mailbrief.storage.tables import AnalysisTable
@@ -63,7 +70,13 @@ from tests.unit.providers.groq.groq_fixtures import (
     error_body,
     sent_messages,
 )
-from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all, good_candidate
+from tests.unit.services.ai_fakes import (
+    FakeAIProvider,
+    ScriptItem,
+    answer_all,
+    good_action,
+    good_candidate,
+)
 
 ZONE = "America/Toronto"
 OWNER = "owner@example.com"
@@ -950,3 +963,352 @@ def test_validate_candidate_rejects_unsupported_output(overrides: dict[str, obje
 
     assert BODY[:20] not in str(caught.value)
     assert "Words that never" not in str(caught.value)
+
+
+PLAN_BODY = (
+    "Please approve the quarterly budget by Friday 5 PM. Sam will send the signed contract "
+    "on Monday. Please also book the meeting room for the review and tell the finance team "
+    "the new totals. The finance team needs it."
+)
+
+
+def test_suggestion_fingerprint_ignores_case_punctuation_symbols_and_spacing() -> None:
+    expected = suggestion_fingerprint("Approve the budget")
+
+    for variant in (
+        "APPROVE the budget!",
+        "  approve,   the budget. ",
+        "Approve the budget ✅",
+        "Ａｐｐｒｏｖｅ the budget",
+    ):
+        assert suggestion_fingerprint(variant) == expected
+    assert expected == hashlib.sha256(b"approve the budget").hexdigest()
+    assert suggestion_fingerprint("Approve the budgets") != expected
+
+
+@pytest.mark.parametrize("title", ["", "   ", "!?…", "✅ 🎉"])
+def test_suggestion_fingerprint_needs_letters_or_digits(title: str) -> None:
+    with pytest.raises(ValueError, match="letters or digits"):
+        suggestion_fingerprint(title)
+
+
+def test_validate_candidate_keeps_each_suggested_action() -> None:
+    request = make_request(body_text=PLAN_BODY)
+    candidate = good_candidate(
+        request,
+        actions=[
+            good_action(
+                request,
+                title="Approve the quarterly budget",
+                effort="minutes",
+                steps=["Read the numbers", "Reply to Alex"],
+                evidence="“approve the quarterly budget…”",
+            ),
+            good_action(
+                request,
+                title="Signed contract from Sam",
+                ownership="waiting_for",
+                evidence="Sam will send the signed contract",
+            ),
+        ],
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    first, second = analysis.suggestions
+    assert (first.position, first.title, first.ownership, first.effort) == (
+        0,
+        "Approve the quarterly budget",
+        ActionOwnership.MINE,
+        ActionEffort.MINUTES,
+    )
+    assert first.steps == ("Read the numbers", "Reply to Alex")
+    assert first.evidence == "approve the quarterly budget"
+    assert first.fingerprint == suggestion_fingerprint("Approve the quarterly budget")
+    assert (second.position, second.ownership, second.effort, second.steps) == (
+        1,
+        ActionOwnership.WAITING_FOR,
+        None,
+        (),
+    )
+    assert second.evidence == "Sam will send the signed contract"
+
+
+def test_validate_candidate_drops_only_the_suggestion_that_does_not_quote_the_email() -> None:
+    request = make_request(body_text=PLAN_BODY)
+    candidate = good_candidate(
+        request,
+        actions=[
+            good_action(request, title="Invent a task", evidence="Nothing like this was written."),
+            good_action(request, title="Book the meeting room", evidence="book the meeting room"),
+        ],
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    (kept,) = analysis.suggestions
+    assert (kept.position, kept.title) == (0, "Book the meeting room")
+    assert analysis.summary == "A short summary."
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [
+        {"deadline_text": "next Tuesday at noon", "deadline_date": "2026-09-08"},
+        {"deadline_text": None, "deadline_date": "2026-09-04", "deadline_time": "17:00"},
+    ],
+    ids=["phrase-not-in-email", "date-without-phrase"],
+)
+def test_validate_candidate_keeps_a_suggestion_without_its_invalid_deadline(
+    deadline: dict[str, object],
+) -> None:
+    request = make_request(body_text=PLAN_BODY)
+    candidate = good_candidate(request, actions=[good_action(request, **deadline)])
+
+    (suggestion,) = validate_candidate(candidate, request).suggestions
+
+    assert suggestion.deadline_precision is DeadlinePrecision.NONE
+    assert (
+        suggestion.deadline_text,
+        suggestion.deadline_date,
+        suggestion.deadline_at_utc,
+        suggestion.deadline_timezone,
+        suggestion.suggested_target_date,
+        suggestion.target_reason,
+    ) == (None, None, None, None, None, None)
+
+
+def test_validate_candidate_keeps_one_of_titles_that_differ_in_case_or_punctuation() -> None:
+    request = make_request(body_text=PLAN_BODY)
+    titles = ["!!!", "Book the room", "book THE room!", "  Book, the room.  ", "Book   the room"]
+    candidate = good_candidate(
+        request, actions=[good_action(request, title=title) for title in titles]
+    )
+
+    (suggestion,) = validate_candidate(candidate, request).suggestions
+
+    assert (suggestion.position, suggestion.title) == (0, "Book the room")
+
+
+def test_a_dropped_suggestion_does_not_block_a_later_one_with_the_same_title() -> None:
+    request = make_request(body_text=PLAN_BODY)
+    candidate = good_candidate(
+        request,
+        actions=[
+            good_action(request, title="Book the room", evidence="Never written anywhere."),
+            good_action(request, title="book the room", evidence="book the meeting room"),
+        ],
+    )
+
+    (suggestion,) = validate_candidate(candidate, request).suggestions
+
+    assert suggestion.title == "book the room"
+
+
+def test_validate_candidate_keeps_five_suggestions_with_five_steps_each() -> None:
+    request = make_request(body_text=PLAN_BODY)
+    steps = [f"Step {number}" for number in range(7)]
+    actions = [good_action(request, title=f"Task {number}", steps=steps) for number in range(7)]
+
+    analysis = validate_candidate(good_candidate(request, actions=actions), request)
+
+    assert [item.title for item in analysis.suggestions] == [f"Task {n}" for n in range(5)]
+    assert [item.position for item in analysis.suggestions] == [0, 1, 2, 3, 4]
+    for item in analysis.suggestions:
+        assert item.steps == ("Step 0", "Step 1", "Step 2", "Step 3", "Step 4")
+
+
+def test_validate_candidate_cleans_and_fits_steps() -> None:
+    request = make_request(body_text=PLAN_BODY)
+    steps = ["  Read the numbers  ", "", "   ", "check " * 30]
+
+    (suggestion,) = validate_candidate(
+        good_candidate(request, actions=[good_action(request, steps=steps)]), request
+    ).suggestions
+
+    first, second = suggestion.steps
+    assert first == "Read the numbers"
+    assert len(second) <= 120
+    assert second.endswith("check…")
+
+
+def test_validate_candidate_fits_a_long_title_to_120_characters() -> None:
+    request = make_request(body_text=PLAN_BODY)
+    title = "budget " * 28 + "item"
+    assert len(title) == 200
+
+    (suggestion,) = validate_candidate(
+        good_candidate(request, actions=[good_action(request, title=title)]), request
+    ).suggestions
+
+    assert len(suggestion.title) <= 120
+    assert suggestion.title.endswith("budget…")
+    assert suggestion.fingerprint == suggestion_fingerprint(suggestion.title)
+
+
+LONG_BODY = " ".join(
+    f"Item {number}: please review section {number} of the quarterly budget before the meeting."
+    for number in range(9)
+)
+
+
+def test_validate_candidate_keeps_all_stored_evidence_under_80_percent_of_the_body() -> None:
+    request = make_request(body_text=LONG_BODY)
+    assert 650 <= len(LONG_BODY) <= 750
+    quotes = [LONG_BODY[300:470], LONG_BODY[100:270], LONG_BODY[500:560]]
+    candidate = good_candidate(
+        request,
+        evidence=LONG_BODY[:320],
+        actions=[
+            good_action(request, title=f"Task {number}", evidence=quote)
+            for number, quote in enumerate(quotes)
+        ],
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    first, second, third = (item.evidence for item in analysis.suggestions)
+    assert first is not None and second is None and third is not None
+    assert len(analysis.evidence) <= 300
+    assert len(first) <= 160
+    total = len(analysis.evidence) + len(first) + len(third)
+    assert total <= 600
+    assert total * 5 < len(LONG_BODY) * 4  # Strictly under 80% of the body.
+
+
+# No spaces, so quotes are fitted to exactly their limit.
+DIGITS = "0123456789" * 200
+
+
+@pytest.mark.parametrize(
+    ("body", "last_quote"),
+    [(DIGITS, 140), (DIGITS[:700], 99)],
+    ids=["600-total", "80%-of-700"],
+)
+def test_validate_candidate_fills_the_evidence_total_exactly(body: str, last_quote: int) -> None:
+    request = make_request(body_text=body)
+    quotes = [DIGITS[:170], DIGITS[:170], DIGITS[: last_quote + 1], DIGITS[:last_quote]]
+    candidate = good_candidate(
+        request,
+        evidence=DIGITS[:350],
+        actions=[
+            good_action(request, title=f"Task {number}", evidence=quote)
+            for number, quote in enumerate(quotes)
+        ],
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    lengths = [
+        None if item.evidence is None else len(item.evidence) for item in analysis.suggestions
+    ]
+    assert (len(analysis.evidence), lengths) == (300, [160, None, None, last_quote])
+    total = 300 + 160 + last_quote
+    assert total == min(600, math.ceil(len(body) * 0.8) - 1)
+
+
+@pytest.mark.parametrize(
+    ("quote", "kept"), [("the quarterly budget b", True), ("the quarterly budget by", False)]
+)
+def test_validate_candidate_stores_a_quote_only_while_the_budget_lasts(
+    quote: str, kept: bool
+) -> None:
+    request = make_request()  # A 78-character body: 62 characters of evidence in total.
+    candidate = good_candidate(request, actions=[good_action(request, evidence=quote)])
+
+    analysis = validate_candidate(candidate, request)
+
+    (suggestion,) = analysis.suggestions
+    assert len(analysis.evidence) == 40
+    assert suggestion.evidence == (quote if kept else None)
+
+
+def test_validate_candidate_keeps_a_suggestion_when_no_quote_fits_a_short_body() -> None:
+    request = make_request()  # The message's own 62-character quote uses the whole total.
+    candidate = good_candidate(
+        request, evidence=BODY[:62], actions=[good_action(request, evidence="the")]
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    (suggestion,) = analysis.suggestions
+    assert len(analysis.evidence) == 62
+    assert suggestion.evidence is None
+    assert suggestion.title == "Approve the quarterly budget"
+
+
+@pytest.mark.parametrize(
+    ("deadline", "target"),
+    [
+        (
+            {"deadline_text": "on Monday", "deadline_date": "2026-09-07"},
+            (date(2026, 9, 4), TargetReason.WORKING_DAY_BEFORE),
+        ),
+        (
+            {
+                "deadline_text": "Friday 5 PM",
+                "deadline_date": "2026-09-04",
+                "deadline_time": "17:00",
+            },
+            (date(2026, 9, 4), TargetReason.ON_DEADLINE),
+        ),
+        ({"deadline_text": "ASAP"}, (None, None)),
+    ],
+    ids=["monday", "friday-5pm", "no-day"],
+)
+def test_validate_candidate_suggests_targets_with_suggest_target(
+    deadline: dict[str, object], target: tuple[date | None, TargetReason | None]
+) -> None:
+    request = make_request(body_text=f"{PLAN_BODY} Reply ASAP.")  # Received Friday morning.
+    candidate = good_candidate(request, actions=[good_action(request, **deadline)])
+
+    (suggestion,) = validate_candidate(candidate, request).suggestions
+
+    resolved = ResolvedDeadline(
+        suggestion.deadline_text,
+        suggestion.deadline_precision,
+        suggestion.deadline_date,
+        suggestion.deadline_at_utc,
+        suggestion.deadline_timezone,
+    )
+    assert (suggestion.suggested_target_date, suggestion.target_reason) == target
+    assert suggest_target(resolved, request) == target
+
+
+async def test_execute_keeps_the_suggestions_of_each_analysis(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 2)
+
+    def answer_with_actions(requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+        return AnalysisResponse(
+            candidates=tuple(
+                good_candidate(
+                    request,
+                    actions=[
+                        good_action(request, evidence="approve the quarterly budget"),
+                        good_action(
+                            request,
+                            title="Totals for the finance team",
+                            ownership="waiting_for",
+                            evidence="The finance team needs it",
+                        ),
+                    ],
+                )
+                for request in requests
+            )
+        )
+
+    run = await analyze(
+        session, FakeAIProvider([answer_with_actions]), shortlist, account_id=account_id
+    )
+
+    assert outcomes(run) == [ANALYZED, ANALYZED]
+    for item in run.messages:
+        assert item.analysis is not None
+        first, second = item.analysis.suggestions
+        assert (first.title, first.evidence) == (
+            "Approve the quarterly budget",
+            "approve the quarterly budget",
+        )
+        # A 91-character body leaves 32 characters after the message's own 40.
+        assert (second.ownership, second.evidence) == (ActionOwnership.WAITING_FOR, None)
+        assert "quarterly budget" not in repr(item.analysis)
