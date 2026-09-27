@@ -66,7 +66,7 @@ from mailbrief.services.deadlines import (
 )
 from mailbrief.storage.repositories import AnalysisRepository, MessageRepository
 from mailbrief.text.matching import appears_in
-from mailbrief.text.prepare import truncate_at_boundary
+from mailbrief.text.prepare import clean_generated_text, truncate_at_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -152,11 +152,11 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
         raise ValueError("the body is too short to store any evidence from it")
     stored_evidence = _fit(evidence, evidence_cap)
     deadline = resolve_deadline(candidate, request)
-    action_text = (candidate.action_text or "").strip()
+    action_text = clean_generated_text(candidate.action_text or "")
     return MessageAnalysis(
         message_key=request.message_key,
         category=candidate.category,
-        summary=_fit(candidate.summary, SUMMARY_MAX_CHARS),
+        summary=_fit(clean_generated_text(candidate.summary), SUMMARY_MAX_CHARS),
         action_required=candidate.action_required,
         action_text=_fit(action_text, ACTION_TEXT_MAX_CHARS) if action_text else None,
         deadline_text=deadline.text,
@@ -190,7 +190,7 @@ def _suggestions(
     for action in actions:
         if len(kept) == MAX_SUGGESTIONS:
             break
-        title = _fit(action.title.strip(), SUGGESTION_TITLE_MAX_CHARS)
+        title = _fit(clean_generated_text(action.title), SUGGESTION_TITLE_MAX_CHARS)
         try:
             fingerprint = suggestion_fingerprint(title)
         except ValueError:
@@ -208,7 +208,7 @@ def _suggestions(
             )
         except InvalidDeadlineError:
             deadline = _NO_DEADLINE
-        stripped = (step.strip() for step in action.steps)
+        stripped = (clean_generated_text(step) for step in action.steps)
         steps = tuple(_fit(step, SUGGESTION_STEP_MAX_CHARS) for step in stripped if step)
         target_date, target_reason = suggest_target(deadline, request)
         quote = _fit(evidence, SUGGESTION_EVIDENCE_CHARS)

@@ -3,6 +3,7 @@
 import pytest
 
 from mailbrief.text.prepare import (
+    clean_generated_text,
     looks_like_forward,
     normalize_text,
     trim_quoted_history,
@@ -177,3 +178,19 @@ def test_quoted_apple_forward_is_never_trimmed() -> None:
         "> Date: 21 September 2026 at 09:00\n> Subject: Budget\n>\n> The budget is approved."
     )
     assert trim_quoted_history(text) == (text, False)
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("Pay the invoice\x1b[2J\x1b[H now", "Pay the invoice[2J[H now"),
+        ("\x1b]8;;https://evil.example\x07click\x1b]8;;\x07", "]8;;https://evil.exampleclick]8;;"),
+        ("Approve \u202eteg\u202c the draft", "Approve teg the draft"),
+        ("Zero\u200bwidth and\u3164filler", "Zerowidth andfiller"),
+        ("Line one\n\tLine two\r\n", "Line one Line two"),
+        ("回复会议邀请 👍", "回复会议邀请 👍"),
+        ("\x00\x07\x1b", ""),
+    ],
+)
+def test_generated_text_loses_control_and_format_characters(raw: str, clean: str) -> None:
+    assert clean_generated_text(raw) == clean

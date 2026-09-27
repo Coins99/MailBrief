@@ -1384,3 +1384,37 @@ async def test_a_cached_suggestion_that_no_longer_validates_is_a_miss(
     assert item.analysis_row_id is not None
     stored = await AnalysisRepository(session).get_suggestions(item.analysis_row_id)
     assert stored == []  # The new answer had no actions, so none are kept.
+
+
+def test_validate_candidate_cleans_text_the_model_wrote_itself() -> None:
+    body = "Please approve the quarterly budget by Friday so finance can close the books."
+    request = AnalysisRequest(
+        message_key="k1",
+        subject="Budget",
+        sender=EmailContact(address="alex@example.com"),
+        received_at_utc=datetime(2026, 9, 28, 14, tzinfo=UTC),
+        timezone_name="UTC",
+        body_text=body,
+    )
+    candidate = good_candidate(
+        request,
+        summary="Budget\x1b[2J approval \u202eneeded",
+        action_required=True,
+        action_text="Approve\x07 it\nsoon",
+        actions=(
+            good_action(
+                request,
+                title="\x1b]8;;https://evil.example\x07Approve\x1b]8;;\x07",
+                steps=("Check\x1b[31m totals", "\u200b"),
+            ),
+        ),
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    texts = [analysis.summary, analysis.action_text or "", *analysis.suggestions[0].steps]
+    texts.append(analysis.suggestions[0].title)
+    assert not any(ord(ch) < 32 or ch in "\u202e\u200b" for text in texts for ch in text)
+    assert analysis.summary == "Budget[2J approval needed"
+    assert analysis.action_text == "Approve it soon"
+    assert analysis.suggestions[0].steps == ("Check[31m totals",)
