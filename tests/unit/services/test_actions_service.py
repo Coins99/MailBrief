@@ -1074,3 +1074,57 @@ async def test_the_clock_must_be_aware(session: AsyncSession) -> None:
 
     with pytest.raises(ValueError):
         await naive.accept(seeded.suggestion_ids[0])
+
+
+async def test_save_applies_an_edit_and_a_new_plan_as_one_revision(
+    session: AsyncSession, service: ActionService
+) -> None:
+    seeded = await seed(session)
+    action = await service.accept(seeded.suggestion_ids[0])
+    edit = ActionEdit(
+        title="Send the final deck",
+        ownership=ActionOwnership.WAITING_FOR,
+        effort=None,
+        target_date=None,
+        notes="",
+    )
+
+    saved = await service.save(
+        action.public_id,
+        1,
+        edit,
+        [StepEdit(step_id=action.steps[1].step_id, text="Draft the slides", done=False)],
+    )
+    edit_only = await service.save(action.public_id, 2, edit)
+
+    assert (saved.revision, saved.title, saved.ownership) == (
+        2,
+        "Send the final deck",
+        ActionOwnership.WAITING_FOR,
+    )
+    assert [step.text for step in saved.steps] == ["Draft the slides"]
+    assert edit_only.revision == 3
+    assert edit_only.steps == saved.steps
+
+
+async def test_save_changes_nothing_when_its_plan_is_rejected(
+    session: AsyncSession, service: ActionService
+) -> None:
+    seeded = await seed(session)
+    action = await service.accept(seeded.suggestion_ids[0])
+    edit = ActionEdit(
+        title="Should not stick",
+        ownership=ActionOwnership.MINE,
+        effort=None,
+        target_date=None,
+        notes="",
+    )
+
+    with pytest.raises(ActionConflictError):
+        await service.save(
+            action.public_id, 1, edit, [StepEdit(step_id=999_999, text="Not mine", done=False)]
+        )
+    with pytest.raises(ActionConflictError):
+        await service.save(action.public_id, 7, edit)
+
+    assert await service.get(action.public_id) == action

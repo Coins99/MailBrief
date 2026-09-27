@@ -69,6 +69,24 @@ def _mark(step: ActionStepTable, done: bool, now: datetime) -> None:
         step.done, step.done_at_utc = True, now
 
 
+def _check_step_list(steps: Sequence[StepEdit]) -> list[int]:
+    """The listed step IDs; raises ActionConflictError for too many steps or a repeated ID."""
+    if len(steps) > MAX_ACTION_STEPS:
+        raise ActionConflictError("An action has at most 30 steps.")
+    listed = [edit.step_id for edit in steps if edit.step_id is not None]
+    if len(listed) != len(set(listed)):
+        raise ActionConflictError("Each step may appear only once.")
+    return listed
+
+
+def _apply_edit(row: ActionTable, edit: ActionEdit) -> None:
+    row.title = edit.title
+    row.ownership = edit.ownership.value
+    row.effort = None if edit.effort is None else edit.effort.value
+    row.target_date = edit.target_date
+    row.notes = edit.notes
+
+
 def _accepted_action_id(decision: SuggestionDecisionTable | None) -> int | None:
     if decision is None or decision.decision != SuggestionState.ACCEPTED.value:
         return None
@@ -125,6 +143,25 @@ class ActionService:
 
     async def _load(self, row: ActionTable) -> Action:
         return (await self._repository.load([row]))[0]
+
+    async def _apply_steps(
+        self, row: ActionTable, steps: Sequence[StepEdit], listed: list[int], now: datetime
+    ) -> None:
+        """Update listed steps, add new ones and delete the rest, in the given order."""
+        existing = {step.id: step for step in await self._repository.step_rows(row.id)}
+        if not set(listed) <= existing.keys():
+            raise ActionConflictError("A step does not belong to this action.")
+        for position, edit in enumerate(steps):
+            if edit.step_id is None:
+                self._repository.add_step(row.id, position, edit.text, now if edit.done else None)
+                continue
+            step = existing[edit.step_id]
+            step.position = position
+            step.text = edit.text
+            _mark(step, edit.done, now)
+        for step_id, step in existing.items():
+            if step_id not in listed:
+                await self._repository.delete_step(step)
 
     async def accept(self, suggestion_id: int) -> Action:
         """Turn a suggestion into an action; accepting it again returns the same action.
@@ -287,11 +324,27 @@ class ActionService:
 
         async def run(now: datetime) -> Action:
             row = await self._live(public_id, expected_revision)
-            row.title = edit.title
-            row.ownership = edit.ownership.value
-            row.effort = None if edit.effort is None else edit.effort.value
-            row.target_date = edit.target_date
-            row.notes = edit.notes
+            _apply_edit(row, edit)
+            _touch(row, now)
+            return await self._load(row)
+
+        return await self._write(run)
+
+    async def save(
+        self,
+        public_id: str,
+        expected_revision: int,
+        edit: ActionEdit,
+        steps: Sequence[StepEdit] | None = None,
+    ) -> Action:
+        """Apply an edit and, when given, a new plan together, as one revision."""
+
+        async def run(now: datetime) -> Action:
+            listed = [] if steps is None else _check_step_list(steps)
+            row = await self._live(public_id, expected_revision)
+            _apply_edit(row, edit)
+            if steps is not None:
+                await self._apply_steps(row, steps, listed, now)
             _touch(row, now)
             return await self._load(row)
 
@@ -303,28 +356,9 @@ class ActionService:
         """Replace the plan: update listed steps, add new ones, delete the rest, in order."""
 
         async def run(now: datetime) -> Action:
-            if len(steps) > MAX_ACTION_STEPS:
-                raise ActionConflictError("An action has at most 30 steps.")
-            listed = [edit.step_id for edit in steps if edit.step_id is not None]
-            if len(listed) != len(set(listed)):
-                raise ActionConflictError("Each step may appear only once.")
+            listed = _check_step_list(steps)
             row = await self._live(public_id, expected_revision)
-            existing = {step.id: step for step in await self._repository.step_rows(row.id)}
-            if not set(listed) <= existing.keys():
-                raise ActionConflictError("A step does not belong to this action.")
-            for position, edit in enumerate(steps):
-                if edit.step_id is None:
-                    self._repository.add_step(
-                        row.id, position, edit.text, now if edit.done else None
-                    )
-                    continue
-                step = existing[edit.step_id]
-                step.position = position
-                step.text = edit.text
-                _mark(step, edit.done, now)
-            for step_id, step in existing.items():
-                if step_id not in listed:
-                    await self._repository.delete_step(step)
+            await self._apply_steps(row, steps, listed, now)
             _touch(row, now)
             return await self._load(row)
 
