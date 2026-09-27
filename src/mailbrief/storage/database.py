@@ -15,6 +15,9 @@ from sqlalchemy.ext.asyncio import (
 
 from mailbrief.storage.tables import Base
 
+# Batch size limit for bulk SQLite inserts and IN lists to safeguard parameter limits
+MAX_SQLITE_BATCH_SIZE = 100
+
 
 def sqlite_url(database_path: Path) -> str:
     """Return an aiosqlite URL for an absolute filesystem path."""

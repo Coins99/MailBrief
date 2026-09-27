@@ -1,6 +1,6 @@
 """Database repositories implementing transactional persistence and domain mappings."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import cast
 
@@ -9,6 +9,7 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mailbrief.domain.actions import SuggestionView
 from mailbrief.domain.analysis import (
     SUMMARY_MAX_CHARS,
     AnalysisCategory,
@@ -32,7 +33,8 @@ from mailbrief.domain.messages import (
     ProviderKind,
     RankReason,
 )
-from mailbrief.storage.actions import suggestion_from_row
+from mailbrief.storage.actions import suggestion_from_row, suggestion_views
+from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
 from mailbrief.storage.tables import (
     AccountTable,
     ActionSuggestionTable,
@@ -45,8 +47,6 @@ from mailbrief.storage.tables import (
 )
 from mailbrief.text.prepare import truncate_at_boundary
 
-# Batch size limit for bulk SQLite inserts to safeguard parameter limits
-MAX_SQLITE_BATCH_SIZE = 100
 _NO_SUMMARY = "No summary available"
 
 
@@ -763,7 +763,10 @@ class DigestRepository:
             return None
         digest, account = row
         items = await self.get_digest_items(digest.id)
-        return self.to_domain(digest, items, account.email_address)
+        views = await suggestion_views(
+            self._session, [(item.message_id, item.analysis_id) for item, _, _ in items]
+        )
+        return self.to_domain(digest, items, account.email_address, suggestions=views)
 
     async def get_digest_items(
         self,
@@ -793,8 +796,14 @@ class DigestRepository:
         digest: DigestTable,
         items_with_relations: Sequence[tuple[DigestItemTable, MessageTable, AnalysisTable | None]],
         account_identity: str,
+        suggestions: Mapping[int, tuple[SuggestionView, ...]] | None = None,
     ) -> DailyDigest:
-        """Map a DigestTable and its joined item records to a DailyDigest domain model."""
+        """Map a DigestTable and its joined item records to a DailyDigest domain model.
+
+        ``suggestions`` maps a message row ID to its suggestion views (see
+        suggestion_views); an item without an entry shows none.
+        """
+        views = suggestions or {}
         domain_items: list[DigestItem] = []
         for item_table, msg_table, analysis_table in items_with_relations:
             if analysis_table is None:
@@ -823,6 +832,7 @@ class DigestRepository:
                     deadline_at_utc=analysis_table.deadline_at_utc if analysis_table else None,
                     evidence=analysis_table.evidence if analysis_table else None,
                     source_url=HttpUrl(msg_table.web_link),
+                    suggestions=views.get(msg_table.id, ()),
                 )
             )
 

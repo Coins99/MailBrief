@@ -17,6 +17,7 @@ from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestSection,
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.services.analysis import PlannedMessage
 from mailbrief.services.calendar import DayWindow
+from mailbrief.storage.actions import suggestion_views
 from mailbrief.storage.repositories import DigestRepository
 
 SECTION_ORDER = (
@@ -122,4 +123,9 @@ class DigestService:
         )
         await self._session.commit()
         rows = await self._digests.get_digest_items(saved.id)
-        return DigestRepository.to_domain(saved, rows, account_identity=account_email)
+        views = await suggestion_views(
+            self._session, [(item.message_id, item.analysis_id) for item, _, _ in rows]
+        )
+        return DigestRepository.to_domain(
+            saved, rows, account_identity=account_email, suggestions=views
+        )
