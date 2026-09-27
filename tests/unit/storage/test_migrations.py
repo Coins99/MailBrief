@@ -1,9 +1,12 @@
-"""Tests for the initial Alembic schema revision."""
+"""Tests for the Alembic schema revisions."""
 
+import asyncio
+import re
 import shutil
 import sqlite3
 import sys
 import tempfile
+from collections.abc import Sequence
 from contextlib import closing
 from pathlib import Path
 
@@ -12,7 +15,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from mailbrief.storage.database import sqlite_url
+from mailbrief.storage.database import Database, sqlite_url
 from mailbrief.storage.migrate import upgrade_database
 
 
@@ -315,3 +318,245 @@ def test_backup_failure_prevents_upgrade(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(OSError):
         upgrade_database(path)
     upgrade.assert_not_called()
+
+
+_ACTION_TABLES = {
+    "actions",
+    "action_suggestions",
+    "action_steps",
+    "action_sources",
+    "suggestion_decisions",
+}
+_OLD_ROWS = ("accounts", "messages", "analyses", "digests", "digest_items")
+
+
+def _seed_before_actions(path: Path) -> None:
+    """One account, message, analysis, digest and digest item at revision 0004."""
+    with closing(sqlite3.connect(path)) as connection:
+        account_id = connection.execute(
+            "INSERT INTO accounts(provider,provider_account_id,email_address,created_at_utc,"
+            "account_addresses) VALUES('gmail','account-1','me@example.com',"
+            "'2026-09-25 00:00:00','[\"me@example.com\"]')"
+        ).lastrowid
+        message_id = connection.execute(
+            "INSERT INTO messages(account_id,provider_message_id,subject,sender_address,"
+            "to_recipients_json,received_at_utc,is_read,importance,has_attachments,body_preview,"
+            "web_link,rank_reasons_json,synced_at_utc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                account_id,
+                "message-1",
+                "Subject",
+                "sender@example.com",
+                "[]",
+                "2026-09-25 00:00:00",
+                0,
+                "normal",
+                0,
+                "",
+                "https://example.com",
+                "[]",
+                "2026-09-25 00:00:00",
+            ),
+        ).lastrowid
+        connection.execute(
+            f"INSERT INTO analyses({_ANALYSIS_COLUMNS},deadline_precision,deadline_date,"
+            "deadline_timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                7,
+                message_id,
+                "hash-1",
+                "groq",
+                "model-1",
+                "prompt-1",
+                "5",
+                "action",
+                "Approve the proposal.",
+                1,
+                "Approve it.",
+                "Friday",
+                None,
+                0.75,
+                "Please approve it by Friday.",
+                "2026-09-25 00:00:00.000000",
+                "date",
+                "2026-09-04",
+                "America/Toronto",
+            ),
+        )
+        digest_id = connection.execute(
+            "INSERT INTO digests(account_id,local_date,timezone_name,status,generated_at_utc,"
+            "sync_complete,shortlisted_count,analyzed_count,reused_count,failed_count,"
+            "skipped_count) VALUES(?,'2026-09-25','America/Toronto','complete',"
+            "'2026-09-25 00:00:00',1,1,1,0,0,0)",
+            (account_id,),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO digest_items(digest_id,message_id,analysis_id,position,section) "
+            "VALUES(?,?,7,0,'actions')",
+            (digest_id, message_id),
+        )
+        connection.commit()
+
+
+def _rows(path: Path, tables: Sequence[str]) -> dict[str, list[tuple[object, ...]]]:
+    with closing(sqlite3.connect(path)) as connection:
+        return {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in tables
+        }
+
+
+def _foreign_keys(path: Path, table: str) -> set[tuple[str, str, str, str]]:
+    """(target table, column, target column, on_delete) for each foreign key."""
+    with closing(sqlite3.connect(path)) as connection:
+        return {
+            (str(row[2]), str(row[3]), str(row[4]), str(row[6]))
+            for row in connection.execute(f"PRAGMA foreign_key_list('{table}')")
+        }
+
+
+def _use_action_tables(path: Path) -> None:
+    """Insert one row into each action table, relying on the server defaults."""
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        action_id = connection.execute(
+            "INSERT INTO actions(public_id,title,ownership,status,created_at_utc,updated_at_utc) "
+            "VALUES('0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44','Approve it','mine','open',"
+            "'2026-09-27 00:00:00','2026-09-27 00:00:00')"
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO action_suggestions(analysis_id,position,title,ownership,steps_json,"
+            "fingerprint) VALUES(7,0,'Approve it','mine','[]',?)",
+            ("a" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO action_steps(action_id,position,text) VALUES(?,0,'Read it')",
+            (action_id,),
+        )
+        connection.execute(
+            "INSERT INTO action_sources(action_id,message_id,provider_message_id,subject,"
+            "sender_address,web_link,received_at_utc) VALUES(?,1,'message-1','Subject',"
+            "'sender@example.com','https://example.com','2026-09-25 00:00:00')",
+            (action_id,),
+        )
+        connection.execute(
+            "INSERT INTO suggestion_decisions(message_id,fingerprint,decision,action_id,"
+            "decided_at_utc) VALUES(1,?,'accepted',?,'2026-09-27 00:00:00')",
+            ("a" * 64, action_id),
+        )
+        defaults = connection.execute(
+            "SELECT actions.deadline_precision,actions.notes,actions.revision,action_steps.done "
+            "FROM actions JOIN action_steps ON action_steps.action_id=actions.id"
+        ).fetchone()
+        for rejected in (
+            "UPDATE actions SET status='archived'",
+            "UPDATE actions SET revision=0",
+            "UPDATE action_suggestions SET ownership='theirs'",
+            "UPDATE suggestion_decisions SET decision='maybe'",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(rejected)
+        connection.commit()
+    assert defaults == ("none", "", 1, 0)
+
+
+def test_action_tables_upgrade_and_downgrade_keep_existing_rows(tmp_path: Path) -> None:
+    path = tmp_path / "m4.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    before = _rows(path, _OLD_ROWS)
+
+    command.upgrade(config, "head")
+
+    assert table_names(path) >= _ACTION_TABLES
+    assert _rows(path, _OLD_ROWS) == before
+    assert _foreign_keys(path, "actions") == set()
+    assert _foreign_keys(path, "action_suggestions") == {
+        ("analyses", "analysis_id", "id", "CASCADE")
+    }
+    assert _foreign_keys(path, "action_steps") == {("actions", "action_id", "id", "CASCADE")}
+    assert _foreign_keys(path, "action_sources") == {
+        ("actions", "action_id", "id", "CASCADE"),
+        ("messages", "message_id", "id", "SET NULL"),
+    }
+    assert _foreign_keys(path, "suggestion_decisions") == {
+        ("messages", "message_id", "id", "CASCADE"),
+        ("actions", "action_id", "id", "SET NULL"),
+    }
+    _use_action_tables(path)
+
+    command.downgrade(config, "20260925_0004")
+
+    assert not _ACTION_TABLES & table_names(path)
+    assert _rows(path, _OLD_ROWS) == before
+
+
+def _schema(path: Path) -> dict[str, dict[str, object]]:
+    """Each table's columns, foreign keys, unique column sets, indexes and CHECK names."""
+    shape: dict[str, dict[str, object]] = {}
+    with closing(sqlite3.connect(path)) as connection:
+        tables = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name NOT LIKE 'sqlite_%' AND name != 'alembic_version'"
+            )
+        ]
+        for table in tables:
+            unique: set[frozenset[str]] = set()
+            indexes: set[tuple[str, tuple[str, ...]]] = set()
+            for index in connection.execute(f"PRAGMA index_list('{table}')").fetchall():
+                columns = tuple(
+                    str(row[2]) for row in connection.execute(f"PRAGMA index_info('{index[1]}')")
+                )
+                if index[3] == "u":
+                    unique.add(frozenset(columns))
+                elif index[3] == "c":
+                    indexes.add((str(index[1]), columns))
+            (sql,) = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+            ).fetchone()
+            shape[table] = {
+                # Name, type, NOT NULL, server default and primary key position.
+                "columns": {
+                    tuple(row[1:]) for row in connection.execute(f"PRAGMA table_info('{table}')")
+                },
+                "foreign_keys": _foreign_keys(path, table),
+                "unique": unique,
+                "indexes": indexes,
+                "checks": set(re.findall(r"CONSTRAINT (ck_\w+) CHECK", str(sql))),
+            }
+    return shape
+
+
+async def _create_schema(path: Path) -> None:
+    database = Database.from_path(path)
+    try:
+        await database.create_schema_for_tests()
+    finally:
+        await database.dispose()
+
+
+def test_head_schema_matches_the_orm(tmp_path: Path) -> None:
+    migrated = tmp_path / "migrated.sqlite3"
+    created = tmp_path / "created.sqlite3"
+    command.upgrade(_alembic_config(migrated), "head")
+    asyncio.run(_create_schema(created))
+
+    migrated_schema, created_schema = _schema(migrated), _schema(created)
+
+    assert set(migrated_schema) >= _ACTION_TABLES
+    assert set(migrated_schema) == set(created_schema)
+    for table in sorted(created_schema):
+        assert migrated_schema[table] == created_schema[table], table
+    assert created_schema["actions"]["checks"] == {
+        "ck_actions_status_known",
+        "ck_actions_ownership_known",
+        "ck_actions_deadline_precision_known",
+        "ck_actions_revision_positive",
+    }
+    assert created_schema["action_suggestions"]["unique"] == {
+        frozenset({"analysis_id", "position"}),
+        frozenset({"analysis_id", "fingerprint"}),
+    }

@@ -36,6 +36,9 @@ NAMING_CONVENTION = {
     "pk": "pk_%(table_name)s",
 }
 
+_PRECISION_CHECK = "deadline_precision IN ('none','unresolved','date','datetime')"
+_OWNERSHIP_CHECK = "ownership IN ('mine','waiting_for')"
+
 
 class Base(DeclarativeBase):
     """Declarative base shared by mappings and Alembic metadata."""
@@ -293,3 +296,156 @@ class SyncRunTable(Base):
     failed_message_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+
+
+class ActionTable(Base):
+    """An action the owner accepted.
+
+    Actions have no account foreign key: they belong to the owner and outlive account or
+    message deletion through the snapshots in their sources.
+    """
+
+    __tablename__ = "actions"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_actions_public_id"),
+        CheckConstraint("status IN ('open','completed')", name="status_known"),
+        CheckConstraint(_OWNERSHIP_CHECK, name="ownership_known"),
+        CheckConstraint(_PRECISION_CHECK, name="deadline_precision_known"),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        Index("ix_actions_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    ownership: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    effort: Mapped[str | None] = mapped_column(String(16))
+    deadline_text: Mapped[str | None] = mapped_column(Text)
+    deadline_precision: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="none",
+        server_default="none",
+    )
+    deadline_date: Mapped[date | None] = mapped_column(Date)
+    deadline_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    deadline_timezone: Mapped[str | None] = mapped_column(String(128))
+    suggested_target_date: Mapped[date | None] = mapped_column(Date)
+    target_reason: Mapped[str | None] = mapped_column(String(32))
+    target_date: Mapped[date | None] = mapped_column(Date)
+    notes: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    evidence: Mapped[str | None] = mapped_column(Text)
+    created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    completed_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    deleted_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+
+
+class ActionSuggestionTable(Base):
+    """One validated action suggested by a cached analysis, at its position."""
+
+    __tablename__ = "action_suggestions"
+    __table_args__ = (
+        UniqueConstraint("analysis_id", "position", name="uq_action_suggestions_position"),
+        UniqueConstraint("analysis_id", "fingerprint", name="uq_action_suggestions_fingerprint"),
+        CheckConstraint("position >= 0", name="position_nonnegative"),
+        CheckConstraint(_OWNERSHIP_CHECK, name="ownership_known"),
+        CheckConstraint(_PRECISION_CHECK, name="deadline_precision_known"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    analysis_id: Mapped[int] = mapped_column(
+        ForeignKey("analyses.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    ownership: Mapped[str] = mapped_column(String(16), nullable=False)
+    effort: Mapped[str | None] = mapped_column(String(16))
+    deadline_text: Mapped[str | None] = mapped_column(Text)
+    deadline_precision: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="none",
+        server_default="none",
+    )
+    deadline_date: Mapped[date | None] = mapped_column(Date)
+    deadline_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    deadline_timezone: Mapped[str | None] = mapped_column(String(128))
+    suggested_target_date: Mapped[date | None] = mapped_column(Date)
+    target_reason: Mapped[str | None] = mapped_column(String(32))
+    steps_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    evidence: Mapped[str | None] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class ActionStepTable(Base):
+    """One ordered step of an accepted action's plan."""
+
+    __tablename__ = "action_steps"
+    __table_args__ = (
+        CheckConstraint("position >= 0", name="position_nonnegative"),
+        Index("ix_action_steps_action_id", "action_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    action_id: Mapped[int] = mapped_column(
+        ForeignKey("actions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    done: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    done_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class ActionSourceTable(Base):
+    """A snapshot of a message an action came from; it stays when the message goes."""
+
+    __tablename__ = "action_sources"
+    __table_args__ = (
+        UniqueConstraint("action_id", "provider_message_id", name="uq_action_sources_message"),
+        Index("ix_action_sources_message_id", "message_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    action_id: Mapped[int] = mapped_column(
+        ForeignKey("actions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))
+    provider_message_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sender_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    web_link: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class SuggestionDecisionTable(Base):
+    """The owner's decision on one suggestion, kept per message and title fingerprint."""
+
+    __tablename__ = "suggestion_decisions"
+    __table_args__ = (
+        UniqueConstraint("message_id", "fingerprint", name="uq_suggestion_decisions_fingerprint"),
+        CheckConstraint("decision IN ('accepted','dismissed')", name="decision_known"),
+        Index("ix_suggestion_decisions_action_id", "action_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"))
+    decided_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
