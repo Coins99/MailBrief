@@ -1,6 +1,7 @@
 """Tests for the Alembic schema revisions."""
 
 import asyncio
+import logging
 import re
 import shutil
 import sqlite3
@@ -560,3 +561,16 @@ def test_head_schema_matches_the_orm(tmp_path: Path) -> None:
         frozenset({"analysis_id", "position"}),
         frozenset({"analysis_id", "fingerprint"}),
     }
+
+
+def test_alembic_ini_keeps_existing_loggers_enabled(tmp_path: Path) -> None:
+    """env.py reads alembic.ini's logging setup without disabling the app's loggers.
+
+    Before the fix, a migration test that ran first silenced every existing logger, so
+    later log-capture tests failed depending on test order.
+    """
+    existing = logging.getLogger("mailbrief.services.analysis")
+
+    command.upgrade(_alembic_config(tmp_path / "logging.sqlite3"), "head")
+
+    assert not existing.disabled
