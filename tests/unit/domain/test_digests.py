@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from mailbrief.domain.actions import SuggestionState, SuggestionView
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.digests import (
     DailyDigest,
@@ -15,7 +16,13 @@ from mailbrief.domain.digests import (
     SyncStage,
     SyncStatus,
 )
-from tests.factories import TEST_GENERATED_AT, TEST_LOCAL_DATE, make_digest_item
+from tests.factories import (
+    TEST_GENERATED_AT,
+    TEST_LOCAL_DATE,
+    fingerprint_of,
+    make_digest_item,
+    make_suggestion,
+)
 
 
 def test_daily_digest_round_trips_as_json() -> None:
@@ -31,6 +38,39 @@ def test_daily_digest_round_trips_as_json() -> None:
     restored = DailyDigest.model_validate_json(digest.model_dump_json())
 
     assert restored == digest
+
+
+def test_a_digest_item_carries_its_suggestions_through_json() -> None:
+    views = (
+        SuggestionView(
+            suggestion_id=1,
+            suggestion=make_suggestion(),
+            state=SuggestionState.ACCEPTED,
+            action_public_id="5f0d1a8e-2c3b-4e5f-8a9b-0c1d2e3f4a5b",
+        ),
+        SuggestionView(
+            suggestion_id=2,
+            suggestion=make_suggestion(position=1, fingerprint=fingerprint_of("call sam")),
+            state=SuggestionState.PENDING,
+        ),
+    )
+    digest = DailyDigest(
+        account_id="account-1",
+        local_date=TEST_LOCAL_DATE,
+        timezone_name="America/Toronto",
+        generated_at_utc=TEST_GENERATED_AT,
+        status=DigestStatus.COMPLETE,
+        items=(make_digest_item(suggestions=views),),
+    )
+
+    restored = DailyDigest.model_validate_json(digest.model_dump_json())
+
+    assert restored == digest
+    assert [view.state for view in restored.items[0].suggestions] == [
+        SuggestionState.ACCEPTED,
+        SuggestionState.PENDING,
+    ]
+    assert make_digest_item().suggestions == ()
 
 
 def test_empty_digest_accepts_no_items() -> None:

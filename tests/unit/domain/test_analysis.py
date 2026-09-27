@@ -7,6 +7,10 @@ from pydantic import ValidationError
 
 from mailbrief.domain.analysis import (
     ANALYSIS_SCHEMA_VERSION,
+    ActionCandidate,
+    ActionEffort,
+    ActionOwnership,
+    ActionSuggestion,
     AIUsage,
     AnalysisCandidate,
     AnalysisCategory,
@@ -15,9 +19,12 @@ from mailbrief.domain.analysis import (
     AnalysisResponse,
     DeadlinePrecision,
     MessageAnalysis,
+    TargetReason,
+    check_deadline_fields,
+    deadline_due_at,
 )
 from mailbrief.domain.messages import EmailContact
-from tests.factories import make_analysis
+from tests.factories import fingerprint_of, make_analysis, make_suggestion
 
 MARKER = "SYNTHETIC-PRIVATE-MARKER-4f1c"
 FRIDAY = date(2026, 9, 4)
@@ -81,8 +88,8 @@ def candidate_values(**overrides: object) -> dict[str, object]:
     return values
 
 
-def test_schema_version_is_two() -> None:
-    assert ANALYSIS_SCHEMA_VERSION == "5"
+def test_schema_version_is_pinned() -> None:
+    assert ANALYSIS_SCHEMA_VERSION == "6"
 
 
 def test_message_analysis_round_trips_as_json() -> None:
@@ -225,8 +232,8 @@ def test_candidate_accepts_unbounded_provider_text() -> None:
     assert candidate.deadline_time == "17:00"
 
 
-@pytest.mark.parametrize("field", sorted(AnalysisCandidate.model_fields))
-def test_candidate_fields_are_all_required(field: str) -> None:
+@pytest.mark.parametrize("field", sorted(set(AnalysisCandidate.model_fields) - {"actions"}))
+def test_candidate_fields_other_than_actions_are_all_required(field: str) -> None:
     values = candidate_values()
     del values[field]
 
@@ -269,3 +276,264 @@ def test_usage_counts_cannot_be_negative(field: str) -> None:
 def test_blank_action_or_deadline_text_is_rejected(field: str) -> None:
     with pytest.raises(ValidationError):
         make_analysis(**{field: "   "})
+
+
+def action_values(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "title": "Submit the report",
+        "ownership": "mine",
+        "effort": None,
+        "deadline_text": "Friday 5 PM",
+        "deadline_date": "2026-09-04",
+        "deadline_time": "17:00",
+        "stated_timezone": None,
+        "steps": ["Collect the numbers"],
+        "evidence": "Please submit the report by Friday 5 PM.",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_candidate_actions_default_to_none_and_accept_provider_actions() -> None:
+    waiting = action_values(ownership="waiting_for", effort="hours", steps=[])
+
+    bare = AnalysisCandidate.model_validate(candidate_values())
+    answered = AnalysisCandidate.model_validate(
+        candidate_values(actions=[action_values(), waiting])
+    )
+
+    assert bare.actions == ()
+    first, second = answered.actions
+    assert (first.ownership, first.effort, first.steps) == (
+        ActionOwnership.MINE,
+        None,
+        ("Collect the numbers",),
+    )
+    assert (second.ownership, second.effort, second.steps) == (
+        ActionOwnership.WAITING_FOR,
+        ActionEffort.HOURS,
+        (),
+    )
+
+
+@pytest.mark.parametrize("field", sorted(ActionCandidate.model_fields))
+def test_action_candidate_fields_are_all_required(field: str) -> None:
+    values = action_values()
+    del values[field]
+
+    with pytest.raises(ValidationError):
+        ActionCandidate.model_validate(values)
+
+
+def test_action_candidate_accepts_unbounded_text_and_keeps_it_out_of_the_repr() -> None:
+    candidate = ActionCandidate.model_validate(
+        action_values(title=MARKER * 20, steps=[MARKER] * 12, evidence=MARKER, deadline_text=MARKER)
+    )
+
+    assert len(candidate.steps) == 12
+    assert MARKER not in repr(candidate)
+    assert MARKER not in repr(
+        AnalysisCandidate.model_validate(candidate_values(actions=[candidate]))
+    )
+
+
+def test_action_candidate_errors_never_echo_provider_text() -> None:
+    with pytest.raises(ValidationError) as caught:
+        ActionCandidate.model_validate(
+            action_values(ownership=MARKER, steps=MARKER, evidence=[MARKER])
+        )
+
+    assert MARKER not in str(caught.value)
+    assert MARKER not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [NO_DEADLINE, UNRESOLVED, DATE_ONLY, EXACT],
+    ids=["none", "unresolved", "date", "datetime"],
+)
+def test_suggestion_accepts_consistent_deadlines(deadline: dict[str, object]) -> None:
+    suggestion = make_suggestion(**deadline)
+
+    assert suggestion.deadline_precision == deadline["deadline_precision"]
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [
+        {**NO_DEADLINE, "deadline_text": "Friday"},
+        {**UNRESOLVED, "deadline_date": FRIDAY},
+        {**DATE_ONLY, "deadline_timezone": None},
+        {**EXACT, "deadline_date": date(2026, 9, 5)},
+        {**DATE_ONLY, "deadline_timezone": "Mars/Olympus_Mons"},
+    ],
+    ids=["none-with-text", "unresolved-with-date", "date-without-zone", "off-day", "bad-zone"],
+)
+def test_suggestion_rejects_inconsistent_deadlines(deadline: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        make_suggestion(**deadline)
+
+
+def test_suggestion_accepts_its_largest_values() -> None:
+    suggestion = make_suggestion(
+        position=4,
+        title="t" * 120,
+        effort=ActionEffort.DAYS,
+        steps=("s" * 120,) * 5,
+        evidence="e" * 160,
+    )
+
+    assert (len(suggestion.title), len(suggestion.steps), len(suggestion.evidence or "")) == (
+        120,
+        5,
+        160,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"position": -1},
+        {"title": "   "},
+        {"title": "t" * 121},
+        {"steps": ("s",) * 6},
+        {"steps": (" ",)},
+        {"steps": ("s" * 121,)},
+        {"evidence": ""},
+        {"evidence": "e" * 161},
+        {"fingerprint": "a" * 63},
+        {"fingerprint": "A" * 64},
+        {"fingerprint": "g" * 64},
+    ],
+    ids=[
+        "negative-position",
+        "blank-title",
+        "long-title",
+        "six-steps",
+        "blank-step",
+        "long-step",
+        "empty-evidence",
+        "long-evidence",
+        "short-fingerprint",
+        "upper-case-fingerprint",
+        "non-hex-fingerprint",
+    ],
+)
+def test_suggestion_bounds_are_enforced(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        make_suggestion(**overrides)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [{"suggested_target_date": FRIDAY}, {"target_reason": TargetReason.ON_DEADLINE}],
+    ids=["date-only", "reason-only"],
+)
+def test_suggested_target_date_and_reason_come_together(target: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="must be set together"):
+        make_suggestion(**DATE_ONLY, **target)
+
+
+def test_suggestion_keeps_its_target_and_reason() -> None:
+    suggestion = make_suggestion(
+        **DATE_ONLY,
+        suggested_target_date=date(2026, 9, 3),
+        target_reason=TargetReason.WORKING_DAY_BEFORE,
+    )
+
+    assert suggestion.suggested_target_date == date(2026, 9, 3)
+    assert suggestion.target_reason is TargetReason.WORKING_DAY_BEFORE
+
+
+def test_suggestion_repr_and_errors_leave_out_its_text() -> None:
+    suggestion = make_suggestion(
+        **{**EXACT, "deadline_text": MARKER}, title=MARKER, steps=(MARKER,), evidence=MARKER
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        make_suggestion(title=MARKER * 10, steps=(MARKER * 10,), evidence=MARKER * 10)
+
+    assert MARKER not in repr(suggestion)
+    assert MARKER not in str(caught.value)
+    assert MARKER not in repr(caught.value)
+
+
+def numbered_suggestions(count: int) -> tuple[ActionSuggestion, ...]:
+    return tuple(
+        make_suggestion(
+            position=index, title=f"Task {index}", fingerprint=fingerprint_of(f"task {index}")
+        )
+        for index in range(count)
+    )
+
+
+def test_analysis_holds_up_to_five_suggestions_in_order() -> None:
+    analysis = make_analysis(suggestions=numbered_suggestions(5))
+
+    assert [item.position for item in analysis.suggestions] == [0, 1, 2, 3, 4]
+    assert MessageAnalysis.model_validate_json(analysis.model_dump_json()) == analysis
+    assert make_analysis().suggestions == ()
+
+
+def test_analysis_rejects_a_sixth_suggestion() -> None:
+    with pytest.raises(ValidationError, match="at most 5 suggestions"):
+        make_analysis(suggestions=numbered_suggestions(6))
+
+
+@pytest.mark.parametrize(
+    "positions",
+    [[1], [0, 2], [1, 0], [0, 0]],
+    ids=["not-from-zero", "gap", "out-of-order", "repeated"],
+)
+def test_analysis_suggestion_positions_run_from_zero_in_order(positions: list[int]) -> None:
+    items = tuple(
+        make_suggestion(position=position, fingerprint=fingerprint_of(f"task {index}"))
+        for index, position in enumerate(positions)
+    )
+
+    with pytest.raises(ValidationError, match="positions must run from zero"):
+        make_analysis(suggestions=items)
+
+
+def test_analysis_suggestion_fingerprints_are_unique() -> None:
+    first = make_suggestion(position=0)
+    same_fingerprint = make_suggestion(position=1, title="Approve the proposal!")
+
+    with pytest.raises(ValidationError, match="fingerprints must be unique"):
+        make_analysis(suggestions=(first, same_fingerprint))
+
+
+def test_deadline_due_at_a_datetime_is_its_instant() -> None:
+    due = deadline_due_at(DeadlinePrecision.DATETIME, FRIDAY, FRIDAY_5PM_TORONTO, "America/Toronto")
+
+    assert due == FRIDAY_5PM_TORONTO
+
+
+@pytest.mark.parametrize(
+    ("day", "zone", "due"),
+    [
+        (FRIDAY, "America/Toronto", datetime(2026, 9, 5, 4, 0, tzinfo=UTC)),
+        (FRIDAY, "Asia/Tokyo", datetime(2026, 9, 4, 15, 0, tzinfo=UTC)),
+        # Toronto falls back on 1 November: the next midnights are EDT, then EST.
+        (date(2026, 10, 31), "America/Toronto", datetime(2026, 11, 1, 4, 0, tzinfo=UTC)),
+        (date(2026, 11, 1), "America/Toronto", datetime(2026, 11, 2, 5, 0, tzinfo=UTC)),
+    ],
+    ids=["toronto", "tokyo", "before-fall-back", "fall-back-day"],
+)
+def test_deadline_due_at_a_date_is_the_next_local_midnight(
+    day: date, zone: str, due: datetime
+) -> None:
+    assert deadline_due_at(DeadlinePrecision.DATE, day, None, zone) == due
+
+
+@pytest.mark.parametrize("precision", [DeadlinePrecision.NONE, DeadlinePrecision.UNRESOLVED])
+def test_deadline_due_at_is_none_without_a_day(precision: DeadlinePrecision) -> None:
+    assert deadline_due_at(precision, None, None, None) is None
+
+
+def test_check_deadline_fields_rejects_an_unloadable_zone_without_echoing_it() -> None:
+    with pytest.raises(ValueError, match="loadable IANA name") as caught:
+        check_deadline_fields("Friday", DeadlinePrecision.DATE, FRIDAY, None, MARKER)
+
+    assert MARKER not in str(caught.value)
+    check_deadline_fields("Friday", DeadlinePrecision.DATE, FRIDAY, None, "America/Toronto")

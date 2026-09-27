@@ -6,6 +6,7 @@ from typing import Self
 
 from pydantic import ConfigDict, Field, HttpUrl, field_validator, model_validator
 
+from mailbrief.domain.actions import SuggestionView
 from mailbrief.domain.analysis import (
     ACTION_TEXT_MAX_CHARS,
     DEADLINE_TEXT_MAX_CHARS,
@@ -52,6 +53,7 @@ class DigestItem(DomainModel):
     deadline_at_utc: datetime | None = None
     evidence: str | None = Field(default=None, max_length=EVIDENCE_MAX_CHARS, repr=False)
     source_url: HttpUrl
+    suggestions: tuple[SuggestionView, ...] = ()
 
     @field_validator("deadline_at_utc")
     @classmethod
