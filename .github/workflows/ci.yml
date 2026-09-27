@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       QT_QPA_PLATFORM: offscreen
 
@@ -47,3 +47,38 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+      - name: Qt tests on the Cocoa platform
+        if: runner.os == 'macOS'
+        env:
+          MACOS_GUI_AVAILABLE: "1"
+          QT_QPA_PLATFORM: cocoa
+        run: uv run pytest --no-cov tests/ui tests/unit/test_app.py
+
+      - name: Build desktop package
+        run: uv run python scripts/build_desktop.py
+
+      - name: Verify package startup and repeat launch offline
+        run: uv run python scripts/check_package.py
+
+      - name: Archive macOS app preserving permissions and symlinks
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent out/dist/MailBrief.app out/MailBrief-macOS.zip
+
+      - name: Upload Windows package
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: MailBrief-Windows
+          path: out/dist/MailBrief/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload macOS package
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: MailBrief-macOS
+          path: out/MailBrief-macOS.zip
+          if-no-files-found: error
+          retention-days: 7

@@ -3,6 +3,7 @@
 import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.messages import (
@@ -15,6 +16,15 @@ from mailbrief.domain.messages import (
 DEFAULT_THRESHOLD: int = 10
 MIN_SHORTLIST_SIZE: int = 3
 MAX_SHORTLIST_SIZE: int = 10
+
+
+class ShortlistGate(Protocol):
+    """Review all ranked metadata, with the automatic selection prechecked."""
+
+    async def review(
+        self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+    ) -> tuple[str, ...] | None: ...
+
 
 _ACTION_PATTERNS: list[str] = [
     r"\baction required\b",

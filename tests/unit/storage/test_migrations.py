@@ -1,15 +1,34 @@
 """Tests for the initial Alembic schema revision."""
 
+import shutil
 import sqlite3
+import sys
+import tempfile
 from contextlib import closing
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from mailbrief.storage.database import sqlite_url
 from mailbrief.storage.migrate import upgrade_database
+
+
+def test_packaged_migrations_work_away_from_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "bundle"
+    source = Path(__file__).resolve().parents[3] / "migrations"
+    shutil.copytree(source, bundle / "migrations", ignore=shutil.ignore_patterns("__pycache__"))
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    profile = tmp_path / "profile" / "mailbrief.sqlite3"
+    upgrade_database(profile)
+    upgrade_database(profile)
+    assert "ai_consents" in table_names(profile)
+    assert not list(bundle.glob("*.sqlite3"))
 
 
 def table_names(database_path: Path) -> set[str]:
@@ -235,3 +254,64 @@ def test_analysis_rebuild_keeps_rows_references_constraints_and_index(tmp_path: 
 
     command.upgrade(config, "head")
     assert "uq_analyses_cache_identity UNIQUE" in _analyses_sql(path)
+
+
+def test_pre_upgrade_backup_includes_wal_and_survives_failed_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    with closing(sqlite3.connect(path)) as source:
+        source.execute("PRAGMA journal_mode=WAL")
+        source.execute("CREATE TABLE saved (value TEXT)")
+        source.execute("INSERT INTO saved VALUES ('synthetic metadata')")
+        source.commit()
+
+        def fail_upgrade(config: Config, target: str) -> None:
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("CREATE TABLE IF NOT EXISTS partial_upgrade (value TEXT)")
+                connection.commit()
+            raise RuntimeError("Migration failed")
+
+        monkeypatch.setattr(command, "upgrade", fail_upgrade)
+        with pytest.raises(RuntimeError, match="Migration failed"):
+            upgrade_database(path)
+        (backup,) = tmp_path.glob("*.pre-upgrade-*.sqlite3")
+        with closing(sqlite3.connect(backup)) as restored:
+            assert restored.execute("SELECT value FROM saved").fetchone() == ("synthetic metadata",)
+            assert "partial_upgrade" not in table_names(backup)
+        original = backup.read_bytes()
+        with pytest.raises(RuntimeError):
+            upgrade_database(path)
+        assert backup.read_bytes() == original
+        assert len(list(tmp_path.glob("*.pre-upgrade-*.sqlite3"))) == 2
+
+
+def test_current_and_unknown_schema_do_not_create_backup(tmp_path: Path) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    upgrade_database(path)
+    upgrade_database(path)
+    assert not list(tmp_path.glob("*.pre-upgrade-*.sqlite3"))
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE alembic_version SET version_num='future_version'")
+        connection.commit()
+    before = path.read_bytes()
+    from alembic.util import CommandError
+
+    with pytest.raises(CommandError):
+        upgrade_database(path)
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.pre-upgrade-*.sqlite3"))
+
+
+def test_backup_failure_prevents_upgrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+
+    path = tmp_path / "mailbrief.sqlite3"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE saved (value TEXT)")
+    upgrade = Mock()
+    monkeypatch.setattr(command, "upgrade", upgrade)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", Mock(side_effect=OSError("Disk full")))
+    with pytest.raises(OSError):
+        upgrade_database(path)
+    upgrade.assert_not_called()

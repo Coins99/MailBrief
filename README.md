@@ -17,7 +17,11 @@ later use after Microsoft Entra access is resolved.
   shortlisted body reading and preparation ([Gmail bodies](docs/gmail-bodies.md)).
 - Implemented for M4, awaiting live acceptance: consented Groq analysis and the saved
   daily brief ([AI analysis](docs/ai-analysis.md)).
-- Next: the desktop workflow and Windows and macOS packages (M5).
+- Implemented, awaiting acceptance: M5 desktop workflow, with full-Inbox shortlist
+  review, consent, cancellation, saved-brief restoration, offline metadata browsing,
+  graphical settings, and native packaging scripts.
+  See [desktop usage, builds and remaining acceptance](docs/m5-desktop.md).
+  macOS package execution and packaged live-account checks remain pending.
 
 ## Start here
 

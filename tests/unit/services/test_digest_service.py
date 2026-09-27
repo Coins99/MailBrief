@@ -246,8 +246,11 @@ async def test_status_follows_results_failures_and_sync(
     assert digest.status is expected
 
 
+@pytest.mark.parametrize("incomplete_empty_sync", [False, True])
 async def test_total_failure_returns_none_and_keeps_the_saved_brief(
-    session: AsyncSession, account_id: int
+    session: AsyncSession,
+    account_id: int,
+    incomplete_empty_sync: bool,
 ) -> None:
     service = DigestService(session)
     good = [await entry(session, account_id, "good", highlight())]
@@ -264,8 +267,8 @@ async def test_total_failure_returns_none_and_keeps_the_saved_brief(
         account_id=account_id,
         account_email=OWNER,
         window=WINDOW,
-        messages=failed,
-        coverage=coverage(failed=1),
+        messages=[] if incomplete_empty_sync else failed,
+        coverage=coverage(complete=False) if incomplete_empty_sync else coverage(failed=1),
     )
 
     repo = DigestRepository(session)

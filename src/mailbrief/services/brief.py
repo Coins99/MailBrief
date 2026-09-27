@@ -28,6 +28,7 @@ from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.calendar import local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.ranking import ShortlistGate as ShortlistGate
 from mailbrief.storage.repositories import ConsentRepository
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ class BriefService:
         exclude_ids: tuple[str, ...] = (),
         cancel: asyncio.Event | None = None,
         progress: Callable[[SyncProgress], None] | None = None,
+        shortlist_gate: ShortlistGate | None = None,
     ) -> BriefRunResult:
         """Sync today's Inbox, prepare bodies, confirm consent, analyze and save the brief."""
         now = self._clock()
@@ -121,6 +123,7 @@ class BriefService:
             exclude_ids=exclude_ids,
             progress=progress,
             cancel=cancel,
+            shortlist_gate=shortlist_gate,
         )
         if sync.status is SyncStatus.CANCELLED:
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
@@ -129,6 +132,8 @@ class BriefService:
                 status=BriefStatus.SYNC_FAILED, sync=sync, error_code=sync.error_code
             )
 
+        if cancel is not None and cancel.is_set():
+            return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
         prepared = await self._bodies.prepare(shortlist)
         plan = await self._analysis.plan(
             account_id=account.id,

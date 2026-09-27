@@ -471,7 +471,7 @@ def test_a_partial_brief_names_the_provider_error(
     assert lines[outcome + 2] == "Groq detail: HTTP 401, code invalid_api_key"
 
 
-def test_an_empty_brief_after_an_incomplete_sync_exits_4(
+def test_incomplete_sync_without_messages_does_not_save_empty_brief(
     tmp_path: Path,
     mailbox: Mailbox,
     respx_mock: respx.MockRouter,
@@ -484,7 +484,9 @@ def test_an_empty_brief_after_an_incomplete_sync_exits_4(
 
     output = capsys.readouterr().out
     assert route.call_count == 0
-    assert "Brief: saved (empty); items: 0" in output
+    assert "Brief: analysis_failed; items: 0" in output
+    assert "Brief: saved" not in output
+    assert "Your last saved brief for today is unchanged." in output
     assert "sync complete: no" in output
     assert "AI: nothing sent this run" in output
     assert "Inbox sync was incomplete, so this brief may be missing messages." in output

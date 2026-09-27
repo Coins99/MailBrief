@@ -15,7 +15,7 @@ from mailbrief.domain.analysis import AIUsage, AnalysisRequest, AnalysisResponse
 from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS, BodySource, MessageBody
 from mailbrief.domain.briefs import SENT_FIELDS, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DigestStatus, SyncProgress, SyncStage
-from mailbrief.domain.messages import NormalizedMessage
+from mailbrief.domain.messages import NormalizedMessage, RankedMessage
 from mailbrief.ports.errors import AIAuthenticationError, ProviderPermissionError
 from mailbrief.services.analysis import AnalysisPlan, AnalysisRun, AnalysisService
 from mailbrief.services.application import ApplicationService
@@ -611,3 +611,91 @@ async def test_a_body_returned_whole_as_evidence_is_never_stored_whole(tmp_path:
     stored = database_bytes(tmp_path, "whole.sqlite3")
     assert body[:100].encode() in stored  # A cut excerpt is stored...
     assert body.encode() not in stored  # ...but never the whole body.
+
+
+@dataclass
+class ReviewGate:
+    selected: tuple[str, ...] | None
+
+    async def review(
+        self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+    ) -> tuple[str, ...] | None:
+        return self.selected
+
+
+async def test_review_can_replace_suggestion_with_other_inbox_message(
+    session: AsyncSession,
+) -> None:
+    mailbox = inbox(12)
+    provider = FakeAIProvider([answer_all()])
+    service = build(session, provider, RecordingGate(True), messages=mailbox)
+
+    class IncludeOther:
+        async def review(
+            self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+        ) -> tuple[str, ...]:
+            assert len(candidates) == 12
+            assert len(selected_ids) == 10
+            omitted = next(
+                item.message.provider_message_id
+                for item in candidates
+                if item.message.provider_message_id not in selected_ids
+            )
+            return (omitted,)
+
+    result = await service.generate(tz_key=ZONE, shortlist_gate=IncludeOther())
+    assert result.digest is not None
+    assert len(result.digest.items) == 1
+    assert result.digest.items[0].message_key in {"m0", "m1"}
+    assert provider.calls == 1
+
+
+async def test_oversized_review_is_rejected_before_bodies(session: AsyncSession) -> None:
+    provider = FakeAIProvider()
+    service = build(session, provider, RecordingGate(True), messages=inbox(12))
+    with pytest.raises(ValueError, match="up to ten"):
+        await service.generate(
+            tz_key=ZONE, shortlist_gate=ReviewGate(tuple(f"m{index}" for index in range(11)))
+        )
+    assert provider.calls == 0
+
+
+async def test_review_filters_before_body_retrieval(session: AsyncSession) -> None:
+    provider = FakeAIProvider([answer_all()])
+    service = build(session, provider, RecordingGate(True))
+    fetched: list[str] = []
+
+    class TrackingReader(FakeBodyReader):
+        async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+            fetched.append(provider_message_id)
+            return await super().fetch_message_body(provider_message_id)
+
+    reader = TrackingReader(texts_for(inbox()))
+    service._bodies = BodyService(reader)
+    result = await service.generate(tz_key=ZONE, shortlist_gate=ReviewGate(("m1",)))
+    assert fetched == ["m1"]
+    assert result.sync.shortlisted_message_keys == ("m1",)
+    assert result.coverage is not None and result.coverage.shortlisted == 1
+    assert provider.calls == 1
+
+
+@pytest.mark.parametrize("selection", [None, (), ("foreign",), ("m0", "m0")])
+async def test_review_cancel_empty_and_invalid_never_fetch_bodies(
+    session: AsyncSession,
+    selection: tuple[str, ...] | None,
+) -> None:
+    provider = FakeAIProvider()
+    service = build(session, provider, RecordingGate(True))
+
+    class NoBodies:
+        async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+            pytest.fail("No body should be fetched")
+
+    service._bodies = BodyService(NoBodies())
+    if selection in (("foreign",), ("m0", "m0")):
+        with pytest.raises(ValueError, match="unique members"):
+            await service.generate(tz_key=ZONE, shortlist_gate=ReviewGate(selection))
+    else:
+        result = await service.generate(tz_key=ZONE, shortlist_gate=ReviewGate(selection))
+        assert result.status is (BriefStatus.CANCELLED if selection is None else BriefStatus.SAVED)
+    assert provider.calls == 0

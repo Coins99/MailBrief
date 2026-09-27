@@ -105,7 +105,7 @@ class DigestService:
         if entries:
             complete = coverage.failed == 0 and coverage.sync_complete
             status = DigestStatus.COMPLETE if complete else DigestStatus.PARTIAL
-        elif coverage.failed == 0:
+        elif coverage.failed == 0 and coverage.sync_complete:
             status = DigestStatus.EMPTY
         else:
             return None
