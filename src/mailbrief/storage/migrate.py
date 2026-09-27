@@ -1,5 +1,6 @@
 """Run checked-in Alembic upgrades against the explicit diagnostic database."""
 
+import sys
 from pathlib import Path
 
 from alembic import command
@@ -10,11 +11,12 @@ from mailbrief.storage.database import sqlite_url
 
 
 def upgrade_database(path: Path) -> None:
-    """Development composition; packaged migration resources arrive with M5."""
-    root = Path(__file__).resolve().parents[3]
+    """Use read-only bundled revisions; always migrate the explicit user-data database."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    root = Path(bundle) if isinstance(bundle, str) else Path(__file__).resolve().parents[3]
     if not (root / "migrations" / "env.py").is_file():
         raise ConfigurationError(
-            "Migration resources are unavailable; run from the project checkout."
+            "Migration resources are unavailable; reinstall MailBrief or use the project checkout."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     config = Config()

@@ -10,7 +10,13 @@ from mailbrief.domain.digests import SyncProgress, SyncResult, SyncStage, SyncSt
 from mailbrief.domain.messages import ProviderKind, RankedMessage
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.services.calendar import local_day_window, resolve_timezone
-from mailbrief.services.ranking import rank_messages, review_shortlist
+from mailbrief.services.ranking import (
+    MAX_SHORTLIST_SIZE,
+    ShortlistGate,
+    ShortlistReviewError,
+    rank_messages,
+    review_shortlist,
+)
 from mailbrief.services.sync import SyncService
 from mailbrief.storage.repositories import (
     AccountRepository,
@@ -62,8 +68,9 @@ class ApplicationService:
         cancel: asyncio.Event | None = None,
         include_ids: tuple[str, ...] = (),
         exclude_ids: tuple[str, ...] = (),
+        shortlist_gate: ShortlistGate | None = None,
     ) -> tuple[SyncResult, list[RankedMessage]]:
-        """Run the Milestone 3 vertical slice: account -> window -> sync -> ranking -> shortlist.
+        """Connect, sync and rank one day, optionally reviewing all metadata before body access.
 
         Returns the terminal SyncResult and deterministic shortlisted RankedMessage items.
         """
@@ -146,6 +153,34 @@ class ApplicationService:
 
         # 5. Deterministic shortlist selection
         shortlist = review_shortlist(ranked, include_ids=include_ids, exclude_ids=exclude_ids)
+        if shortlist_gate is not None:
+            candidates = tuple(
+                sorted(
+                    ranked,
+                    key=lambda item: (
+                        -item.score,
+                        -item.message.received_at_utc.timestamp(),
+                        item.message.provider_message_id,
+                    ),
+                )
+            )
+            selected = await shortlist_gate.review(
+                candidates, tuple(item.message.provider_message_id for item in shortlist)
+            )
+            if selected is None or (cancel is not None and cancel.is_set()):
+                return sync_result.model_copy(update={"status": SyncStatus.CANCELLED}), []
+            available = {item.message.provider_message_id for item in candidates}
+            if (
+                len(selected) > MAX_SHORTLIST_SIZE
+                or len(selected) != len(set(selected))
+                or not set(selected) <= available
+            ):
+                raise ShortlistReviewError(
+                    "Reviewed messages must be unique members of today's Inbox, up to ten."
+                )
+            shortlist = [
+                item for item in candidates if item.message.provider_message_id in selected
+            ]
         shortlist_keys = tuple(m.message.provider_message_id for m in shortlist)
 
         final_sync_result = SyncResult(

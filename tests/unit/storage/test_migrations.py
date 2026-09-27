@@ -1,15 +1,33 @@
 """Tests for the initial Alembic schema revision."""
 
+import shutil
 import sqlite3
+import sys
 from contextlib import closing
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from mailbrief.storage.database import sqlite_url
 from mailbrief.storage.migrate import upgrade_database
+
+
+def test_packaged_migrations_work_away_from_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "bundle"
+    source = Path(__file__).resolve().parents[3] / "migrations"
+    shutil.copytree(source, bundle / "migrations", ignore=shutil.ignore_patterns("__pycache__"))
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    profile = tmp_path / "profile" / "mailbrief.sqlite3"
+    upgrade_database(profile)
+    upgrade_database(profile)
+    assert "ai_consents" in table_names(profile)
+    assert not list(bundle.glob("*.sqlite3"))
 
 
 def table_names(database_path: Path) -> set[str]:

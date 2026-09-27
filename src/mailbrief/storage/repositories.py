@@ -307,6 +307,32 @@ class MessageRepository:
         result = await self._session.scalars(stmt.execution_options(populate_existing=True))
         return list(result.all())
 
+    async def get_cached_page(
+        self,
+        account_id: int,
+        start_utc: datetime,
+        end_utc: datetime,
+        *,
+        offset: int = 0,
+        page_size: int = 100,
+    ) -> tuple[list[MessageTable], bool]:
+        """Bounded offline reads, including messages no longer in the cached Inbox."""
+        if offset < 0 or not 1 <= page_size <= 200:
+            raise ValueError("Invalid cached-mail page bounds.")
+        result = await self._session.scalars(
+            select(MessageTable)
+            .where(
+                MessageTable.account_id == account_id,
+                MessageTable.received_at_utc >= normalize_utc(start_utc),
+                MessageTable.received_at_utc < normalize_utc(end_utc),
+            )
+            .order_by(MessageTable.received_at_utc.desc(), MessageTable.id.asc())
+            .offset(offset)
+            .limit(page_size + 1)
+        )
+        rows = list(result.all())
+        return rows[:page_size], len(rows) > page_size
+
     async def reconcile_inbox(
         self, account_id: int, start_utc: datetime, end_utc: datetime, seen_ids: set[str]
     ) -> None:
@@ -661,6 +687,22 @@ class DigestRepository:
         )
         result = await self._session.scalars(stmt)
         return result.first()
+
+    async def get_latest(self) -> DailyDigest | None:
+        """Restore the most recently saved Gmail brief without contacting a provider."""
+        result = await self._session.execute(
+            select(DigestTable, AccountTable)
+            .join(AccountTable, DigestTable.account_id == AccountTable.id)
+            .where(AccountTable.provider == ProviderKind.GMAIL.value)
+            .order_by(DigestTable.generated_at_utc.desc(), DigestTable.id.desc())
+            .limit(1)
+        )
+        row = result.first()
+        if row is None:
+            return None
+        digest, account = row
+        items = await self.get_digest_items(digest.id)
+        return self.to_domain(digest, items, account.email_address)
 
     async def get_digest_items(
         self,

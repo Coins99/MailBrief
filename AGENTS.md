@@ -16,8 +16,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   reading and preparation (`mailbrief-gmail-diagnostic bodies`, `docs/gmail-bodies.md`).
 - Implemented, awaiting live acceptance: M4 consented AI analysis and the saved daily brief
   (`mailbrief-gmail-diagnostic brief`, `docs/ai-analysis.md`).
-- Next: M5 desktop UI with Windows and macOS packages. See `docs/mvp-plan.md` and
-  `docs/email-implementation-plan.md`.
+- Implemented, awaiting platform/human acceptance: M5 workflow, settings, full-Inbox
+  shortlist review, offline metadata browser and native packages. See `docs/m5-desktop.md`
+  and `docs/m5-acceptance.md` for validation and the remaining checks. Scope remains
+  in `docs/mvp-plan.md` and `docs/email-implementation-plan.md`.
 
 ## Layout (ports and adapters)
 
@@ -33,7 +35,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
 - `src/mailbrief/infra/`: HTTP retry classification and `vault.py`, the explicit OS
   credential vault.
-- `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 shell until M5.
+- `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
+  desktop service composition and saved-brief display; `app.py` owns the qasync loop.
+- `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
+  and credential-free package checks. Build artifacts stay in `out/`.
 
 ## Invariants (never break these)
 
