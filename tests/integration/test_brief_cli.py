@@ -1,9 +1,10 @@
 """The brief, ai-key and ai-consent commands end to end, with Gmail and Groq over respx."""
 
 import logging
+import re
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -28,6 +29,7 @@ from tests.unit.providers.groq.groq_fixtures import (
     error_body,
     results_body,
     sent_messages,
+    wire_action,
     wire_result,
 )
 
@@ -689,3 +691,187 @@ def test_the_body_outside_the_evidence_never_reaches_disk_output_or_logs(
     assert MARKER.encode() not in stored  # ...and nothing else from the body.
     assert MARKER not in output
     assert MARKER not in caplog.text
+
+
+def answer_with_two_actions(request: httpx.Request) -> httpx.Response:
+    """A result with a dated action of the owner's and one the owner is waiting for."""
+    results = [
+        wire_result(
+            sent["message_key"],
+            sent["body"][:40],
+            actions=[
+                wire_action(
+                    sent["body"][:20],
+                    title="Approve the budget",
+                    deadline_text="by Friday",
+                    deadline_date="2026-09-18",
+                    steps=["Check the totals", "Reply to finance"],
+                ),
+                wire_action(
+                    sent["body"][:20], title="Wait for the signed copy", ownership="waiting_for"
+                ),
+            ],
+        )
+        for sent in sent_messages(request)
+    ]
+    return httpx.Response(200, json=results_body(results))
+
+
+def test_show_prints_suggestions_with_ids_targets_and_steps_but_never_evidence(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    groq_answers(respx_mock, answer_with_two_actions)
+    replies(monkeypatch, "yes")
+
+    assert run_brief(tmp_path / "brief.sqlite3", "--show") == 0
+
+    output = capsys.readouterr().out
+    assert re.search(
+        r"^   \[pending #\d+\] Approve the budget \(mine\); target 2026-09-17 "
+        r"\(one working day before the deadline\); deadline 2026-09-18$",
+        output,
+        re.MULTILINE,
+    )
+    assert "     - Check the totals\n     - Reply to finance\n" in output
+    assert re.search(
+        r"^   \[pending #\d+\] Wait for the signed copy \(waiting for\)$", output, re.MULTILINE
+    )
+    assert EVIDENCE not in output
+    assert BODY[:20] not in output
+    assert MARKER not in output
+
+
+def test_actions_commands_accept_list_and_dismiss_then_briefs_show_the_decisions(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "brief.sqlite3"
+    route = groq_answers(respx_mock, answer_with_two_actions)
+    replies(monkeypatch, "yes")
+    assert run_brief(path, "--show") == 0
+    accept_id, dismiss_id = (
+        int(found) for found in re.findall(r"\[pending #(\d+)\]", capsys.readouterr().out)
+    )
+
+    def actions(*options: str) -> int:
+        return gmail.main(["actions", *options, "--database", str(path)])
+
+    assert actions("accept", str(accept_id)) == 0
+    assert re.fullmatch(
+        r"Accepted: Approve the budget \([0-9a-f-]{36}\)\n", capsys.readouterr().out
+    )
+    assert actions("list", "--timezone", "UTC") == 0
+    listed = capsys.readouterr().out
+    assert re.fullmatch(
+        r"[0-9a-f-]{36} \[open\] Approve the budget \(mine\); target 2026-09-17; "
+        r"deadline 2026-09-18; steps 0/2\n",
+        listed,
+    )
+    assert actions("list", "--view", "completed") == 0
+    assert capsys.readouterr().out == "No actions.\n"
+    assert actions("dismiss", str(dismiss_id)) == 0
+    assert capsys.readouterr().out == "Dismissed.\n"
+
+    refused = "That suggestion or action was not found or cannot change now.\n"
+    assert actions("dismiss", str(accept_id)) == 3  # Accepted: delete the action instead.
+    assert capsys.readouterr().out == refused
+    assert actions("accept", "999999") == 3
+    assert capsys.readouterr().out == refused
+    assert actions("list", "--timezone", "Not/AZone") == 3
+    assert "Invalid timezone" in capsys.readouterr().out
+
+    calls = route.call_count
+    assert run_brief(path, "--yes", "--show") == 0
+
+    rerun = capsys.readouterr().out
+    assert route.call_count == calls  # Cached: the decisions need no new analysis.
+    assert "AI: nothing sent this run" in rerun
+    assert "   [accepted] Approve the budget\n" in rerun
+    assert "Wait for the signed copy" not in rerun
+
+
+def brief_with_two_suggestions(
+    path: Path,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[str, str]:
+    """Save a brief with both suggestions; return their IDs, the owner's action first."""
+    groq_answers(respx_mock, answer_with_two_actions)
+    replies(monkeypatch, "yes")
+    assert run_brief(path, "--show") == 0
+    mine, waiting = re.findall(r"\[pending #(\d+)\]", capsys.readouterr().out)
+    return mine, waiting
+
+
+def run_actions(path: Path, *options: str) -> int:
+    return gmail.main(["actions", *options, "--database", str(path)])
+
+
+def test_accepting_a_suggestion_twice_prints_the_same_action_id(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "brief.sqlite3"
+    mine, _ = brief_with_two_suggestions(path, respx_mock, monkeypatch, capsys)
+
+    assert run_actions(path, "accept", mine) == 0
+    first = capsys.readouterr().out
+    assert run_actions(path, "accept", mine) == 0
+    second = capsys.readouterr().out
+
+    assert re.fullmatch(r"Accepted: Approve the budget \([0-9a-f-]{36}\)\n", first)
+    assert second == first
+
+
+def test_the_waiting_view_lists_an_accepted_waiting_for_action(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "brief.sqlite3"
+    _, waiting = brief_with_two_suggestions(path, respx_mock, monkeypatch, capsys)
+    assert run_actions(path, "accept", waiting) == 0
+    accepted = re.fullmatch(
+        r"Accepted: Wait for the signed copy \(([0-9a-f-]{36})\)\n", capsys.readouterr().out
+    )
+    assert accepted is not None
+
+    assert run_actions(path, "list", "--view", "waiting", "--timezone", "UTC") == 0
+    assert capsys.readouterr().out == (
+        f"{accepted[1]} [open] Wait for the signed copy (waiting for); "
+        "target none; deadline none; steps 0/0\n"
+    )
+    assert run_actions(path, "list", "--timezone", "UTC") == 0
+    assert capsys.readouterr().out == "No actions.\n"  # The open view holds the owner's own.
+
+
+def test_an_accepted_action_is_carried_over_the_next_day(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "brief.sqlite3"
+    mine, _ = brief_with_two_suggestions(path, respx_mock, monkeypatch, capsys)
+    assert run_actions(path, "accept", mine) == 0
+    capsys.readouterr()
+
+    with time_machine.travel(MIDDAY + timedelta(days=1)):
+        assert run_actions(path, "list", "--timezone", "UTC") == 0
+
+    listed = capsys.readouterr().out
+    assert listed.endswith("; target 2026-09-17; deadline 2026-09-18; steps 0/2; carried over\n")

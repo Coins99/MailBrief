@@ -1,4 +1,4 @@
-"""Gmail connection checks, daily sync, body review and the consented AI daily brief."""
+"""Gmail connection checks, daily sync, body review, the consented AI brief and actions."""
 
 import argparse
 import asyncio
@@ -7,7 +7,7 @@ import getpass
 import logging
 import threading
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,7 +16,13 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from mailbrief.config import Settings
-from mailbrief.domain.analysis import DeadlinePrecision
+from mailbrief.domain.actions import (
+    TARGET_REASON_TEXT,
+    ActionFilter,
+    ActionStatus,
+    SuggestionState,
+)
+from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.bodies import BodyStatus, PreparedBody
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncStatus
@@ -29,6 +35,12 @@ from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
 from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
 from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PROVIDER_NAME
+from mailbrief.services.actions import (
+    ActionConflictError,
+    ActionNotFoundError,
+    ActionService,
+    SuggestionNotFoundError,
+)
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
@@ -51,6 +63,9 @@ from mailbrief.storage.repositories import (
 )
 
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
+# Commands whose setup errors are shown as they are: static, actionable messages.
+_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions"}
+_ACTION_REFUSED = "That suggestion or action was not found or cannot change now."
 _SETUP_UNAVAILABLE = (
     "Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md."
 )
@@ -403,14 +418,63 @@ def _sync_incomplete(result: BriefRunResult) -> bool:
     return result.coverage is not None and not result.coverage.sync_complete
 
 
-def _deadline(item: DigestItem, zone: ZoneInfo) -> str | None:
-    if item.deadline_precision is DeadlinePrecision.DATETIME and item.deadline_at_utc is not None:
-        return f"{item.deadline_at_utc.astimezone(zone):%Y-%m-%d %H:%M} ({zone.key})"
-    if item.deadline_precision is DeadlinePrecision.DATE and item.deadline_date is not None:
-        return item.deadline_date.isoformat()
-    if item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
-        return f'"{item.deadline_text}"'
+def _format_deadline(
+    precision: DeadlinePrecision,
+    deadline_date: date | None,
+    at_utc: datetime | None,
+    text: str | None,
+    zone: ZoneInfo,
+) -> str | None:
+    """An exact deadline in ``zone``, a date, a quoted unresolved phrase, or None."""
+    if precision is DeadlinePrecision.DATETIME and at_utc is not None:
+        return f"{at_utc.astimezone(zone):%Y-%m-%d %H:%M} ({zone.key})"
+    if precision is DeadlinePrecision.DATE and deadline_date is not None:
+        return deadline_date.isoformat()
+    if precision is DeadlinePrecision.UNRESOLVED and text:
+        return f'"{text}"'
     return None
+
+
+def _deadline(item: DigestItem, zone: ZoneInfo) -> str | None:
+    return _format_deadline(
+        item.deadline_precision, item.deadline_date, item.deadline_at_utc, item.deadline_text, zone
+    )
+
+
+def _ownership(ownership: ActionOwnership) -> str:
+    return "mine" if ownership is ActionOwnership.MINE else "waiting for"
+
+
+def _print_suggestions(item: DigestItem, zone: ZoneInfo) -> None:
+    """Pending suggestions with their IDs and steps, and accepted ones; never evidence."""
+    for view in item.suggestions:
+        suggestion = view.suggestion
+        if view.state is SuggestionState.ACCEPTED:
+            print(f"   [accepted] {suggestion.title}")
+            continue
+        if view.state is not SuggestionState.PENDING:
+            continue  # Dismissed suggestions stay hidden.
+        line = (
+            f"   [pending #{view.suggestion_id}] {suggestion.title} "
+            f"({_ownership(suggestion.ownership)})"
+        )
+        if suggestion.suggested_target_date is not None and suggestion.target_reason is not None:
+            line += (
+                f"; target {suggestion.suggested_target_date.isoformat()} "
+                f"({TARGET_REASON_TEXT[suggestion.target_reason]})"
+            )
+        deadline = _format_deadline(
+            suggestion.deadline_precision,
+            suggestion.deadline_date,
+            suggestion.deadline_at_utc,
+            suggestion.deadline_text,
+            zone,
+        )
+        if deadline is not None:
+            line += f"; deadline {deadline}"
+        print(line)
+        for step in suggestion.steps:
+            print(f"     - {step}")
 
 
 def _print_items(digest: DailyDigest) -> None:
@@ -425,6 +489,7 @@ def _print_items(digest: DailyDigest) -> None:
         if deadline is not None:
             print(f"   Deadline: {deadline}")
         print(f"   {item.source_url}")
+        _print_suggestions(item, zone)
 
 
 def _brief_exit_code(result: BriefRunResult) -> int:
@@ -492,6 +557,62 @@ async def brief(
     return _brief_exit_code(result)
 
 
+async def actions(
+    action: str,
+    *,
+    database_path: Path | None,
+    view: str,
+    timezone: str | None,
+    suggestion_id: int | None,
+) -> int:
+    """List actions, or accept or dismiss a stored suggestion; needs no Gmail or AI access."""
+    zone = resolve_timezone(timezone)
+    path = database_path or AppPaths.from_qt().database_path
+    await asyncio.to_thread(upgrade_database, path)
+    database = Database.from_path(path)
+    try:
+        async with database.session() as session:
+            service = ActionService(session)
+            if action == "accept":
+                assert suggestion_id is not None
+                accepted = await service.accept(suggestion_id)
+                print(f"Accepted: {accepted.title} ({accepted.public_id})")
+                return 0
+            if action == "dismiss":
+                assert suggestion_id is not None
+                await service.dismiss(suggestion_id)
+                print("Dismissed.")
+                return 0
+            listed = await service.list_actions(ActionFilter(view))
+    finally:
+        await database.dispose()
+    if not listed:
+        print("No actions.")
+        return 0
+    now = datetime.now(UTC)
+    today = now.astimezone(zone).date()
+    for item in listed:
+        deadline = _format_deadline(
+            item.deadline_precision,
+            item.deadline_date,
+            item.deadline_at_utc,
+            item.deadline_text,
+            zone,
+        )
+        done = sum(step.done for step in item.steps)
+        target = item.target_date.isoformat() if item.target_date is not None else "none"
+        line = (
+            f"{item.public_id} [{item.status.value}] {item.title} ({_ownership(item.ownership)}); "
+            f"target {target}; deadline {deadline or 'none'}; steps {done}/{len(item.steps)}"
+        )
+        if item.status is ActionStatus.OPEN and item.carried_over(today, zone):
+            line += "; carried over"
+        if item.status is ActionStatus.OPEN and item.is_overdue(now):
+            line += "; overdue"
+        print(line)
+    return 0
+
+
 def _add_day_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--silent-only", action="store_true", help="Never open a browser.")
     parser.add_argument("--database", type=Path, help="Optional SQLite path; defaults to app data.")
@@ -542,7 +663,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     brief_parser.add_argument(
         "--show",
         action="store_true",
-        help="Print the saved items: sender, subject, summary, action, deadline and link.",
+        help=(
+            "Print the saved items (sender, subject, summary, action, deadline, link) "
+            "and their pending or accepted suggestions."
+        ),
     )
     key_parser = commands.add_parser(
         "ai-key", help="Save, check or remove the Groq API key in the OS credential store."
@@ -561,6 +685,34 @@ def main(arguments: Sequence[str] | None = None) -> int:
     consent_parser.add_argument(
         "--database", type=Path, help="Optional SQLite path; defaults to app data."
     )
+    actions_parser = commands.add_parser(
+        "actions", help="List accepted actions, or accept or dismiss a suggestion."
+    )
+    action_commands = actions_parser.add_subparsers(dest="action", required=True)
+    list_parser = action_commands.add_parser(
+        "list", help="List open, waiting or completed actions."
+    )
+    list_parser.add_argument(
+        "--view",
+        choices=[item.value for item in ActionFilter],
+        default=ActionFilter.OPEN.value,
+        help="open (yours), waiting (on others) or completed; default open.",
+    )
+    list_parser.add_argument("--timezone", help="IANA timezone; defaults to the system timezone.")
+    accept_parser = action_commands.add_parser(
+        "accept", help="Accept a pending suggestion shown by brief --show."
+    )
+    dismiss_parser = action_commands.add_parser(
+        "dismiss", help="Dismiss a pending suggestion shown by brief --show."
+    )
+    for decide in (accept_parser, dismiss_parser):
+        decide.add_argument(
+            "suggestion_id", type=int, help="The number after # in brief --show output."
+        )
+    for subcommand in (list_parser, accept_parser, dismiss_parser):
+        subcommand.add_argument(
+            "--database", type=Path, help="Optional SQLite path; defaults to app data."
+        )
     args = parser.parse_args(arguments)
     # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
     for name in ("httpx", "httpcore", "groq"):
@@ -580,6 +732,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
         if args.command == "ai-key":
             return ai_key(args.action)
+        if args.command == "actions":
+            return asyncio.run(
+                actions(
+                    args.action,
+                    database_path=args.database,
+                    view=getattr(args, "view", ActionFilter.OPEN.value),
+                    timezone=getattr(args, "timezone", None),
+                    suggestion_id=getattr(args, "suggestion_id", None),
+                )
+            )
         if args.command == "ai-consent":
             return asyncio.run(ai_consent(args.action, database_path=args.database))
         if args.command == "sync":
@@ -616,10 +778,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 3
     except ConfigurationError as exc:
         # AI setup errors (model, key, vault) carry static, actionable messages.
-        print(str(exc) if args.command in _AI_COMMANDS else _SETUP_UNAVAILABLE)
+        print(str(exc) if args.command in _OWN_MESSAGE_COMMANDS else _SETUP_UNAVAILABLE)
         return 3
     except ValidationError as exc:
-        if args.command in _AI_COMMANDS:
+        if args.command in _OWN_MESSAGE_COMMANDS:
             # Settings errors arrive as SettingsError, so this is an internal validation error.
             print(f"Unexpected error ({type(exc).__name__}).")
             return 1
@@ -628,11 +790,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except ProviderError as exc:
         print(str(exc))
         return 4
+    except (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError):
+        # Before ValueError: ActionConflictError is one. Messages stay static.
+        print(_ACTION_REFUSED)
+        return 3
     except (InvalidTimezoneError, ShortlistReviewError):
-        print(
-            "Invalid timezone or shortlist choices; "
-            "IDs must belong to today's Inbox without overlap."
-        )
+        if args.command == "actions":
+            print("Invalid timezone; use an IANA name such as America/Toronto.")
+        else:
+            print(
+                "Invalid timezone or shortlist choices; "
+                "IDs must belong to today's Inbox without overlap."
+            )
         return 3
     except ValueError as exc:
         print(f"Unexpected error ({type(exc).__name__}).")
