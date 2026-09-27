@@ -875,3 +875,71 @@ def test_an_accepted_action_is_carried_over_the_next_day(
 
     listed = capsys.readouterr().out
     assert listed.endswith("; target 2026-09-17; deadline 2026-09-18; steps 0/2; carried over\n")
+
+
+def test_an_accepted_action_is_overdue_just_after_its_deadline(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "brief.sqlite3"
+    mine, _ = brief_with_two_suggestions(path, respx_mock, monkeypatch, capsys)
+    assert run_actions(path, "accept", mine) == 0
+    capsys.readouterr()
+
+    # The deadline is 18 September in UTC, so it falls due at midnight.
+    for moment in (
+        datetime(2026, 9, 18, 23, 59, tzinfo=UTC),
+        datetime(2026, 9, 19, 0, 1, tzinfo=UTC),
+    ):
+        with time_machine.travel(moment):
+            assert run_actions(path, "list", "--timezone", "UTC") == 0
+
+    before, after = capsys.readouterr().out.splitlines()
+    assert before.endswith("; deadline 2026-09-18; steps 0/2; carried over")
+    assert after.endswith("; deadline 2026-09-18; steps 0/2; carried over; overdue")
+
+
+ESCAPES = "\x1b[2J\x1b]8;;https://evil.example\x07"  # Clear the screen; open a hidden link.
+
+
+def answer_with_terminal_escapes(request: httpx.Request) -> httpx.Response:
+    """An action whose title and steps try to drive the owner's terminal."""
+    results = [
+        wire_result(
+            sent["message_key"],
+            sent["body"][:40],
+            actions=[
+                wire_action(
+                    sent["body"][:20],
+                    title=f"{ESCAPES}Approve the budget",
+                    steps=[f"Check {ESCAPES}the totals", f"{ESCAPES}Reply to finance"],
+                )
+            ],
+        )
+        for sent in sent_messages(request)
+    ]
+    return httpx.Response(200, json=results_body(results))
+
+
+def test_brief_show_prints_no_terminal_control_characters_the_ai_wrote(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    groq_answers(respx_mock, answer_with_terminal_escapes)
+    replies(monkeypatch, "yes")
+
+    assert run_brief(tmp_path / "brief.sqlite3", "--show") == 0
+
+    output = capsys.readouterr().out
+    assert "\x1b" not in output
+    assert "\x07" not in output
+    # The suggestion and its steps are still shown, without the control characters.
+    assert re.search(r"^   \[pending #\d+\] .*Approve the budget \(mine\)$", output, re.MULTILINE)
+    assert re.search(r"^     - Check .*the totals$", output, re.MULTILINE)
+    assert re.search(r"^     - .*Reply to finance$", output, re.MULTILINE)

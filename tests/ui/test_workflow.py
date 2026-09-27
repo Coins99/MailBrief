@@ -1,7 +1,7 @@
 """Desktop transitions, cancellation, local restoration and safe rendering."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, Mock
 
@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from pytestqt.qtbot import QtBot
 
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
@@ -20,7 +21,7 @@ from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.brief import ConsentGate, ShortlistGate
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
-from tests.factories import make_digest_item, make_message
+from tests.factories import make_action, make_digest_item, make_message
 
 
 class FakeBackend:
@@ -39,6 +40,11 @@ class FakeBackend:
             ),
         )
         self.calls = 0
+        self.loads = 0
+        self.action_calls: list[tuple[object, ...]] = []
+        self.action_fail: Exception | None = None
+        self.actions: dict[ActionFilter, tuple[Action, ...]] = {}
+        self.candidates: tuple[str, ...] = ("message-1",)
         self.closed = False
         self.cleaned = False
         self.fail: Exception | None = None
@@ -59,7 +65,57 @@ class FakeBackend:
         )
 
     async def load_saved(self) -> DailyDigest:
+        self.loads += 1
         return self.saved
+
+    # Action calls record what the window asked for; action_fail makes the next one raise.
+    async def _act(self, name: str, *args: object) -> None:
+        self.action_calls.append((name, *args))
+        if self.action_fail is not None:
+            failure, self.action_fail = self.action_fail, None
+            raise failure
+
+    async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]:
+        await self._act("list_actions", view)
+        return self.actions.get(view, ())
+
+    async def accept_suggestion(self, suggestion_id: int) -> Action:
+        await self._act("accept_suggestion", suggestion_id)
+        return make_action(title="Approve the budget")
+
+    async def dismiss_suggestion(self, suggestion_id: int) -> None:
+        await self._act("dismiss_suggestion", suggestion_id)
+
+    async def restore_suggestion(self, suggestion_id: int) -> None:
+        await self._act("restore_suggestion", suggestion_id)
+
+    async def unaccept_action(self, public_id: str, revision: int) -> None:
+        await self._act("unaccept_action", public_id, revision)
+
+    async def save_action(
+        self,
+        public_id: str,
+        revision: int,
+        edit: ActionEdit,
+        steps: Sequence[StepEdit] | None = None,
+    ) -> Action:
+        await self._act("save_action", public_id, revision, edit, steps)
+        return make_action(title=edit.title, revision=revision + 1)
+
+    async def complete_action(self, public_id: str, revision: int) -> Action:
+        await self._act("complete_action", public_id, revision)
+        return make_action(revision=revision + 1)
+
+    async def reopen_action(self, public_id: str, revision: int) -> Action:
+        await self._act("reopen_action", public_id, revision)
+        return make_action(revision=revision + 1)
+
+    async def delete_action(self, public_id: str, revision: int) -> None:
+        await self._act("delete_action", public_id, revision)
+
+    async def restore_action(self, public_id: str) -> Action:
+        await self._act("restore_action", public_id)
+        return make_action()
 
     async def cached_accounts(self) -> tuple[CachedAccount, ...]:
         return (CachedAccount(account_id=1, email_address="owner@example.com"),)
@@ -113,14 +169,13 @@ class FakeBackend:
             if self.fail:
                 raise self.fail
             self.selected = await review.review(
-                (
+                tuple(
                     RankedMessage(
-                        message=make_message(),
-                        score=50,
-                        reasons=(),
-                    ),
+                        message=make_message(provider_message_id=key), score=50, reasons=()
+                    )
+                    for key in self.candidates
                 ),
-                ("message-1",),
+                self.candidates,
             )
             self.approved = await gate.confirm(
                 TransmissionPreview(
@@ -202,21 +257,48 @@ async def test_review_consent_and_repeat_run(window: MainWindow) -> None:
 
 
 async def test_unchecked_messages_are_excluded_and_decline_is_explicit(window: MainWindow) -> None:
+    assert isinstance(window.backend, FakeBackend)
+    window.backend.candidates = ("message-1", "message-2")
     await window.initialize()
     window.start(window._generate)
     await asyncio.sleep(0)
-    item = window.shortlist.item(0)
+    item = window.shortlist.item(1)
     assert item is not None
     item.setCheckState(Qt.CheckState.Unchecked)
     window.review_button.click()
     await asyncio.sleep(0)
     window.decline_button.click()
     await finish(window)
-    assert isinstance(window.backend, FakeBackend)
-    assert window.backend.selected == ()
+    assert window.backend.selected == ("message-1",)
     assert not window.backend.approved
     assert "declined" in window.status.text()
     assert "private subject" in window.digest.toPlainText()
+
+
+async def test_continue_needs_at_least_one_message(window: MainWindow) -> None:
+    """Continuing with nothing would save an empty brief over today's saved one."""
+    await window.initialize()
+    window.start(window._generate)
+    await asyncio.sleep(0)
+    item = window.shortlist.item(0)
+    assert item is not None
+    item.setCheckState(Qt.CheckState.Unchecked)
+
+    assert not window.review_button.isEnabled()
+    assert "at least one" in window.status.text()
+    window._accept_review()  # Even a direct call cannot continue with nothing selected.
+    await asyncio.sleep(0)
+    assert not window.review_panel.isHidden()
+    assert window.task is not None and not window.task.done()
+
+    item.setCheckState(Qt.CheckState.Checked)
+    assert window.review_button.isEnabled()
+    window.review_button.click()
+    await asyncio.sleep(0)
+    window.decline_button.click()
+    await finish(window)
+    assert isinstance(window.backend, FakeBackend)
+    assert window.backend.selected == ("message-1",)
 
 
 @pytest.mark.parametrize("stage", ["before_start", "review", "consent"])

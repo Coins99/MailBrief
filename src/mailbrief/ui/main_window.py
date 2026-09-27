@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
 from typing import Protocol
 
@@ -21,17 +21,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncStatus
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
+from mailbrief.services.actions import (
+    ActionConflictError,
+    ActionNotFoundError,
+    SuggestionNotFoundError,
+)
 from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
-from mailbrief.ui.digest_view import DigestView
+from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.settings_view import SettingsDialog
 
@@ -58,6 +64,27 @@ class DesktopBackend(Protocol):
         progress: Callable[[SyncProgress], None],
     ) -> BriefRunResult: ...
     async def close(self) -> None: ...
+    async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]: ...
+    async def accept_suggestion(self, suggestion_id: int) -> Action: ...
+    async def dismiss_suggestion(self, suggestion_id: int) -> None: ...
+    async def restore_suggestion(self, suggestion_id: int) -> None: ...
+    async def unaccept_action(self, public_id: str, revision: int) -> None: ...
+    async def save_action(
+        self,
+        public_id: str,
+        revision: int,
+        edit: ActionEdit,
+        steps: Sequence[StepEdit] | None = None,
+    ) -> Action: ...
+    async def complete_action(self, public_id: str, revision: int) -> Action: ...
+    async def reopen_action(self, public_id: str, revision: int) -> Action: ...
+    async def delete_action(self, public_id: str, revision: int) -> None: ...
+    async def restore_action(self, public_id: str) -> Action: ...
+
+
+# Raised when the brief or an action changed since it was shown; the window reloads.
+_STALE = (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError)
+_PICK_ONE = "Select at least one message to analyze, or Cancel."
 
 
 def plain_label(text: str) -> QLabel:
@@ -84,6 +111,8 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._shutdown_complete = False
         self._cancellable = True
+        # The one change that Undo reverses: its button label and the operation that undoes it.
+        self._undo: tuple[str, Callable[[], Awaitable[None]]] | None = None
         self.cached_dialog = CachedMailDialog(self)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
@@ -135,6 +164,10 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.cached_button, 1, 2)
         self.status = plain_label("Loading saved brief…")
         layout.addWidget(self.status)
+        self.undo_button = QPushButton("&Undo")
+        self.undo_button.hide()
+        self.undo_button.clicked.connect(lambda: self.start(self._undo_last, cancellable=False))
+        layout.addWidget(self.undo_button)
         self.review_panel = QWidget()
         review_layout = QVBoxLayout(self.review_panel)
         review_layout.addWidget(
@@ -162,6 +195,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.consent_panel)
         self.consent_panel.hide()
         self.digest = DigestView()
+        self.digest.suggestion_requested.connect(self._request_suggestion)
         self.digest.setMinimumHeight(180)
         layout.addWidget(self.digest, 1)
         scroll = QScrollArea()
@@ -192,6 +226,67 @@ class MainWindow(QMainWindow):
         self.settings_dialog.set_busy(busy)
         self.cached_button.setEnabled(not busy and self._ready)
         self.cached_dialog.set_busy(busy)
+        self.undo_button.setEnabled(not busy)
+
+    def _offer_undo(
+        self, label: str | None = None, operation: Callable[[], Awaitable[None]] | None = None
+    ) -> None:
+        """Offer to undo the latest change, or clear the offer when called without one."""
+        self._undo = None if label is None or operation is None else (label, operation)
+        self.undo_button.setText("&Undo" if self._undo is None else f"&{self._undo[0]}")
+        self.undo_button.setVisible(self._undo is not None)
+
+    async def _reload_brief(self) -> None:
+        saved = await self.backend.load_saved()
+        if saved is not None:
+            self.digest.show_digest(saved)
+
+    async def _stale(self, exc: Exception) -> None:
+        log_failure(exc)
+        self.status.setText("That changed or is no longer available; the brief was reloaded.")
+        await self._reload_brief()
+
+    def _request_suggestion(self, kind: str, suggestion_id: int) -> None:
+        if kind == ACCEPT:
+            self.start(lambda: self._accept_suggestion(suggestion_id), cancellable=False)
+        elif kind == DISMISS:
+            self.start(lambda: self._dismiss_suggestion(suggestion_id), cancellable=False)
+
+    async def _accept_suggestion(self, suggestion_id: int) -> None:
+        try:
+            action = await self.backend.accept_suggestion(suggestion_id)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        public_id, revision = action.public_id, action.revision
+        self._offer_undo("Undo accept", lambda: self.backend.unaccept_action(public_id, revision))
+        self.status.setText(f"Accepted: {action.title}. It stays open until you complete it.")
+        await self._reload_brief()
+
+    async def _dismiss_suggestion(self, suggestion_id: int) -> None:
+        try:
+            await self.backend.dismiss_suggestion(suggestion_id)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._offer_undo("Undo dismiss", lambda: self.backend.restore_suggestion(suggestion_id))
+        self.status.setText("Suggestion dismissed. It won't be suggested again for this email.")
+        await self._reload_brief()
+
+    async def _undo_last(self) -> None:
+        if self._undo is None:
+            return
+        operation = self._undo[1]
+        self._offer_undo()
+        try:
+            await operation()
+        except _STALE as exc:
+            log_failure(exc)
+            self.status.setText("Can't undo: it has changed since then.")
+            await self._reload_brief()
+            return
+        self.status.setText("Undone.")
+        await self._reload_brief()
 
     def start(self, operation: Callable[[], Awaitable[None]], *, cancellable: bool = True) -> None:
         """Only one operation may own the providers and workflow at a time."""
@@ -346,6 +441,7 @@ class MainWindow(QMainWindow):
         self.status.setText("Local credentials removed. Saved briefs remain on this device.")
 
     async def _generate(self) -> None:
+        self._offer_undo()  # A new brief replaces the suggestions that Undo would refer to.
         self.status.setText("Syncing today's Inbox…")
         result = await self.backend.generate(self, self, self._cancel, self._progress)
         if result.digest is not None:
@@ -419,6 +515,10 @@ class MainWindow(QMainWindow):
             item = self.shortlist.item(index)
             if item is not None and item.checkState() is Qt.CheckState.Checked:
                 selected.append(str(item.data(Qt.ItemDataRole.UserRole)))
+        if not selected:
+            # Continuing with nothing would save an empty brief over today's saved one.
+            self.status.setText(_PICK_ONE)
+            return
         if len(selected) > MAX_SHORTLIST_SIZE:
             self.status.setText("Choose at most ten messages before continuing.")
             return
@@ -432,8 +532,10 @@ class MainWindow(QMainWindow):
                 count += 1
         noun = "message" if count == 1 else "messages"
         self.review_button.setText(f"Co&ntinue with {count} selected {noun}")
-        self.review_button.setEnabled(count <= MAX_SHORTLIST_SIZE)
-        if count > MAX_SHORTLIST_SIZE:
+        self.review_button.setEnabled(1 <= count <= MAX_SHORTLIST_SIZE)
+        if count == 0:
+            self.status.setText(_PICK_ONE)
+        elif count > MAX_SHORTLIST_SIZE:
             self.status.setText("Choose at most ten messages before continuing.")
 
     async def confirm(self, preview: TransmissionPreview) -> bool:
