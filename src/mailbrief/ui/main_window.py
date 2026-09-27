@@ -30,6 +30,7 @@ from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.ui.cached_view import CachedMailDialog
+from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
 from mailbrief.ui.digest_view import DigestView
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.settings_view import SettingsDialog
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
         self._consent: asyncio.Future[bool] | None = None
         self._ready = False
         self._closing = False
+        self._shutdown_complete = False
         self._cancellable = True
         self.cached_dialog = CachedMailDialog(self)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
@@ -126,6 +128,9 @@ class MainWindow(QMainWindow):
         ):
             actions.addWidget(button, index // 3, index % 3)
         layout.addLayout(actions)
+        self.retry_button = QPushButton("&Retry loading saved data")
+        self.retry_button.clicked.connect(lambda: self.start(self.initialize))
+        actions.addWidget(self.retry_button, 2, 0, 1, 3)
         self.cached_button = QPushButton("Browse saved &mail (offline)")
         actions.addWidget(self.cached_button, 1, 2)
         self.status = plain_label("Loading saved brief…")
@@ -142,7 +147,7 @@ class MainWindow(QMainWindow):
         self.shortlist.setAccessibleName("Messages selected for analysis")
         self.shortlist.itemChanged.connect(self._selection_changed)
         review_layout.addWidget(self.shortlist)
-        self.review_button = QPushButton("&Continue with selected messages")
+        self.review_button = QPushButton("Co&ntinue with selected messages")
         review_layout.addWidget(self.review_button)
         layout.addWidget(self.review_panel)
         self.review_panel.hide()
@@ -177,6 +182,8 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
 
     def _set_busy(self, busy: bool) -> None:
+        self.retry_button.setVisible(not self._ready)
+        self.retry_button.setEnabled(not busy)
         self.connect_button.setEnabled(not busy)
         self.disconnect_button.setEnabled(not busy)
         self.generate_button.setEnabled(not busy and self._ready)
@@ -200,17 +207,18 @@ class MainWindow(QMainWindow):
             await operation()
         except asyncio.CancelledError:
             self.status.setText("Cancelled. The displayed saved brief is unchanged.")
-        except AuthenticationRequiredError:
+        except AuthenticationRequiredError as exc:
+            log_failure(exc)
             self.connection.setText("Gmail: session expired or missing. Connect Gmail to continue.")
             self.status.setText("Sign in to Gmail, then retry. The saved brief is still available.")
-        except ConfigurationError:
-            self.status.setText(
-                "Setup unavailable. Check the Gmail OAuth file, Groq model and OS credential "
-                "store in Settings."
-            )
-        except ProviderError:
+        except ConfigurationError as exc:
+            log_failure(exc)
+            self.status.setText(configuration_guidance(exc))
+        except ProviderError as exc:
+            log_failure(exc)
             self.status.setText("Provider unavailable. Check your connection and retry.")
-        except Exception:
+        except Exception as exc:
+            log_failure(exc)
             # Validation and HTTP exceptions can contain secret or mail-derived values.
             self.status.setText("Operation failed. The displayed saved brief is unchanged.")
         finally:
@@ -246,7 +254,8 @@ class MainWindow(QMainWindow):
     async def _open_settings(self) -> None:
         try:
             preferences = await self.backend.get_preferences()
-        except ConfigurationError:
+        except ConfigurationError as exc:
+            log_failure(exc)
             # A corrupt settings file must remain repairable from the editor.
             preferences = DesktopPreferences()
         self.settings_dialog.set_preferences(preferences)
@@ -282,25 +291,45 @@ class MainWindow(QMainWindow):
     async def _refresh_ai_status(self) -> None:
         try:
             self.ai.setText(await self.backend.ai_status())
-        except Exception:
+        except Exception as exc:
+            log_failure(exc)
             self.ai.setText("AI: configuration or secure key store unavailable.")
 
     async def initialize(self) -> None:
-        saved = await self.backend.load_saved()
+        try:
+            saved = await self.backend.load_saved()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_failure(exc)
+            self.connection.setText("Gmail: waiting for local storage.")
+            self.ai.setText("AI: waiting for local storage.")
+            self.status.setText(
+                "Saved data could not be opened. The database may be newer than this app or "
+                "unreadable. Use the latest MailBrief, check disk access, then Retry loading "
+                "saved data. Do not delete your database."
+            )
+            self.digest.setPlainText("Saved brief unavailable until local storage can be opened.")
+            return
         self._ready = True
         if saved is not None:
             self.digest.show_digest(saved)
+        else:
+            self.digest.setPlainText(
+                "No saved brief yet. Connect Gmail, then sync and review your shortlist."
+            )
         self.status.setText("Ready. Sync to review today's messages.")
         await self._refresh_ai_status()
         try:
             email = await self.backend.connect(silent_only=True)
-        except AuthenticationRequiredError:
+        except AuthenticationRequiredError as exc:
+            log_failure(exc)
             self.connection.setText("Gmail: session expired or missing. Connect Gmail to continue.")
-        except ConfigurationError:
-            self.connection.setText(
-                "Gmail: setup required. Open Settings to choose an OAuth client."
-            )
-        except Exception:
+        except ConfigurationError as exc:
+            log_failure(exc)
+            self.connection.setText("Gmail: " + configuration_guidance(exc))
+        except Exception as exc:
+            log_failure(exc)
             self.connection.setText("Gmail: offline or unavailable. Saved brief available locally.")
         else:
             self.connection.setText(f"Gmail: connected as {email}")
@@ -334,15 +363,15 @@ class MainWindow(QMainWindow):
         elif result.status is BriefStatus.CONSENT_DECLINED:
             self.status.setText("Transmission declined. No messages sent to AI in this run.")
         else:
-            self.status.setText("Refresh failed. The displayed saved brief is unchanged. Retry.")
+            self.status.setText("Refresh failed. The displayed saved brief is unchanged.")
         if result.error_code == "AUTH_REQUIRED" or result.sync.error_code == "AUTH_REQUIRED":
             self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
-        if result.error_code == "AI_KEY_MISSING":
-            self.ai.setText("AI: key missing. Add a Groq API key in Settings.")
-        elif result.error_code:
-            self.status.setText(
-                self.status.text() + " Some messages could not be processed; retry."
-            )
+        for code in dict.fromkeys((result.error_code, result.sync.error_code)):
+            if code:
+                guidance = error_guidance(code)
+                self.status.setText(self.status.text() + " " + guidance)
+                if code.startswith("AI_"):
+                    self.ai.setText("AI: " + guidance)
 
     def _progress(self, progress: SyncProgress) -> None:
         self.status.setText(
@@ -401,7 +430,8 @@ class MainWindow(QMainWindow):
             item = self.shortlist.item(index)
             if item is not None and item.checkState() == Qt.CheckState.Checked:
                 count += 1
-        self.review_button.setText(f"&Continue with {count} selected messages")
+        noun = "message" if count == 1 else "messages"
+        self.review_button.setText(f"Co&ntinue with {count} selected {noun}")
         self.review_button.setEnabled(count <= MAX_SHORTLIST_SIZE)
         if count > MAX_SHORTLIST_SIZE:
             self.status.setText("Choose at most ten messages before continuing.")
@@ -429,18 +459,29 @@ class MainWindow(QMainWindow):
             self.task.cancel()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._shutdown_complete:
+            event.accept()
+            return
+        event.ignore()  # Also defers QApplication.quit(), including Cmd+Q and Dock Quit.
+        if self._closing:
+            return
         self._closing = True
         self.settings_dialog.reject()
         self.cached_dialog.reject()
         self.cancel()
         self.closing.emit()
-        event.accept()
 
     async def shutdown(self) -> None:
+        if self._shutdown_complete:
+            return
         self.cancel()
         try:
             if self.task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self.task
         finally:
-            await self.backend.close()
+            try:
+                await self.backend.close()
+            finally:
+                self._shutdown_complete = True
+                self.close()

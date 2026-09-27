@@ -7,10 +7,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QLockFile
+from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
 
 from mailbrief.paths import AppPaths, configure_qt_identity
+from mailbrief.ui.diagnostics import configure_logging, log_failure, logger
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
 
@@ -29,15 +31,37 @@ def create_application(arguments: Sequence[str] | None = None) -> QApplication:
 async def run_desktop() -> None:
     """Keep the loop alive until pending work and resources have shut down."""
     paths = AppPaths.from_qt()
-    window = MainWindow(DesktopRuntime(paths.database_path))
-    closed = asyncio.Event()
-    window.closing.connect(closed.set)
-    window.show()
-    window.start(window.initialize)
+    lock = QLockFile(str(paths.data_dir / "desktop.lock"))
+    # Long-running instances must not be considered stale merely because of their age.
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(0):
+        message = (
+            "MailBrief is already running."
+            if lock.error() == QLockFile.LockError.LockFailedError
+            else "MailBrief could not lock its data folder. Check folder access and retry."
+        )
+        QMessageBox.information(None, "MailBrief", message)
+        return
+    handler = None
     try:
-        await closed.wait()
+        handler = configure_logging(paths.data_dir)
+        window = MainWindow(DesktopRuntime(paths.database_path))
+        closed = asyncio.Event()
+        window.closing.connect(closed.set)
+        window.show()
+        window.start(window.initialize)
+        try:
+            await closed.wait()
+        finally:
+            await window.shutdown()
+    except Exception as exc:
+        log_failure(exc)
+        QMessageBox.warning(None, "MailBrief", "MailBrief could not start or close cleanly.")
     finally:
-        await window.shutdown()
+        if handler is not None:
+            logger.removeHandler(handler)
+            handler.close()
+        lock.unlock()
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

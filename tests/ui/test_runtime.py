@@ -1,6 +1,7 @@
 """Desktop production composition with temporary storage and fake providers."""
 
 import asyncio
+import importlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from PySide6.QtCore import QLibraryInfo
 from pytestqt.qtbot import QtBot
 
 from mailbrief.config import Settings
@@ -101,10 +103,14 @@ async def test_generation_cancellation_closes_both_providers(
         await backend.close()
 
 
+@pytest.mark.parametrize("quit_via_qt", [False, True])
+@pytest.mark.parametrize("during_run", [False, True])
 def test_real_qasync_loop_closes_window_and_backend(
     qtbot: QtBot,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    quit_via_qt: bool,
+    during_run: bool,
 ) -> None:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
@@ -112,7 +118,18 @@ def test_real_qasync_loop_closes_window_and_backend(
     from mailbrief import app
     from mailbrief.paths import AppPaths
 
-    backend = FakeBackend()
+    class SlowClosingBackend(FakeBackend):
+        async def close(self) -> None:
+            database = Database.from_path(tmp_path / "cleanup.sqlite3")
+            async with database.session() as session:
+                from sqlalchemy import text
+
+                await session.execute(text("SELECT 1"))
+            await asyncio.sleep(0.01)
+            await database.dispose()
+            await super().close()
+
+    backend = SlowClosingBackend()
     monkeypatch.setattr(app, "DesktopRuntime", lambda path: backend)
     monkeypatch.setattr(
         AppPaths,
@@ -127,7 +144,15 @@ def test_real_qasync_loop_closes_window_and_backend(
     def close_window() -> None:
         for widget in QApplication.topLevelWidgets():
             if isinstance(widget, MainWindow) and widget.isVisible():
-                widget.close()
+                if during_run and not widget.review_panel.isVisible():
+                    if widget.generate_button.isEnabled():
+                        widget.generate_button.click()
+                    QTimer.singleShot(10, close_window)
+                    return
+                if quit_via_qt:
+                    QApplication.quit()
+                else:
+                    widget.close()
 
     QTimer.singleShot(100, close_window)
     assert app.main([]) == 0
@@ -188,3 +213,58 @@ def test_package_failure_reports_type_without_sensitive_exception(
         assert isinstance(application, QApplication)
         application.setQuitOnLastWindowClosed(True)
         asyncio.set_event_loop(None)
+
+
+async def test_second_instance_does_not_open_backend(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtCore import QLockFile
+    from PySide6.QtWidgets import QMessageBox
+
+    from mailbrief import app
+    from mailbrief.paths import AppPaths
+
+    monkeypatch.setattr(
+        AppPaths,
+        "from_qt",
+        lambda: AppPaths(
+            data_dir=tmp_path,
+            database_path=tmp_path / "test.sqlite3",
+            microsoft_token_cache_path=tmp_path / "unused.bin",
+        ),
+    )
+    backend = Mock(return_value=FakeBackend())
+    monkeypatch.setattr(app, "DesktopRuntime", backend)
+    notice = Mock()
+    monkeypatch.setattr(QMessageBox, "information", notice)
+    lock = QLockFile(str(tmp_path / "desktop.lock"))
+    assert lock.tryLock(0)
+    try:
+        await app.run_desktop()
+        backend.assert_not_called()
+        assert "already running" in notice.call_args.args[2]
+    finally:
+        lock.unlock()
+
+
+@pytest.mark.parametrize("missing", ["plugin", "vault"])
+async def test_smoke_rejects_missing_native_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    from mailbrief.ui import smoke
+
+    if missing == "plugin":
+        monkeypatch.setattr(QLibraryInfo, "path", lambda _: str(tmp_path))
+    else:
+        from unittest.mock import PropertyMock
+
+        backend = Mock()
+        type(backend).priority = PropertyMock(side_effect=RuntimeError("Unavailable"))
+        monkeypatch.setattr(
+            importlib,
+            "import_module",
+            lambda _: Mock(WinVaultKeyring=backend, Keyring=backend),
+        )
+    with pytest.raises(RuntimeError):
+        await smoke.check_package(tmp_path)
+    assert not (tmp_path / "smoke-result.json").exists()

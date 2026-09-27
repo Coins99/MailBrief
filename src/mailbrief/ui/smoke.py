@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
+from PySide6.QtCore import QLibraryInfo
 from PySide6.QtWidgets import QApplication
 
 from mailbrief.domain.messages import AccountIdentity, EmailContact, NormalizedMessage, ProviderKind
@@ -54,9 +55,16 @@ async def seed_metadata(path: Path) -> None:
 
 async def check_package(directory: Path) -> None:
     """Exercise two launches, settings, bundled migrations, Qt, TLS and timezone data."""
-    # Constructing a vault backend could access real credentials; import only.
+    # Class priority checks dependencies without constructing a vault or reading secrets.
     backend = "Windows" if sys.platform == "win32" else "macOS"
-    importlib.import_module(f"keyring.backends.{backend}")
+    module = importlib.import_module(f"keyring.backends.{backend}")
+    backend_class = module.WinVaultKeyring if sys.platform == "win32" else module.Keyring
+    if backend_class.priority <= 0:
+        raise RuntimeError("Native vault backend unavailable.")
+    plugin = "qwindows.dll" if sys.platform == "win32" else "libqcocoa.dylib"
+    plugins = Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath))
+    if not (plugins / "platforms" / plugin).is_file():
+        raise RuntimeError("Native Qt platform plugin unavailable.")
     # Creating the HTTP client loads the bundled TLS trust data without sending a request.
     async with httpx.AsyncClient(trust_env=False):
         pass

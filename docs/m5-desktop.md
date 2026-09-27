@@ -102,7 +102,9 @@ and data directory outside the source tree's runtime paths and without inherited
 MailBrief/Python configuration. Each process tests two runtime launches, database
 migrations, settings restoration, synthetic cached metadata, Qt rendering,
 timezone/TLS data and shutdown.
-It imports the OS vault adapter but never instantiates it or reads credentials.
+It checks the OS vault class priority and native Qt plugin file, without
+instantiating the vault or reading credentials. Offscreen rendering alone cannot
+prove that the native plugin loads; macOS CI also runs the Qt tests on Cocoa.
 No Gmail, AI or external network requests occur.
 
 The `--smoke-test-dir PATH` application option enables that isolated mode. Failure
@@ -151,3 +153,55 @@ shortlist inclusion/exclusion and bounds, keyboard selection, consent/decline,
 overlap prevention, cancellation, saved-brief preservation, resolved deadlines,
 safe source links, offline account isolation/pagination/DST boundaries, bundled
 migrations and the actual Qt/async event loop.
+
+
+## Review follow-up: recovery and diagnostics
+
+The desktop takes a per-profile Qt lock before opening storage. A second copy exits
+with an already-running notice; a live process's lock never expires by age.
+Window close and Qt Quit defer exit until pending work and database cleanup finish.
+
+Before upgrading an existing database, MailBrief writes a consistent SQLite backup
+(including committed WAL data) beside it as `mailbrief.sqlite3.pre-upgrade-*.sqlite3`.
+No backup is made for a new or current database. A failed backup stops the upgrade;
+unknown/newer revisions are rejected before modification. Backups are never overwritten
+or automatically deleted, so retries preserve the original. They contain the same
+private cached metadata and derived content as the database; keep them in the profile.
+To recover, close MailBrief and all diagnostic CLIs, preserve the failed database and
+its `-wal`/`-shm` files elsewhere, and copy the chosen backup to `mailbrief.sqlite3`
+with no old sidecars remaining. Reopen with the compatible app version. This is manual
+recovery, not an automatic rollback; retain backups until the upgraded app is verified.
+
+If loading fails, the window explains that storage may be newer or unreadable and offers
+**Retry loading saved data**. The latest saved brief is chosen across all Gmail accounts
+and labeled with its account. Provider failures give specific recovery steps.
+
+`desktop.log` in the application-data folder rotates at 128 KiB with two older files.
+It records exception types and known MailBrief error codes only, without exception
+messages, tracebacks, credentials, account identifiers or email content.
+
+## First launch of development packages
+
+Only proceed for a package you built or whose origin you have verified.
+On macOS 15 and later, after attempting to open the app, use **System Settings >
+Privacy & Security > Open Anyway**. The old Control-click override is unavailable
+for this case ([Apple's Sequoia guidance](https://developer.apple.com/news/?id=saqachfa)).
+The bundle is ad hoc signed, not Developer ID signed or notarized. Its minimum OS
+is explicitly macOS 15.0 because the reviewed PySide/shiboken bundle contains binaries
+requiring 15.0; macOS 13/14 are not supported by this package. The reviewer verified
+macOS 26.6.2; testing on the minimum 15.0 version is still outstanding.
+
+On Windows, a SmartScreen unrecognized-app warning may offer **More info > Run anyway**
+([Microsoft guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/publish-first-app)).
+This path is not yet manually verified for this package. Organization policies or
+Smart App Control may prevent an override; do not disable system protection to proceed.
+
+
+Review-fix validation on Windows (2026-09-27): **1,075 passed, 1 skipped;
+94.81% coverage**. Ruff formatting/lint and strict mypy for win32 and darwin pass.
+Regression checks cover Qt Quit while idle and during review with asynchronous SQLite
+cleanup, duplicate-instance rejection, startup retry, failure guidance, redacted logs,
+missing native dependencies, and WAL-aware backups that survive migration failures.
+The Windows frozen-package checks pass in two separate processes. macOS Cocoa tests,
+versioned/ad hoc re-signed packaging and minimum-version behavior still require the
+updated macOS CI run and platform acceptance; no real-account acceptance is claimed.

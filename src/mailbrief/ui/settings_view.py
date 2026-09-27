@@ -43,6 +43,7 @@ class SettingsDialog(QDialog):
         form.addRow("Google OAuth client", path_row)
         self.model = QLineEdit()
         self.model.setMaxLength(128)
+        self.model.setPlaceholderText("openai/gpt-oss-120b")
         self.model.setAccessibleName("Groq Structured Outputs model")
         form.addRow("Groq model", self.model)
         self.save_button = QPushButton("&Save settings")

@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, date, datetime
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import SecretStr
@@ -292,3 +292,67 @@ async def test_brief_displays_resolved_deadline(
     )
     window.digest.show_digest(digest)
     assert expected in window.digest.toPlainText()
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        ("PERMISSION_DENIED", "Disconnect and reconnect"),
+        ("PROVIDER_ERROR", "offline"),
+        ("RATE_LIMITED", "retry later"),
+        ("AI_AUTH_FAILED", "Replace it in Settings"),
+        ("AI_NETWORK_BLOCKED", "home or mobile"),
+        ("AI_USAGE_LIMIT", "fewer messages"),
+        ("AI_RATE_LIMITED", "retry later"),
+    ],
+)
+@pytest.mark.parametrize("partial", [False, True])
+async def test_failure_guidance(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, code: str, expected: str, partial: bool
+) -> None:
+    assert isinstance(window.backend, FakeBackend)
+    result = BriefRunResult(
+        status=BriefStatus.SAVED if partial else BriefStatus.SYNC_FAILED,
+        sync=window.backend.sync.model_copy(update={"error_code": code}),
+        error_code=code,
+        digest=window.backend.saved.model_copy(update={"status": DigestStatus.PARTIAL})
+        if partial
+        else None,
+    )
+    monkeypatch.setattr(window.backend, "generate", AsyncMock(return_value=result))
+    window.start(window._generate)
+    await finish(window)
+    assert window.status.text().count(expected) == 1
+
+
+async def test_startup_storage_failure_can_retry(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert isinstance(window.backend, FakeBackend)
+    monkeypatch.setattr(
+        window.backend,
+        "load_saved",
+        AsyncMock(side_effect=[RuntimeError("SECRET"), window.backend.saved]),
+    )
+    window.start(window.initialize)
+    await finish(window)
+    assert not window.generate_button.isEnabled()
+    assert "newer" in window.status.text()
+    assert "SECRET" not in window.status.text()
+    assert "checking" not in window.connection.text()
+    assert "No saved brief yet" not in window.digest.toPlainText()
+    window.retry_button.click()
+    await finish(window)
+    assert window.generate_button.isEnabled()
+    assert window.retry_button.isHidden()
+
+
+async def test_static_setup_error_is_actionable(window: MainWindow) -> None:
+    from mailbrief.errors import ConfigurationError
+
+    assert isinstance(window.backend, FakeBackend)
+    message = "This is a Web OAuth client. Create a Desktop app OAuth client instead."
+    window.backend.connect_fail = ConfigurationError(message)
+    window.start(window._connect)
+    await finish(window)
+    assert window.status.text() == message

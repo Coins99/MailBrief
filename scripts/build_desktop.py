@@ -1,9 +1,12 @@
 """Build the desktop package on the destination OS using the locked environment."""
 
 import argparse
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
+
+from mailbrief import __version__
 
 
 def main() -> int:
@@ -60,6 +63,10 @@ def main() -> int:
         "mypy",
         "--exclude-module",
         "pytest",
+        "--exclude-module",
+        "_pytest",
+        "--exclude-module",
+        "setuptools",
         "--hidden-import",
         "keyring.backends.Windows" if sys.platform == "win32" else "keyring.backends.macOS",
     ]
@@ -68,7 +75,21 @@ def main() -> int:
     if sys.platform == "darwin":
         command.extend(["--osx-bundle-identifier", "com.mailbrief.desktop"])
     command.append(str(root / "scripts" / "desktop_entry.py"))
-    return subprocess.call(command, cwd=root)
+    result = subprocess.call(command, cwd=root)
+    if result == 0 and sys.platform == "darwin":
+        bundle = output / "dist" / "MailBrief.app"
+        plist = bundle / "Contents" / "Info.plist"
+        with plist.open("rb") as stream:
+            metadata = plistlib.load(stream)
+        metadata.update(
+            CFBundleShortVersionString=__version__,
+            CFBundleVersion=__version__,
+            LSMinimumSystemVersion="15.0",
+        )
+        with plist.open("wb") as stream:
+            plistlib.dump(metadata, stream)
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(bundle)], check=True)
+    return result
 
 
 if __name__ == "__main__":

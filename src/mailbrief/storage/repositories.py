@@ -689,7 +689,10 @@ class DigestRepository:
         return result.first()
 
     async def get_latest(self) -> DailyDigest | None:
-        """Restore the most recently saved Gmail brief without contacting a provider."""
+        """Restore the newest brief across all local Gmail accounts, regardless of sign-in.
+
+        The desktop shows its account explicitly; offline startup needs no active session.
+        """
         result = await self._session.execute(
             select(DigestTable, AccountTable)
             .join(AccountTable, DigestTable.account_id == AccountTable.id)

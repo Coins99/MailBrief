@@ -30,9 +30,10 @@ class DigestView(QTextBrowser):
     def show_digest(self, digest: DailyDigest) -> None:
         self._sources.clear()
         age = max(0, int((datetime.now(UTC) - digest.generated_at_utc).total_seconds() // 60))
-        age_label = f"{age} minutes" if age < 60 else f"{age // 60} hours"
+        count, unit = (age, "minute") if age < 60 else (age // 60, "hour")
         if age >= 1440:
-            age_label = f"{age // 1440} days"
+            count, unit = age // 1440, "day"
+        age_label = f"{count} {unit}{'' if count == 1 else 's'}"
         parts = [
             f"<h2>{digest.local_date.isoformat()} · {escape(digest.status.value.title())}</h2>",
             f"<p>{escape(digest.account_id)} · {escape(digest.timezone_name)}<br>"
