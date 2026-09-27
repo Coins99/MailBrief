@@ -32,8 +32,10 @@ from mailbrief.domain.messages import (
     ProviderKind,
     RankReason,
 )
+from mailbrief.storage.actions import suggestion_from_row
 from mailbrief.storage.tables import (
     AccountTable,
+    ActionSuggestionTable,
     AIConsentTable,
     AnalysisTable,
     DigestItemTable,
@@ -418,7 +420,11 @@ class AnalysisRepository:
         schema_version: str,
         analysis: MessageAnalysis,
     ) -> AnalysisTable:
-        """Idempotently insert or update a structured analysis result."""
+        """Idempotently insert or update a structured analysis result and its suggestions.
+
+        The analysis's stored suggestions are replaced by ``analysis.suggestions``, so an
+        analysis without suggestions ends up with none.
+        """
         category_val = (
             analysis.category.value
             if isinstance(analysis.category, AnalysisCategory)
@@ -470,6 +476,42 @@ class AnalysisRepository:
         ).returning(AnalysisTable)
         result_table = await self._session.scalar(stmt)
         assert result_table is not None
+        await self._session.execute(
+            delete(ActionSuggestionTable).where(
+                ActionSuggestionTable.analysis_id == result_table.id
+            )
+        )
+        if analysis.suggestions:
+            await self._session.execute(
+                insert(ActionSuggestionTable).values(
+                    [
+                        {
+                            "analysis_id": result_table.id,
+                            "position": suggestion.position,
+                            "title": suggestion.title,
+                            "ownership": suggestion.ownership.value,
+                            "effort": None
+                            if suggestion.effort is None
+                            else suggestion.effort.value,
+                            "deadline_text": suggestion.deadline_text,
+                            "deadline_precision": suggestion.deadline_precision.value,
+                            "deadline_date": suggestion.deadline_date,
+                            "deadline_at_utc": suggestion.deadline_at_utc,
+                            "deadline_timezone": suggestion.deadline_timezone,
+                            "suggested_target_date": suggestion.suggested_target_date,
+                            "target_reason": (
+                                None
+                                if suggestion.target_reason is None
+                                else suggestion.target_reason.value
+                            ),
+                            "steps_json": list(suggestion.steps),
+                            "evidence": suggestion.evidence,
+                            "fingerprint": suggestion.fingerprint,
+                        }
+                        for suggestion in analysis.suggestions
+                    ]
+                )
+            )
         return result_table
 
     async def get_cached_analysis(
@@ -503,13 +545,28 @@ class AnalysisRepository:
         result = await self._session.scalars(stmt)
         return list(result.all())
 
+    async def get_suggestions(self, analysis_id: int) -> list[ActionSuggestionTable]:
+        """The analysis's stored suggestions in position order."""
+        stmt = (
+            select(ActionSuggestionTable)
+            .where(ActionSuggestionTable.analysis_id == analysis_id)
+            .order_by(ActionSuggestionTable.position.asc())
+        )
+        result = await self._session.scalars(stmt)
+        return list(result.all())
+
     @staticmethod
-    def to_domain(row: AnalysisTable, message_key: str) -> MessageAnalysis:
-        """Map an AnalysisTable ORM entity to a MessageAnalysis domain model.
+    def to_domain(
+        row: AnalysisTable,
+        message_key: str,
+        suggestions: Sequence[ActionSuggestionTable] = (),
+    ) -> MessageAnalysis:
+        """Map an AnalysisTable ORM entity and its suggestions to a MessageAnalysis.
 
         Rows saved before migration 0004 read precision "none" even when they kept a
         deadline. A kept phrase becomes unresolved, and an instant without its phrase is
-        dropped, so these rows still validate.
+        dropped, so these rows still validate. Pass ``suggestions`` in position order; a
+        suggestion row that no longer validates raises ValueError.
         """
         precision = DeadlinePrecision(row.deadline_precision)
         deadline_text = row.deadline_text or None
@@ -535,6 +592,7 @@ class AnalysisRepository:
             deadline_timezone=deadline_timezone,
             confidence=row.confidence,
             evidence=row.evidence,
+            suggestions=tuple(suggestion_from_row(item) for item in suggestions),
         )
 
 

@@ -60,7 +60,7 @@ from mailbrief.services.analysis import (
 from mailbrief.services.deadlines import ResolvedDeadline, suggest_target
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
-from mailbrief.storage.tables import AnalysisTable
+from mailbrief.storage.tables import ActionSuggestionTable, AnalysisTable
 from tests.factories import make_message
 from tests.unit.providers.groq.groq_fixtures import (
     CHAT_URL,
@@ -1312,3 +1312,75 @@ async def test_execute_keeps_the_suggestions_of_each_analysis(session: AsyncSess
         # A 91-character body leaves 32 characters after the message's own 40.
         assert (second.ownership, second.evidence) == (ActionOwnership.WAITING_FOR, None)
         assert "quarterly budget" not in repr(item.analysis)
+
+
+def answer_with_two_actions(requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+    return AnalysisResponse(
+        candidates=tuple(
+            good_candidate(
+                request,
+                actions=[
+                    good_action(
+                        request,
+                        evidence="approve the quarterly budget",
+                        deadline_text="Friday 5 PM",
+                        deadline_date="2026-09-04",
+                        deadline_time="17:00",
+                        effort="minutes",
+                        steps=["Read the numbers", "Reply to Alex"],
+                    ),
+                    good_action(
+                        request,
+                        title="Totals for the finance team",
+                        ownership="waiting_for",
+                        evidence="The finance team needs it",
+                    ),
+                ],
+            )
+            for request in requests
+        )
+    )
+
+
+async def test_a_cache_hit_restores_the_validated_suggestions(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 1)
+    first = await analyze(
+        session, FakeAIProvider([answer_with_two_actions]), shortlist, account_id=account_id
+    )
+    provider = FakeAIProvider()
+
+    rerun = await analyze(session, provider, shortlist, account_id=account_id)
+
+    (fresh,), (reused,) = first.messages, rerun.messages
+    assert provider.calls == 0
+    assert reused.outcome is AnalysisOutcome.REUSED
+    assert fresh.analysis is not None and reused.analysis is not None
+    assert len(fresh.analysis.suggestions) == 2
+    assert reused.analysis.suggestions == fresh.analysis.suggestions
+    assert reused.analysis == fresh.analysis
+
+
+async def test_a_cached_suggestion_that_no_longer_validates_is_a_miss(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 1)
+    await analyze(
+        session, FakeAIProvider([answer_with_two_actions]), shortlist, account_id=account_id
+    )
+    await session.execute(
+        update(ActionSuggestionTable)
+        .where(ActionSuggestionTable.position == 1)
+        .values(title="t" * 121)
+    )
+    await session.commit()
+    provider = FakeAIProvider([answer_all()])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id)
+
+    (item,) = run.messages
+    assert provider.calls == 1
+    assert item.outcome is ANALYZED
+    assert item.analysis is not None and item.analysis.suggestions == ()
+    assert item.analysis_row_id is not None
+    stored = await AnalysisRepository(session).get_suggestions(item.analysis_row_id)
+    assert stored == []  # The new answer had no actions, so none are kept.

@@ -5,9 +5,17 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, insert, select, update
 
-from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
+from mailbrief.domain.analysis import (
+    ActionEffort,
+    ActionOwnership,
+    ActionSuggestion,
+    AnalysisCategory,
+    DeadlinePrecision,
+    MessageAnalysis,
+    TargetReason,
+)
 from mailbrief.domain.digests import DigestCoverage, DigestSection, DigestStatus, SyncStatus
 from mailbrief.domain.messages import (
     AccountIdentity,
@@ -25,8 +33,15 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     SyncRunRepository,
 )
-from mailbrief.storage.tables import AnalysisTable, MessageTable
-from tests.factories import make_analysis, make_message
+from mailbrief.storage.tables import (
+    ActionSourceTable,
+    ActionSuggestionTable,
+    ActionTable,
+    AnalysisTable,
+    MessageTable,
+    SuggestionDecisionTable,
+)
+from tests.factories import fingerprint_of, make_analysis, make_message, make_suggestion
 
 
 @pytest.fixture
@@ -837,3 +852,221 @@ async def test_a_brief_with_a_provider_length_message_id_loads(database: Databas
 
     assert len(long_id) == 150
     assert [item.message_key for item in restored.items] == [long_id]
+
+
+SUGGESTIONS = (
+    make_suggestion(
+        position=0,
+        title="Approve the proposal",
+        effort=ActionEffort.MINUTES,
+        deadline_text="Friday 5 PM",
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_date=date(2026, 9, 4),
+        deadline_at_utc=datetime(2026, 9, 4, 21, 0, tzinfo=UTC),
+        deadline_timezone="America/Toronto",
+        suggested_target_date=date(2026, 9, 3),
+        target_reason=TargetReason.WORKING_DAY_BEFORE,
+        steps=("Read the proposal", "Check the budget"),
+        evidence="Please approve the attached proposal",
+        fingerprint=fingerprint_of("approve the proposal"),
+    ),
+    make_suggestion(
+        position=1,
+        title="Contract from Sam",
+        ownership=ActionOwnership.WAITING_FOR,
+        deadline_text="Monday",
+        deadline_precision=DeadlinePrecision.DATE,
+        deadline_date=date(2026, 9, 7),
+        deadline_timezone="America/Toronto",
+        suggested_target_date=date(2026, 9, 7),
+        target_reason=TargetReason.ON_DEADLINE,
+        steps=(),
+        evidence=None,
+        fingerprint=fingerprint_of("contract from sam"),
+    ),
+    make_suggestion(
+        position=2,
+        title="Book a room",
+        steps=(),
+        evidence=None,
+        fingerprint=fingerprint_of("book a room"),
+    ),
+)
+
+
+async def _save_analysis(
+    database: Database,
+    message_id: int,
+    suggestions: tuple[ActionSuggestion, ...],
+    *,
+    schema_version: str = "6",
+) -> int:
+    async with database.transaction() as session:
+        row = await AnalysisRepository(session).upsert_analysis(
+            message_id=message_id,
+            input_hash="hash-1",
+            provider="groq",
+            model="model-1",
+            prompt_version="prompt-1",
+            schema_version=schema_version,
+            analysis=make_analysis(suggestions=suggestions),
+        )
+        return row.id
+
+
+async def _stored_suggestions(database: Database, analysis_id: int) -> list[ActionSuggestionTable]:
+    async with database.session() as session:
+        return await AnalysisRepository(session).get_suggestions(analysis_id)
+
+
+@pytest.mark.asyncio
+async def test_upsert_analysis_saves_suggestions_that_round_trip(database: Database) -> None:
+    _, (message_id,) = await _account_and_messages(database, "msg-1")
+
+    analysis_id = await _save_analysis(database, message_id, SUGGESTIONS)
+
+    async with database.session() as session:
+        repo = AnalysisRepository(session)
+        row = await repo.get_cached_analysis(
+            message_id=message_id,
+            input_hash="hash-1",
+            provider="groq",
+            model="model-1",
+            prompt_version="prompt-1",
+            schema_version="6",
+        )
+        assert row is not None and row.id == analysis_id
+        stored = await repo.get_suggestions(analysis_id)
+        restored = AnalysisRepository.to_domain(row, "local-1", stored)
+    assert [item.position for item in stored] == [0, 1, 2]
+    assert [item.title for item in stored] == [
+        "Approve the proposal",
+        "Contract from Sam",
+        "Book a room",
+    ]
+    assert stored[0].steps_json == ["Read the proposal", "Check the budget"]
+    assert (stored[1].ownership, stored[1].effort, stored[1].target_reason) == (
+        "waiting_for",
+        None,
+        "on_deadline",
+    )
+    assert restored == make_analysis(suggestions=SUGGESTIONS)
+    assert restored.suggestions == SUGGESTIONS
+
+
+@pytest.mark.asyncio
+async def test_upserting_the_same_analysis_replaces_its_suggestions(database: Database) -> None:
+    _, (message_id,) = await _account_and_messages(database, "msg-1")
+    analysis_id = await _save_analysis(database, message_id, SUGGESTIONS)
+    other_schema_id = await _save_analysis(database, message_id, SUGGESTIONS, schema_version="7")
+    replacement = make_suggestion(title="Call Sam", fingerprint=fingerprint_of("call sam"))
+
+    assert await _save_analysis(database, message_id, (replacement,)) == analysis_id
+    replaced = await _stored_suggestions(database, analysis_id)
+    assert await _save_analysis(database, message_id, ()) == analysis_id
+    emptied = await _stored_suggestions(database, analysis_id)
+
+    assert [(item.position, item.title) for item in replaced] == [(0, "Call Sam")]
+    assert emptied == []
+    assert len(await _stored_suggestions(database, other_schema_id)) == 3
+
+
+@pytest.mark.asyncio
+async def test_to_domain_rejects_a_suggestion_row_that_no_longer_validates(
+    database: Database,
+) -> None:
+    _, (message_id,) = await _account_and_messages(database, "msg-1")
+    analysis_id = await _save_analysis(database, message_id, SUGGESTIONS[:1])
+    async with database.transaction() as session:
+        await session.execute(update(ActionSuggestionTable).values(steps_json={"not": "a list"}))
+
+    async with database.session() as session:
+        row = await session.get(AnalysisTable, analysis_id)
+        stored = await AnalysisRepository(session).get_suggestions(analysis_id)
+    assert row is not None
+    with pytest.raises(ValueError):
+        AnalysisRepository.to_domain(row, "local-1", stored)
+    assert AnalysisRepository.to_domain(row, "local-1").suggestions == ()
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_account_keeps_actions_and_their_source_snapshots(
+    database: Database,
+) -> None:
+    account_id, (message_id,) = await _account_and_messages(database, "msg-1")
+    await _save_analysis(database, message_id, SUGGESTIONS)
+    now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+    received = datetime(2026, 8, 31, 14, 30, tzinfo=UTC)
+    snapshot = (
+        "msg-1",
+        "Approval needed by Friday",
+        "alex@example.com",
+        "https://outlook.office.com/mail/id/message-1",
+        received,
+    )
+    async with database.transaction() as session:
+        action_id = await session.scalar(
+            insert(ActionTable)
+            .values(
+                public_id="0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44",
+                title="Approve the proposal",
+                ownership="mine",
+                status="open",
+                created_at_utc=now,
+                updated_at_utc=now,
+            )
+            .returning(ActionTable.id)
+        )
+        assert action_id is not None
+        await session.execute(
+            insert(ActionSourceTable).values(
+                action_id=action_id,
+                message_id=message_id,
+                provider_message_id=snapshot[0],
+                subject=snapshot[1],
+                sender_address=snapshot[2],
+                web_link=snapshot[3],
+                received_at_utc=snapshot[4],
+            )
+        )
+        await session.execute(
+            insert(SuggestionDecisionTable).values(
+                message_id=message_id,
+                fingerprint=SUGGESTIONS[0].fingerprint,
+                decision="accepted",
+                action_id=action_id,
+                decided_at_utc=now,
+            )
+        )
+
+    async with database.transaction() as session:
+        assert await AccountRepository(session).delete_by_id(account_id)
+
+    async with database.session() as session:
+        remaining = {
+            table.__tablename__: await session.scalar(select(func.count()).select_from(table))
+            for table in (
+                MessageTable,
+                AnalysisTable,
+                ActionSuggestionTable,
+                SuggestionDecisionTable,
+            )
+        }
+        source = (await session.scalars(select(ActionSourceTable))).one()
+        action = await session.get(ActionTable, action_id)
+    assert remaining == {
+        "messages": 0,
+        "analyses": 0,
+        "action_suggestions": 0,
+        "suggestion_decisions": 0,
+    }
+    assert source.message_id is None
+    assert source.action_id == action_id
+    assert (
+        source.provider_message_id,
+        source.subject,
+        source.sender_address,
+        source.web_link,
+        source.received_at_utc,
+    ) == snapshot
+    assert action is not None and action.title == "Approve the proposal"

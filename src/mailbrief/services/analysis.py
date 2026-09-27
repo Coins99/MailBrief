@@ -483,8 +483,11 @@ class AnalysisService:
         )
         if cached is None:
             return planned
+        suggestions = await self._analyses.get_suggestions(cached.id)
         try:
-            planned.analysis = AnalysisRepository.to_domain(cached, message_key=request.message_key)
+            planned.analysis = AnalysisRepository.to_domain(
+                cached, message_key=request.message_key, suggestions=suggestions
+            )
         except ValueError:
             return planned  # A cached row that no longer validates counts as a miss.
         planned.outcome = AnalysisOutcome.REUSED
