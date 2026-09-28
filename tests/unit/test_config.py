@@ -102,6 +102,11 @@ def test_ai_limits_are_bounded(values: dict[str, float]) -> None:
         Settings.model_validate(values)
 
 
+def test_the_output_limit_leaves_room_for_gpt_oss_reasoning() -> None:
+    # Five full suggestions take about 2,200 tokens before any reasoning.
+    assert Settings().ai_max_output_tokens == 4_000
+
+
 def test_ai_limits_accept_their_bounds() -> None:
     low = Settings(ai_max_output_tokens=256, ai_timeout_seconds=10)
     high = Settings(ai_max_output_tokens=64_000, ai_timeout_seconds=600)

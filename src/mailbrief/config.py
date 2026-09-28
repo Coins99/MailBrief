@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     groq_model: str | None = None
     ai_batch_size: int = Field(default=1, ge=1, le=MAX_ANALYSIS_BATCH)
     ai_body_character_limit: int = Field(default=4_000, ge=1, le=8_000)
-    ai_max_output_tokens: int = Field(default=2_000, ge=256, le=64_000)
+    ai_max_output_tokens: int = Field(default=4_000, ge=256, le=64_000)
     ai_max_requests_per_run: int = Field(default=10, ge=1, le=1_000)
     ai_timeout_seconds: float = Field(default=120, ge=10, le=600)
 

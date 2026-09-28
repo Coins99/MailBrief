@@ -73,6 +73,23 @@ def wire_result(message_key: str, evidence: str, **overrides: Any) -> dict[str, 
         "stated_timezone": None,
         "confidence": 0.8,
         "evidence": evidence,
+        "actions": [],
+    }
+    values.update(overrides)
+    return values
+
+
+def wire_action(evidence: str, **overrides: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "title": "Approve the budget",
+        "ownership": "mine",
+        "effort": None,
+        "deadline_text": None,
+        "deadline_date": None,
+        "deadline_time": None,
+        "stated_timezone": None,
+        "steps": [],
+        "evidence": evidence,
     }
     values.update(overrides)
     return values

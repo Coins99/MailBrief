@@ -2,8 +2,8 @@
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
-from datetime import date
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, date, datetime
 from typing import Protocol
 
 from pydantic import SecretStr
@@ -21,17 +21,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncStatus
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
+from mailbrief.services.actions import (
+    ActionConflictError,
+    ActionNotFoundError,
+    SuggestionNotFoundError,
+)
 from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
+from mailbrief.services.calendar import resolve_timezone
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
+from mailbrief.ui.action_editor import ActionEditor
+from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPanel
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
-from mailbrief.ui.digest_view import DigestView
+from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.settings_view import SettingsDialog
 
@@ -58,6 +67,34 @@ class DesktopBackend(Protocol):
         progress: Callable[[SyncProgress], None],
     ) -> BriefRunResult: ...
     async def close(self) -> None: ...
+    async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]: ...
+    async def accept_suggestion(self, suggestion_id: int) -> Action: ...
+    async def dismiss_suggestion(self, suggestion_id: int) -> None: ...
+    async def restore_suggestion(self, suggestion_id: int) -> None: ...
+    async def unaccept_action(self, public_id: str, revision: int) -> None: ...
+    async def save_action(
+        self,
+        public_id: str,
+        revision: int,
+        edit: ActionEdit,
+        steps: Sequence[StepEdit] | None = None,
+    ) -> Action: ...
+    async def complete_action(self, public_id: str, revision: int) -> Action: ...
+    async def reopen_action(self, public_id: str, revision: int) -> Action: ...
+    async def delete_action(self, public_id: str, revision: int) -> None: ...
+    async def restore_action(self, public_id: str) -> Action: ...
+
+
+# Raised when the brief or an action changed since it was shown; the window reloads.
+_STALE = (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError)
+_PICK_ONE = "Select at least one message to analyze, or Cancel."
+_NOT_REFRESHED = "The view could not be refreshed; restart MailBrief to see the latest."
+_EDITOR_WAIT = "MailBrief is busy; try again in a moment."
+_EDITOR_STALE = (
+    "This action changed since you opened it. Your edits are still here — copy what you "
+    "need, then Cancel and reopen the action."
+)
+_EDITOR_FAILED = "Couldn't save. Your edits are still here; try again."
 
 
 def plain_label(text: str) -> QLabel:
@@ -84,6 +121,13 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._shutdown_complete = False
         self._cancellable = True
+        # The one change that Undo reverses: its button label and the operation that undoes it.
+        self._undo: tuple[str, Callable[[], Awaitable[None]]] | None = None
+        # Carryover and overdue labels use the owner's local day.
+        self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
+        self.zone = resolve_timezone(None)
+        self.action_editor = ActionEditor(self)
+        self.action_editor.save_requested.connect(self._request_save_action)
         self.cached_dialog = CachedMailDialog(self)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
@@ -135,6 +179,10 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.cached_button, 1, 2)
         self.status = plain_label("Loading saved brief…")
         layout.addWidget(self.status)
+        self.undo_button = QPushButton("&Undo")
+        self.undo_button.hide()
+        self.undo_button.clicked.connect(lambda: self.start(self._undo_last, cancellable=False))
+        layout.addWidget(self.undo_button)
         self.review_panel = QWidget()
         review_layout = QVBoxLayout(self.review_panel)
         review_layout.addWidget(
@@ -162,8 +210,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.consent_panel)
         self.consent_panel.hide()
         self.digest = DigestView()
+        self.digest.suggestion_requested.connect(self._request_suggestion)
         self.digest.setMinimumHeight(180)
         layout.addWidget(self.digest, 1)
+        self.actions_panel = ActionsPanel()
+        self.actions_panel.setMinimumHeight(220)
+        self.actions_panel.action_requested.connect(self._request_action)
+        layout.addWidget(self.actions_panel, 1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
@@ -192,15 +245,192 @@ class MainWindow(QMainWindow):
         self.settings_dialog.set_busy(busy)
         self.cached_button.setEnabled(not busy and self._ready)
         self.cached_dialog.set_busy(busy)
+        self.undo_button.setEnabled(not busy)
+        self.actions_panel.set_busy(busy)
+        self.action_editor.set_busy(busy)
 
-    def start(self, operation: Callable[[], Awaitable[None]], *, cancellable: bool = True) -> None:
-        """Only one operation may own the providers and workflow at a time."""
-        if self._closing or (self.task is not None and not self.task.done()):
+    def _offer_undo(
+        self, label: str | None = None, operation: Callable[[], Awaitable[None]] | None = None
+    ) -> None:
+        """Offer to undo the latest change, or clear the offer when called without one."""
+        self._undo = None if label is None or operation is None else (label, operation)
+        self.undo_button.setText("&Undo" if self._undo is None else f"&{self._undo[0]}")
+        self.undo_button.setVisible(self._undo is not None)
+
+    def _note_not_refreshed(self, exc: Exception) -> None:
+        """The change itself was saved; only the view is out of date."""
+        log_failure(exc)
+        if _NOT_REFRESHED not in self.status.text():
+            self.status.setText(f"{self.status.text()} {_NOT_REFRESHED}".strip())
+
+    async def _reload_brief(self) -> None:
+        try:
+            saved = await self.backend.load_saved()
+        except Exception as exc:
+            self._note_not_refreshed(exc)
             return
+        if saved is not None:
+            self.digest.show_digest(saved)
+
+    async def _refresh_actions(self) -> None:
+        now = self.now()
+        today = now.astimezone(self.zone).date()
+        try:
+            for view in ActionFilter:
+                self.actions_panel.show_actions(
+                    view,
+                    await self.backend.list_actions(view),
+                    today=today,
+                    zone=self.zone,
+                    now=now,
+                )
+        except Exception as exc:
+            self._note_not_refreshed(exc)
+
+    async def _refresh_views(self) -> None:
+        await self._reload_brief()
+        await self._refresh_actions()
+
+    async def _stale(self, exc: Exception) -> None:
+        log_failure(exc)
+        self.status.setText("That changed or is no longer available; the view was reloaded.")
+        await self._refresh_views()
+
+    def _request_suggestion(self, kind: str, suggestion_id: int) -> None:
+        if kind == ACCEPT:
+            self.start(lambda: self._accept_suggestion(suggestion_id), cancellable=False)
+        elif kind == DISMISS:
+            self.start(lambda: self._dismiss_suggestion(suggestion_id), cancellable=False)
+
+    async def _accept_suggestion(self, suggestion_id: int) -> None:
+        try:
+            action = await self.backend.accept_suggestion(suggestion_id)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        public_id, revision = action.public_id, action.revision
+        self._offer_undo("Undo accept", lambda: self.backend.unaccept_action(public_id, revision))
+        self.status.setText(f"Accepted: {action.title}. It stays open until you complete it.")
+        await self._refresh_views()
+
+    async def _dismiss_suggestion(self, suggestion_id: int) -> None:
+        try:
+            await self.backend.dismiss_suggestion(suggestion_id)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._offer_undo("Undo dismiss", lambda: self.backend.restore_suggestion(suggestion_id))
+        self.status.setText("Suggestion dismissed. It won't be suggested again for this email.")
+        await self._refresh_views()
+
+    async def _undo_last(self) -> None:
+        if self._undo is None:
+            return
+        operation = self._undo[1]
+        self._offer_undo()
+        try:
+            await operation()
+        except _STALE as exc:
+            log_failure(exc)
+            self.status.setText("Can't undo: it has changed since then.")
+            await self._refresh_views()
+            return
+        self.status.setText("Undone.")
+        await self._refresh_views()
+
+    def _request_action(self, kind: str, action: Action) -> None:
+        if kind == EDIT:
+            self.action_editor.edit(action, self.now().astimezone(self.zone).date(), self.zone)
+            self.action_editor.open()
+        elif kind == COMPLETE:
+            self.start(lambda: self._complete_action(action), cancellable=False)
+        elif kind == REOPEN:
+            self.start(lambda: self._reopen_action(action), cancellable=False)
+        elif kind == DELETE:
+            self.start(lambda: self._delete_action(action), cancellable=False)
+
+    def _request_save_action(
+        self, action: Action, edit: ActionEdit, steps: Sequence[StepEdit] | None
+    ) -> None:
+        started = self.start(lambda: self._save_action(action, edit, steps), cancellable=False)
+        if not started and not self._closing:
+            self.action_editor.keep_open(_EDITOR_WAIT)
+
+    async def _complete_action(self, action: Action) -> None:
+        try:
+            done = await self.backend.complete_action(action.public_id, action.revision)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+
+        async def undo() -> None:
+            await self.backend.reopen_action(done.public_id, done.revision)
+
+        self._offer_undo("Undo complete", undo)
+        self.status.setText(f"Completed: {done.title}.")
+        await self._refresh_views()
+
+    async def _reopen_action(self, action: Action) -> None:
+        try:
+            opened = await self.backend.reopen_action(action.public_id, action.revision)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+
+        async def undo() -> None:
+            await self.backend.complete_action(opened.public_id, opened.revision)
+
+        self._offer_undo("Undo reopen", undo)
+        self.status.setText(f"Reopened: {opened.title}.")
+        await self._refresh_views()
+
+    async def _delete_action(self, action: Action) -> None:
+        try:
+            await self.backend.delete_action(action.public_id, action.revision)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        public_id = action.public_id
+
+        async def undo() -> None:
+            await self.backend.restore_action(public_id)
+
+        self._offer_undo("Undo delete", undo)
+        self.status.setText(f"Deleted: {action.title}.")
+        await self._refresh_views()
+
+    async def _save_action(
+        self, action: Action, edit: ActionEdit, steps: Sequence[StepEdit] | None
+    ) -> None:
+        """The editor closes only once the save succeeds; otherwise it keeps the edits."""
+        try:
+            saved = await self.backend.save_action(action.public_id, action.revision, edit, steps)
+        except _STALE as exc:
+            if not self._closing:
+                self.action_editor.keep_open(_EDITOR_STALE)
+            await self._stale(exc)
+            return
+        except Exception:
+            if not self._closing:
+                self.action_editor.keep_open(_EDITOR_FAILED)
+            raise  # _run logs it and reports the failure.
+        self.action_editor.finish_saved()
+        self._offer_undo()  # An edit has no undo; an older offer would refer to a past revision.
+        self.status.setText(f"Saved: {saved.title}.")
+        await self._refresh_views()
+
+    def start(self, operation: Callable[[], Awaitable[None]], *, cancellable: bool = True) -> bool:
+        """Only one operation may own the providers and workflow at a time.
+
+        Returns whether this operation started; it does not while closing or busy.
+        """
+        if self._closing or (self.task is not None and not self.task.done()):
+            return False
         self._cancel = asyncio.Event()
         self._cancellable = cancellable
         self._set_busy(True)
         self.task = asyncio.create_task(self._run(operation))
+        return True
 
     async def _run(self, operation: Callable[[], Awaitable[None]]) -> None:
         try:
@@ -319,6 +549,7 @@ class MainWindow(QMainWindow):
                 "No saved brief yet. Connect Gmail, then sync and review your shortlist."
             )
         self.status.setText("Ready. Sync to review today's messages.")
+        await self._refresh_actions()
         await self._refresh_ai_status()
         try:
             email = await self.backend.connect(silent_only=True)
@@ -346,6 +577,7 @@ class MainWindow(QMainWindow):
         self.status.setText("Local credentials removed. Saved briefs remain on this device.")
 
     async def _generate(self) -> None:
+        self._offer_undo()  # A new brief replaces the suggestions that Undo would refer to.
         self.status.setText("Syncing today's Inbox…")
         result = await self.backend.generate(self, self, self._cancel, self._progress)
         if result.digest is not None:
@@ -419,6 +651,10 @@ class MainWindow(QMainWindow):
             item = self.shortlist.item(index)
             if item is not None and item.checkState() is Qt.CheckState.Checked:
                 selected.append(str(item.data(Qt.ItemDataRole.UserRole)))
+        if not selected:
+            # Continuing with nothing would save an empty brief over today's saved one.
+            self.status.setText(_PICK_ONE)
+            return
         if len(selected) > MAX_SHORTLIST_SIZE:
             self.status.setText("Choose at most ten messages before continuing.")
             return
@@ -432,8 +668,10 @@ class MainWindow(QMainWindow):
                 count += 1
         noun = "message" if count == 1 else "messages"
         self.review_button.setText(f"Co&ntinue with {count} selected {noun}")
-        self.review_button.setEnabled(count <= MAX_SHORTLIST_SIZE)
-        if count > MAX_SHORTLIST_SIZE:
+        self.review_button.setEnabled(1 <= count <= MAX_SHORTLIST_SIZE)
+        if count == 0:
+            self.status.setText(_PICK_ONE)
+        elif count > MAX_SHORTLIST_SIZE:
             self.status.setText("Choose at most ten messages before continuing.")
 
     async def confirm(self, preview: TransmissionPreview) -> bool:
@@ -468,6 +706,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self.settings_dialog.reject()
         self.cached_dialog.reject()
+        self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
         self.cancel()
         self.closing.emit()
 

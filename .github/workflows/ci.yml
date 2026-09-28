@@ -46,14 +46,16 @@ jobs:
         run: uv run mypy src tests
 
       - name: Test
-        run: uv run pytest
+        # macOS runs its Qt tests in the next step, so its coverage gate waits for them.
+        run: uv run pytest ${{ runner.os == 'macOS' && '--cov-fail-under=0' || '' }}
 
       - name: Qt tests on the Cocoa platform
         if: runner.os == 'macOS'
         env:
           MACOS_GUI_AVAILABLE: "1"
           QT_QPA_PLATFORM: cocoa
-        run: uv run pytest --no-cov tests/ui tests/unit/test_app.py
+        # Adds these tests' coverage to the main run's; the 80% gate applies to the total.
+        run: uv run pytest --cov-append tests/ui tests/unit/test_app.py
 
       - name: Build desktop package
         run: uv run python scripts/build_desktop.py

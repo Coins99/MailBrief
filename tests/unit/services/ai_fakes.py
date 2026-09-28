@@ -3,7 +3,13 @@
 from collections.abc import Callable, Sequence
 from typing import ClassVar
 
-from mailbrief.domain.analysis import AIUsage, AnalysisCandidate, AnalysisRequest, AnalysisResponse
+from mailbrief.domain.analysis import (
+    ActionCandidate,
+    AIUsage,
+    AnalysisCandidate,
+    AnalysisRequest,
+    AnalysisResponse,
+)
 
 Respond = Callable[[Sequence[AnalysisRequest]], AnalysisResponse]
 ScriptItem = AnalysisResponse | Exception | Respond
@@ -89,6 +95,23 @@ def good_candidate(request: AnalysisRequest, **overrides: object) -> AnalysisCan
     }
     values.update(overrides)
     return AnalysisCandidate.model_validate(values)
+
+
+def good_action(request: AnalysisRequest, **overrides: object) -> ActionCandidate:
+    """A suggested action that passes validation; its evidence is a slice of the request body."""
+    values: dict[str, object] = {
+        "title": "Approve the quarterly budget",
+        "ownership": "mine",
+        "effort": None,
+        "deadline_text": None,
+        "deadline_date": None,
+        "deadline_time": None,
+        "stated_timezone": None,
+        "steps": (),
+        "evidence": request.body_text[:20],
+    }
+    values.update(overrides)
+    return ActionCandidate.model_validate(values)
 
 
 def answer_all(usage: AIUsage | None = None, **overrides: object) -> Respond:

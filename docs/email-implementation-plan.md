@@ -245,6 +245,10 @@ works from the package, and restart restores the session and saved brief.
 
 ## M6 — Persistent actions, target dates and plans
 
+**Status:** implemented in PR #15, awaiting live acceptance ([m6-actions.md](m6-actions.md)).
+Proposed revisions for changed sources moved to M8, which handles thread updates
+([ADR 0011](adr/0011-actions-and-suggestions.md)).
+
 **Work**
 
 - Add candidate suggestion, accepted action, source-link and ordered-step models.

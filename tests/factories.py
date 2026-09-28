@@ -1,8 +1,16 @@
 """Small typed factories shared by unit tests."""
 
+import hashlib
 from datetime import UTC, date, datetime
 
-from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
+from mailbrief.domain.actions import Action, ActionStatus
+from mailbrief.domain.analysis import (
+    ActionOwnership,
+    ActionSuggestion,
+    AnalysisCategory,
+    DeadlinePrecision,
+    MessageAnalysis,
+)
 from mailbrief.domain.digests import DigestItem, DigestSection
 from mailbrief.domain.messages import (
     EmailContact,
@@ -52,6 +60,40 @@ def make_analysis(**overrides: object) -> MessageAnalysis:
     }
     values.update(overrides)
     return MessageAnalysis.model_validate(values)
+
+
+def fingerprint_of(text: str) -> str:
+    """A well-formed suggestion fingerprint; tests only need it to be distinct per text."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def make_suggestion(**overrides: object) -> ActionSuggestion:
+    """Build a valid suggestion without a deadline or target by default."""
+    values: dict[str, object] = {
+        "position": 0,
+        "title": "Approve the proposal",
+        "ownership": ActionOwnership.MINE,
+        "steps": ("Read the proposal",),
+        "evidence": "Please approve the attached proposal",
+        "fingerprint": fingerprint_of("approve the proposal"),
+    }
+    values.update(overrides)
+    return ActionSuggestion.model_validate(values)
+
+
+def make_action(**overrides: object) -> Action:
+    """Build a valid open action without a deadline by default."""
+    values: dict[str, object] = {
+        "public_id": "0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44",
+        "title": "Approve the proposal",
+        "ownership": ActionOwnership.MINE,
+        "status": ActionStatus.OPEN,
+        "created_at_utc": datetime(2026, 8, 31, 14, 30, tzinfo=UTC),
+        "updated_at_utc": datetime(2026, 8, 31, 14, 30, tzinfo=UTC),
+        "revision": 1,
+    }
+    values.update(overrides)
+    return Action.model_validate(values)
 
 
 def make_digest_item(**overrides: object) -> DigestItem:

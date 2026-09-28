@@ -38,6 +38,22 @@ _LINK_ONLY = re.compile(r"^(?:\[link\][\s|,.;:()-]*)+$")
 _SPACES = re.compile(r"[^\S\n]+")
 
 
+def clean_generated_text(text: str) -> str:
+    """AI-written text made safe to show: one line, with no control or format characters.
+
+    Terminal escape sequences, bidirectional overrides and invisible padding are removed, so
+    an email that steers the model's output can neither drive a terminal nor disguise text.
+    Every kind of whitespace, including carriage returns and other line or record
+    separators, becomes a single space, so matching text against the email still works.
+    """
+    kept = "".join(
+        " " if ch.isspace() else ch
+        for ch in text
+        if ch.isspace() or (ch not in _FILLERS and unicodedata.category(ch) not in {"Cc", "Cf"})
+    )
+    return " ".join(kept.split())
+
+
 def looks_like_forward(subject: str | None) -> bool:
     """True for subjects such as "Fwd:", "FW:", "WG:" or "转发:"."""
     return bool(subject and _FORWARD_SUBJECT.match(subject))

@@ -20,6 +20,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   shortlist review, offline metadata browser and native packages. See `docs/m5-desktop.md`
   and `docs/m5-acceptance.md` for validation and the remaining checks. Scope remains
   in `docs/mvp-plan.md` and `docs/email-implementation-plan.md`.
+- Implemented, awaiting live acceptance: M6 AI action suggestions, accepted actions with
+  editable plans and target dates, open/waiting/completed lists and undo (desktop, plus
+  `brief --show` and `mailbrief-gmail-diagnostic actions`). See `docs/m6-actions.md` and
+  ADR 0011.
 
 ## Layout (ports and adapters)
 
@@ -28,15 +32,17 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
   `providers/groq/`: active AI adapter (Structured Outputs), API key store and factory.
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
-  analysis, deadlines, digest and brief.
-- `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`.
+  analysis, deadlines, digest and brief; for M6: actions.
+- `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`, and
+  `actions.py` for suggestions, decisions and accepted actions.
   Alembic revisions live in `migrations/versions/`.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
 - `src/mailbrief/infra/`: HTTP retry classification and `vault.py`, the explicit OS
   credential vault.
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
-  desktop service composition and saved-brief display; `app.py` owns the qasync loop.
+  desktop service composition, saved-brief display, the actions pane and editor; `app.py`
+  owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
 
@@ -47,11 +53,25 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   supplies, which SQLite has kept since M2; for a very short email that snippet can be the
   whole text. The one exception is `mailbrief-gmail-diagnostic bodies --show-text`, which
   prints prepared text to the owner's terminal on explicit request. `brief --show` prints
-  derived brief content (sender, subject, summary, action, deadline, link) on explicit
-  request, never evidence or bodies.
+  derived brief content (sender, subject, summary, action, deadline, link, and suggestion
+  titles, targets and steps) on explicit request, never evidence or bodies.
 - Derived content is bounded: a summary is at most 240 characters, an action at most
-  1,000, and evidence at most 300 and strictly under 80% of the body. A summary of a very
-  short email may restate it.
+  1,000, and evidence at most 300 and strictly under 80% of the body. An email has at most
+  five suggestions, each with a title of at most 120 characters, at most five steps of at
+  most 120, and evidence of at most 160. All stored evidence for one email totals at most
+  600 characters and stays under 80% of its body. A summary of a very short email may
+  restate it.
+- Text the AI writes itself (summary, action text, suggestion titles and steps) and
+  deadline phrases are stripped of control and format characters before they are stored.
+  Mail and AI text reaches the UI only through plain-text widgets or escaped HTML, and only
+  `https://mail.google.com` message links are ever opened.
+- Accepted actions belong to the owner: AI runs never write to them, and they survive
+  message, cache and account deletion through their source snapshots. The owner's
+  decisions on suggestions survive the same deletions: they are keyed by provider account,
+  provider message ID and title fingerprint, never by a cached row. Every change bumps
+  the action's revision, and every change except restoring a deleted action needs the
+  revision the caller saw. Change decisions and actions through ORM objects, never bulk
+  UPDATE or DELETE statements, which leave loaded rows stale.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
@@ -77,6 +97,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Accept only responses that validate against the versioned Pydantic schema. Cache by
   input hash, provider, model, prompt version and schema version.
 - Store evidence at most 300 characters long and never as a whole body (under 80% of it).
+- Each result may carry up to five action suggestions (schema version 6). A suggestion
+  whose evidence does not quote the email is dropped; a deadline phrase that does not quote
+  it drops only that suggestion's deadline. Target dates come from Python, never the model.
 
 ## Dependencies
 

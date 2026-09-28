@@ -5,13 +5,20 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from mailbrief.domain.analysis import AnalysisCandidate, AnalysisRequest, DeadlinePrecision
+from mailbrief.domain.analysis import (
+    AnalysisCandidate,
+    AnalysisRequest,
+    DeadlinePrecision,
+    TargetReason,
+)
 from mailbrief.domain.messages import EmailContact
 from mailbrief.services.deadlines import (
     ZONE_TOKEN_PATTERN,
     InvalidDeadlineError,
     ResolvedDeadline,
     resolve_deadline,
+    resolve_deadline_fields,
+    suggest_target,
 )
 
 ZONE = "America/Toronto"
@@ -450,3 +457,122 @@ def test_invalid_deadline_errors_are_static_value_errors() -> None:
 
     assert isinstance(caught.value, InvalidDeadlineError)
     assert "not in the email" not in str(caught.value)
+
+
+def test_resolve_deadline_fields_matches_resolving_a_candidate() -> None:
+    fields = ("Friday 5 PM", " 2026-09-04 ", "17:00", None)
+
+    resolved = resolve_deadline_fields(*fields, request())
+
+    assert resolved == resolve_deadline(friday(deadline_time="17:00"), request())
+    assert resolved.precision is DeadlinePrecision.DATETIME
+    with pytest.raises(InvalidDeadlineError):
+        resolve_deadline_fields("not in the email", None, None, None, request())
+
+
+# 31 August 2026 is a Monday; Friday is 4 September and the next Monday is 7 September.
+MONDAY = date(2026, 8, 31)
+NEXT_MONDAY = date(2026, 9, 7)
+
+
+def local_morning(day: date) -> datetime:
+    """10:00 in Toronto (EDT) on ``day``, as UTC."""
+    return datetime(day.year, day.month, day.day, 14, 0, tzinfo=UTC)
+
+
+def due_on(day: date) -> ResolvedDeadline:
+    return ResolvedDeadline("Friday", DeadlinePrecision.DATE, day, None, ZONE)
+
+
+@pytest.mark.parametrize(
+    ("due", "received", "target"),
+    [
+        (FRIDAY, MONDAY, (date(2026, 9, 3), TargetReason.WORKING_DAY_BEFORE)),
+        (date(2026, 9, 1), MONDAY, (MONDAY, TargetReason.WORKING_DAY_BEFORE)),
+        (NEXT_MONDAY, FRIDAY, (FRIDAY, TargetReason.WORKING_DAY_BEFORE)),
+        (date(2026, 9, 6), date(2026, 9, 2), (FRIDAY, TargetReason.WORKING_DAY_BEFORE)),
+        (NEXT_MONDAY, date(2026, 9, 5), (NEXT_MONDAY, TargetReason.ON_DEADLINE)),
+        (FRIDAY, FRIDAY, (FRIDAY, TargetReason.ON_DEADLINE)),
+        (date(2026, 9, 2), FRIDAY, (date(2026, 9, 2), TargetReason.ON_DEADLINE)),
+    ],
+    ids=[
+        "friday-received-monday",
+        "tuesday-received-monday",
+        "monday-received-the-friday-before",
+        "sunday-received-wednesday",
+        "monday-received-saturday",
+        "due-the-day-it-arrived",
+        "already-past",
+    ],
+)
+def test_suggest_target_is_the_last_working_day_before_the_deadline(
+    due: date, received: date, target: tuple[date, TargetReason]
+) -> None:
+    assert suggest_target(due_on(due), request(local_morning(received))) == target
+
+
+def test_suggest_target_takes_the_received_day_in_the_owner_zone() -> None:
+    friday_evening = datetime(2026, 9, 5, 2, 0, tzinfo=UTC)  # 22:00 on Friday in Toronto.
+
+    target = suggest_target(due_on(NEXT_MONDAY), request(friday_evening))
+
+    assert target == (FRIDAY, TargetReason.WORKING_DAY_BEFORE)
+
+
+def test_suggest_target_takes_an_instant_on_its_day_in_the_owner_zone() -> None:
+    # Saturday 09:00 in Tokyo is still Friday evening in Toronto.
+    saturday_in_tokyo = datetime(2026, 9, 5, 0, 0, tzinfo=UTC)
+    deadline = ResolvedDeadline(
+        "Saturday 9:00 Asia/Tokyo",
+        DeadlinePrecision.DATETIME,
+        date(2026, 9, 5),
+        saturday_in_tokyo,
+        "Asia/Tokyo",
+    )
+
+    target = suggest_target(deadline, request(local_morning(MONDAY)))
+
+    assert target == (date(2026, 9, 3), TargetReason.WORKING_DAY_BEFORE)
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [NO_DEADLINE, ResolvedDeadline("ASAP", DeadlinePrecision.UNRESOLVED, None, None, None)],
+    ids=["none", "unresolved"],
+)
+def test_suggest_target_needs_a_dated_deadline(deadline: ResolvedDeadline) -> None:
+    assert suggest_target(deadline, request()) == (None, None)
+
+
+@pytest.mark.parametrize("separator", ["\r", "\x1c", "\x85", "\x0b", "\u2028"])
+def test_a_deadline_phrase_keeps_no_control_character_that_could_move_a_terminal(
+    separator: str,
+) -> None:
+    request = AnalysisRequest(
+        message_key="k1",
+        subject="Plan",
+        sender=EmailContact(address="alex@example.com"),
+        received_at_utc=datetime(2026, 9, 16, 12, tzinfo=UTC),
+        timezone_name="UTC",
+        body_text="Please reply by Friday Deadline none so we can plan.",
+    )
+
+    resolved = resolve_deadline_fields(
+        f"by Friday{separator}Deadline none", None, None, None, request
+    )
+
+    assert resolved.text == "by Friday Deadline none"
+
+
+def test_a_deadline_phrase_with_an_escape_character_still_does_not_quote_the_email() -> None:
+    request = AnalysisRequest(
+        message_key="k1",
+        subject="Plan",
+        sender=EmailContact(address="alex@example.com"),
+        received_at_utc=datetime(2026, 9, 16, 12, tzinfo=UTC),
+        timezone_name="UTC",
+        body_text="Please reply by Friday so we can plan.",
+    )
+
+    with pytest.raises(InvalidDeadlineError):
+        resolve_deadline_fields("by\x1bFriday", None, None, None, request)

@@ -2,17 +2,22 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
+from mailbrief.domain.analysis import (
+    AnalysisCategory,
+    DeadlinePrecision,
+    MessageAnalysis,
+    deadline_due_at,
+)
 from mailbrief.domain.briefs import AnalysisOutcome
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestSection, DigestStatus
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.services.analysis import PlannedMessage
 from mailbrief.services.calendar import DayWindow
+from mailbrief.storage.actions import suggestion_views
 from mailbrief.storage.repositories import DigestRepository
 
 SECTION_ORDER = (
@@ -37,17 +42,12 @@ def section_for(analysis: MessageAnalysis) -> DigestSection:
 
 def _due_at(analysis: MessageAnalysis) -> datetime | None:
     """When a dated deadline falls due: its instant, or the end of its local day."""
-    if analysis.deadline_precision is DeadlinePrecision.DATETIME:
-        return analysis.deadline_at_utc
-    if (
-        analysis.deadline_precision is DeadlinePrecision.DATE
-        and analysis.deadline_date is not None
-        and analysis.deadline_timezone is not None
-    ):
-        next_day = analysis.deadline_date + timedelta(days=1)
-        zone = ZoneInfo(analysis.deadline_timezone)
-        return datetime.combine(next_day, time.min, tzinfo=zone).astimezone(UTC)
-    return None
+    return deadline_due_at(
+        analysis.deadline_precision,
+        analysis.deadline_date,
+        analysis.deadline_at_utc,
+        analysis.deadline_timezone,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,4 +123,9 @@ class DigestService:
         )
         await self._session.commit()
         rows = await self._digests.get_digest_items(saved.id)
-        return DigestRepository.to_domain(saved, rows, account_identity=account_email)
+        views = await suggestion_views(
+            self._session, [(item.message_id, item.analysis_id) for item, _, _ in rows]
+        )
+        return DigestRepository.to_domain(
+            saved, rows, account_identity=account_email, suggestions=views
+        )

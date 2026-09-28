@@ -17,12 +17,15 @@ exceptions. Usage metadata is retained even with ZDR. See
    It is kept only in Windows Credential Manager or the macOS Keychain, under
    `MailBrief.Groq`. `ai-key status` says whether one is saved; `ai-key clear` removes it.
 2. Set `MAILBRIEF_GROQ_MODEL` to `openai/gpt-oss-120b`, which supports strict Structured Outputs on Groq.
-   This model name does not require an OpenAI API account.
+   This model name does not require an OpenAI API account. MailBrief asks `openai/gpt-oss-*`
+   models for low reasoning effort, because their reasoning shares the output limit with
+   the answer; other models get no reasoning setting, since Groq rejects values a model
+   does not support.
 3. Optional settings:
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
-| `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` | 2000 | 256-64000 | Output limit per Groq call |
+| `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` | 4000 | 256-64000 | Output limit per Groq call, reasoning included |
 | `MAILBRIEF_AI_MAX_REQUESTS_PER_RUN` | 10 | 1-1000 | Maximum HTTP attempts per connection/run, including retries |
 | `MAILBRIEF_AI_TIMEOUT_SECONDS` | 120 | 10-600 | Time limit per request |
 | `MAILBRIEF_AI_BODY_CHARACTER_LIMIT` | 4000 | 1-8000 | Prepared body characters per email |
@@ -40,7 +43,7 @@ uv run mailbrief-gmail-diagnostic ai-key status
 $env:MAILBRIEF_GROQ_MODEL = "openai/gpt-oss-120b"
 $env:MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH = "C:\path\to\gmail-client.json"
 $env:MAILBRIEF_AI_MAX_REQUESTS_PER_RUN = "5"
-$env:MAILBRIEF_AI_MAX_OUTPUT_TOKENS = "2000"
+$env:MAILBRIEF_AI_MAX_OUTPUT_TOKENS = "4000"
 uv run mailbrief-gmail-diagnostic brief
 ```
 
@@ -63,7 +66,7 @@ every other message has had its first attempt; a message Groq rejects is not sen
 MailBrief stops making requests, retains successful analyses and reports a partial brief
 (exit 4), or preserves the previous brief if nothing could be analyzed.
 
-The example above permits at most five requests with at most 2,000 output tokens each.
+The example above permits at most five requests with at most 4,000 output tokens each.
 On paid plans, input tokens are also billable. These controls are not a dollar cap:
 starting another run resets the counter, and processes have separate counters.
 
@@ -104,7 +107,11 @@ What is stored: MailBrief never stores full email bodies, beyond the short previ
 Gmail supplies with each message's metadata, which has been kept since M2; for a very
 short email that snippet can be the whole text. Derived content is bounded: a summary is
 at most 240 characters, an action at most 1,000, and evidence at most 300 and strictly
-under 80% of the body. A summary of a very short email may restate it.
+under 80% of the body. A summary of a very short email may restate it. Since M6 an email
+may also carry up to five action suggestions; their evidence quotes are at most 160
+characters, and all stored quotes for one email total at most 600 characters and under
+80% of its body. Text the model writes itself, and deadline phrases, are stored without
+control or format characters. See [M6 actions](m6-actions.md).
 
 ## Consent
 
@@ -127,8 +134,10 @@ but they do not count as Groq cache hits. There is no automatic OpenAI fallback.
 Each validated result is saved with its message, input hash, provider, model, prompt version
 and schema version. The hash covers everything sent except the random key, including your
 time zone. An unchanged message is reused and never sent again; a new model, prompt or time
-zone analyzes it once more. The cache holds the summary, action, deadline and a short
-evidence quote from the email, never the body.
+zone analyzes it once more. The cache holds the summary, action, deadline, the action
+suggestions and short evidence quotes from the email, never the body. Schema version 6
+(M6) made every earlier result a miss once, so the first brief after upgrading re-sends
+today's shortlist.
 
 ## Deadlines
 
@@ -177,7 +186,9 @@ and ending in "…" when longer.
 
 If nothing could be analyzed, no brief is written and today's last saved brief stays.
 By default the command prints counts only. `--show` also prints each item's sender, subject,
-summary, action, deadline and Gmail link, never the evidence or the body.
+summary, action, deadline and Gmail link, never the evidence or the body. Since M6 it also
+prints each pending suggestion as `[pending #N]` with its target and steps, and accepted
+ones as `[accepted]`; `actions accept N` and `actions dismiss N` decide them.
 
 ## Exit codes
 

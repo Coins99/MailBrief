@@ -4,8 +4,10 @@ from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 
 import pytest
+from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mailbrief.domain.actions import SuggestionState
 from mailbrief.domain.analysis import AnalysisCategory, DeadlinePrecision, MessageAnalysis
 from mailbrief.domain.briefs import AnalysisOutcome
 from mailbrief.domain.digests import DigestCoverage, DigestSection, DigestStatus
@@ -20,7 +22,8 @@ from mailbrief.storage.repositories import (
     DigestRepository,
     MessageRepository,
 )
-from tests.factories import make_analysis, make_message
+from mailbrief.storage.tables import ActionTable, SuggestionDecisionTable
+from tests.factories import fingerprint_of, make_analysis, make_message, make_suggestion
 
 OWNER = "owner@example.com"
 WINDOW = DayWindow(
@@ -327,3 +330,67 @@ async def test_an_included_message_without_rows_is_rejected(
             messages=[broken],
             coverage=coverage(analyzed=1),
         )
+
+
+async def test_saved_items_carry_their_suggestions_and_states(session: AsyncSession) -> None:
+    gmail = await AccountRepository(session).upsert(
+        AccountIdentity(provider=ProviderKind.GMAIL, provider_account_id="g-1", email_address=OWNER)
+    )
+    titles = ("Approve the proposal", "Book a room", "Call Sam")
+    suggested = action(
+        suggestions=tuple(
+            make_suggestion(position=index, title=title, fingerprint=fingerprint_of(title))
+            for index, title in enumerate(titles)
+        )
+    )
+    with_suggestions = await entry(session, gmail.id, "suggested", suggested)
+    without = await entry(session, gmail.id, "plain", highlight())
+    public_id = "0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44"
+    action_id = await session.scalar(
+        insert(ActionTable)
+        .values(
+            public_id=public_id,
+            title="Approve the proposal",
+            ownership="mine",
+            status="open",
+            created_at_utc=NOON,
+            updated_at_utc=NOON,
+        )
+        .returning(ActionTable.id)
+    )
+    for title, decision, decided_action in (
+        ("Approve the proposal", "accepted", action_id),
+        ("Book a room", "dismissed", None),
+    ):
+        await session.execute(
+            insert(SuggestionDecisionTable).values(
+                provider="gmail",
+                provider_account_id="g-1",
+                provider_message_id="suggested",
+                fingerprint=fingerprint_of(title),
+                decision=decision,
+                action_id=decided_action,
+                decided_at_utc=NOON,
+            )
+        )
+    await session.commit()
+
+    saved = await DigestService(session).save(
+        account_id=gmail.id,
+        account_email=OWNER,
+        window=WINDOW,
+        messages=[with_suggestions, without],
+        coverage=coverage(analyzed=2),
+    )
+    latest = await DigestRepository(session).get_latest()
+
+    assert saved is not None
+    items = {item.message_key: item for item in saved.items}
+    views = items["suggested"].suggestions
+    assert [(view.suggestion.title, view.state, view.action_public_id) for view in views] == [
+        ("Approve the proposal", SuggestionState.ACCEPTED, public_id),
+        ("Book a room", SuggestionState.DISMISSED, None),
+        ("Call Sam", SuggestionState.PENDING, None),
+    ]
+    assert items["plain"].suggestions == ()
+    assert latest == saved

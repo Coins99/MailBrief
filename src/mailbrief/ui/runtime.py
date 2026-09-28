@@ -1,12 +1,13 @@
 """Desktop composition; every operation owns and closes its provider/session resources."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 from pydantic import SecretStr
 
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.briefs import BriefRunResult
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, SyncProgress
@@ -16,6 +17,7 @@ from mailbrief.providers.gmail.factory import gmail_provider
 from mailbrief.providers.gmail.oauth import DesktopClient
 from mailbrief.providers.groq.credentials import GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
+from mailbrief.services.actions import ActionService
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
@@ -198,6 +200,57 @@ class DesktopRuntime:
                 if account.provider == ProviderKind.GMAIL.value:
                     count += await consents.revoke_all(account.id, "groq", datetime.now(UTC))
             return count
+
+    def _storage(self) -> Database:
+        if self._database is None:
+            raise RuntimeError("Desktop storage is not initialized.")
+        return self._database
+
+    async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]:
+        async with self._storage().session() as session:
+            return await ActionService(session).list_actions(view)
+
+    async def accept_suggestion(self, suggestion_id: int) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).accept(suggestion_id)
+
+    async def dismiss_suggestion(self, suggestion_id: int) -> None:
+        async with self._storage().session() as session:
+            await ActionService(session).dismiss(suggestion_id)
+
+    async def restore_suggestion(self, suggestion_id: int) -> None:
+        async with self._storage().session() as session:
+            await ActionService(session).restore_suggestion(suggestion_id)
+
+    async def unaccept_action(self, public_id: str, revision: int) -> None:
+        async with self._storage().session() as session:
+            await ActionService(session).unaccept(public_id, revision)
+
+    async def save_action(
+        self,
+        public_id: str,
+        revision: int,
+        edit: ActionEdit,
+        steps: Sequence[StepEdit] | None = None,
+    ) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).save(public_id, revision, edit, steps)
+
+    async def complete_action(self, public_id: str, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).complete(public_id, revision)
+
+    async def reopen_action(self, public_id: str, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).reopen(public_id, revision)
+
+    async def delete_action(self, public_id: str, revision: int) -> None:
+        async with self._storage().session() as session:
+            await ActionService(session).delete(public_id, revision)
+
+    async def restore_action(self, public_id: str) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).restore(public_id)
 
     async def close(self) -> None:
         if self._database is not None:

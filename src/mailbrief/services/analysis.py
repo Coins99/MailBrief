@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -20,12 +21,21 @@ from mailbrief.domain.analysis import (
     ANALYSIS_SCHEMA_VERSION,
     EVIDENCE_BODY_SHARE,
     EVIDENCE_STORE_CHARS,
+    EVIDENCE_TOTAL_CHARS,
     MAX_ANALYSIS_BATCH,
+    MAX_SUGGESTION_STEPS,
+    MAX_SUGGESTIONS,
+    SUGGESTION_EVIDENCE_CHARS,
+    SUGGESTION_STEP_MAX_CHARS,
+    SUGGESTION_TITLE_MAX_CHARS,
     SUMMARY_MAX_CHARS,
+    ActionCandidate,
+    ActionSuggestion,
     AIUsage,
     AnalysisCandidate,
     AnalysisRequest,
     AnalysisResponse,
+    DeadlinePrecision,
     MessageAnalysis,
 )
 from mailbrief.domain.bodies import BodyStatus, PreparedBody
@@ -47,10 +57,16 @@ from mailbrief.ports.errors import (
     ProviderUnavailableError,
     ProviderUsageLimitError,
 )
-from mailbrief.services.deadlines import resolve_deadline
+from mailbrief.services.deadlines import (
+    InvalidDeadlineError,
+    ResolvedDeadline,
+    resolve_deadline,
+    resolve_deadline_fields,
+    suggest_target,
+)
 from mailbrief.storage.repositories import AnalysisRepository, MessageRepository
 from mailbrief.text.matching import appears_in
-from mailbrief.text.prepare import truncate_at_boundary
+from mailbrief.text.prepare import clean_generated_text, truncate_at_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +76,9 @@ _ELLIPSES = ("...", "…")
 REQUEST_REJECTED = "AI_REQUEST_REJECTED"
 _DETAIL_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 KEY_MISSING = "AI_KEY_MISSING"
+_WHITESPACE = re.compile(r"\s+")
+_IGNORED_CATEGORIES = ("P", "S")  # Unicode punctuation and symbols.
+_NO_DEADLINE = ResolvedDeadline(None, DeadlinePrecision.NONE, None, None, None)
 
 
 def _random_key() -> str:
@@ -97,13 +116,29 @@ def _fit(text: str, limit: int) -> str:
     return truncate_at_boundary(text, limit - 1)[0] + "…"
 
 
+def suggestion_fingerprint(title: str) -> str:
+    """SHA-256 hex of a title with case, punctuation, symbols and spacing ignored.
+
+    Raises ValueError, whose message is static, when nothing is left to compare.
+    """
+    folded = unicodedata.normalize("NFKC", title).casefold()
+    kept = "".join(
+        char for char in folded if not unicodedata.category(char).startswith(_IGNORED_CATEGORIES)
+    )
+    normalized = _WHITESPACE.sub(" ", kept).strip()
+    if not normalized:
+        raise ValueError("a suggestion title needs letters or digits")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -> MessageAnalysis:
     """Check an untrusted candidate against its request and build the validated analysis.
 
     An over-long summary or action is shortened. The evidence must quote the email, and is
     stored at most 300 characters long and never as the whole body: it is cut to under 80%
-    of the body. Raises ValueError (pydantic's ValidationError is one); messages never echo
-    email text.
+    of the body. Suggested actions are checked one at a time by _suggestions, which drops a
+    bad one without failing the message. Raises ValueError (pydantic's ValidationError is
+    one); messages never echo email text.
     """
     if candidate.message_key != request.message_key:
         raise ValueError("the candidate key does not match its request")
@@ -111,17 +146,17 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
     if not appears_in(evidence, request.subject, request.body_text):
         raise ValueError("evidence must quote the email")
     # Strictly under the share: a 100-character body stores at most 79 characters.
-    evidence_cap = min(
-        EVIDENCE_STORE_CHARS, math.ceil(len(request.body_text) * EVIDENCE_BODY_SHARE) - 1
-    )
+    share_cap = math.ceil(len(request.body_text) * EVIDENCE_BODY_SHARE) - 1
+    evidence_cap = min(EVIDENCE_STORE_CHARS, share_cap)
     if evidence_cap < 2:
         raise ValueError("the body is too short to store any evidence from it")
+    stored_evidence = _fit(evidence, evidence_cap)
     deadline = resolve_deadline(candidate, request)
-    action_text = (candidate.action_text or "").strip()
+    action_text = clean_generated_text(candidate.action_text or "")
     return MessageAnalysis(
         message_key=request.message_key,
         category=candidate.category,
-        summary=_fit(candidate.summary, SUMMARY_MAX_CHARS),
+        summary=_fit(clean_generated_text(candidate.summary), SUMMARY_MAX_CHARS),
         action_required=candidate.action_required,
         action_text=_fit(action_text, ACTION_TEXT_MAX_CHARS) if action_text else None,
         deadline_text=deadline.text,
@@ -130,8 +165,76 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
         deadline_at_utc=deadline.at_utc,
         deadline_timezone=deadline.timezone,
         confidence=candidate.confidence,
-        evidence=_fit(evidence, evidence_cap),
+        evidence=stored_evidence,
+        suggestions=_suggestions(
+            candidate.actions,
+            request,
+            evidence_budget=min(EVIDENCE_TOTAL_CHARS, share_cap) - len(stored_evidence),
+        ),
     )
+
+
+def _suggestions(
+    actions: Sequence[ActionCandidate], request: AnalysisRequest, *, evidence_budget: int
+) -> tuple[ActionSuggestion, ...]:
+    """Up to five suggestions from the candidate actions, in their order.
+
+    An action is skipped when its title has no letters or digits, repeats a kept title
+    once case, punctuation and spacing are ignored, or its evidence does not quote the
+    email. A deadline that does not check out is dropped and the action kept. A quote is
+    stored only while ``evidence_budget`` characters remain, so the message's evidence
+    stays within its total; otherwise the suggestion keeps no evidence.
+    """
+    kept: list[ActionSuggestion] = []
+    used: set[str] = set()
+    for action in actions:
+        if len(kept) == MAX_SUGGESTIONS:
+            break
+        title = _fit(clean_generated_text(action.title), SUGGESTION_TITLE_MAX_CHARS)
+        try:
+            fingerprint = suggestion_fingerprint(title)
+        except ValueError:
+            continue
+        evidence = _trim_evidence(action.evidence)
+        if fingerprint in used or not appears_in(evidence, request.subject, request.body_text):
+            continue
+        try:
+            deadline = resolve_deadline_fields(
+                action.deadline_text,
+                action.deadline_date,
+                action.deadline_time,
+                action.stated_timezone,
+                request,
+            )
+        except InvalidDeadlineError:
+            deadline = _NO_DEADLINE
+        stripped = (clean_generated_text(step) for step in action.steps)
+        steps = tuple(_fit(step, SUGGESTION_STEP_MAX_CHARS) for step in stripped if step)
+        target_date, target_reason = suggest_target(deadline, request)
+        quote = _fit(evidence, SUGGESTION_EVIDENCE_CHARS)
+        quote_fits = len(quote) <= evidence_budget  # Otherwise the suggestion keeps none.
+        if quote_fits:
+            evidence_budget -= len(quote)
+        kept.append(
+            ActionSuggestion(
+                position=len(kept),
+                title=title,
+                ownership=action.ownership,
+                effort=action.effort,
+                deadline_text=deadline.text,
+                deadline_precision=deadline.precision,
+                deadline_date=deadline.date,
+                deadline_at_utc=deadline.at_utc,
+                deadline_timezone=deadline.timezone,
+                suggested_target_date=target_date,
+                target_reason=target_reason,
+                steps=steps[:MAX_SUGGESTION_STEPS],
+                evidence=quote if quote_fits else None,
+                fingerprint=fingerprint,
+            )
+        )
+        used.add(fingerprint)
+    return tuple(kept)
 
 
 def emit_progress(
@@ -380,8 +483,11 @@ class AnalysisService:
         )
         if cached is None:
             return planned
+        suggestions = await self._analyses.get_suggestions(cached.id)
         try:
-            planned.analysis = AnalysisRepository.to_domain(cached, message_key=request.message_key)
+            planned.analysis = AnalysisRepository.to_domain(
+                cached, message_key=request.message_key, suggestions=suggestions
+            )
         except ValueError:
             return planned  # A cached row that no longer validates counts as a miss.
         planned.outcome = AnalysisOutcome.REUSED
