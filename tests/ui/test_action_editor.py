@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtWidgets import QDialogButtonBox, QWidget
+from PySide6.QtWidgets import QDialogButtonBox, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import Action, ActionEdit, ActionSource, ActionStep, StepEdit
@@ -297,3 +297,13 @@ def test_an_owner_in_utc_sees_utc_and_the_email_s_own_time(editor: ActionEditor)
     assert editor.deadline.text() == (
         "2026-10-02T21:00+00:00 (17:00 America/Toronto as the email states)"
     )
+
+
+def test_the_rename_hint_names_a_gesture_that_works_on_every_platform(
+    editor: ActionEditor,
+) -> None:
+    """F2 renames nothing on macOS; double-click renames a step everywhere."""
+    texts = [label.text() for label in editor.findChildren(QLabel)]
+
+    assert not any("F2" in text for text in texts)
+    assert any("double-click" in text for text in texts)

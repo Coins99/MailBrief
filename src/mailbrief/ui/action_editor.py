@@ -114,7 +114,9 @@ class ActionEditor(QDialog):
         self.notes.setTabChangesFocus(True)
         form.addRow("&Notes", self.notes)
         layout.addLayout(form)
-        layout.addWidget(_plain("Plan (check a step when it's done; F2 renames it):"))
+        layout.addWidget(
+            _plain("Plan (check a step when it's done; double-click a step to rename it):")
+        )
         self.steps = QListWidget()
         self.steps.setAccessibleName("Plan steps")
         layout.addWidget(self.steps)
