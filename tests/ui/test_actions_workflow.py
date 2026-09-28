@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialogButtonBox
 from pytestqt.qtbot import QtBot
@@ -278,6 +278,19 @@ async def test_the_editor_shows_deadlines_in_the_window_s_zone(
     window.actions_panel.edit_button.click()
 
     assert window.action_editor.deadline.text().startswith("2026-10-02T17:00-04:00 (16:00")
+
+
+async def test_the_editor_offers_the_owner_s_local_today_without_a_target(
+    window: MainWindow,
+) -> None:
+    window.zone = ZoneInfo("America/Toronto")
+    window.now = lambda: datetime(2026, 9, 28, 2, tzinfo=UTC)  # Still the 27th in Toronto.
+    await window.initialize()
+
+    window.actions_panel.edit_button.click()
+
+    assert window.action_editor.target.date() == QDate(2026, 9, 27)
+    window.action_editor.reject()
 
 
 async def test_closing_the_window_dismisses_an_open_editor(

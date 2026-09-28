@@ -151,10 +151,11 @@ class ActionEditor(QDialog):
         self.buttons.accepted.connect(self._save)
         self.buttons.rejected.connect(self.reject)
 
-    def edit(self, action: Action, zone: ZoneInfo | None = None) -> None:
+    def edit(self, action: Action, today: date, zone: ZoneInfo | None = None) -> None:
         """Show one action's current values; nothing is kept from an earlier edit.
 
-        ``zone`` is the owner's, so an exact deadline reads like it does in the brief.
+        ``today`` is the owner's local date, which the date picker offers when the action
+        has no target. ``zone`` is the owner's, so an exact deadline reads like the brief.
         """
         self._set_saving(False)
         self._action = action
@@ -163,7 +164,7 @@ class ActionEditor(QDialog):
         self.effort.setCurrentIndex([value for value, _ in _EFFORTS].index(action.effort))
         self.has_target.setChecked(action.target_date is not None)
         self.target.setEnabled(action.target_date is not None)
-        shown = action.target_date or action.suggested_target_date or date.today()
+        shown = action.target_date or action.suggested_target_date or today
         self.target.setDate(QDate(shown.year, shown.month, shown.day))
         self.deadline.setText(_deadline(action, zone))
         if action.suggested_target_date is not None and action.target_reason is not None:

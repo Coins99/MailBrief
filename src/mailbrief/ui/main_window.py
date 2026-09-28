@@ -340,7 +340,7 @@ class MainWindow(QMainWindow):
 
     def _request_action(self, kind: str, action: Action) -> None:
         if kind == EDIT:
-            self.action_editor.edit(action, self.zone)
+            self.action_editor.edit(action, self.now().astimezone(self.zone).date(), self.zone)
             self.action_editor.open()
         elif kind == COMPLETE:
             self.start(lambda: self._complete_action(action), cancellable=False)

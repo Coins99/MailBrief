@@ -48,12 +48,15 @@ ACTION = make_action(
 )
 
 
+TODAY = date(2026, 9, 28)
+
+
 @pytest.fixture
 def editor(qtbot: QtBot) -> Iterator[ActionEditor]:
     parent = QWidget()  # Held by this frame: qtbot keeps widgets only weakly.
     qtbot.addWidget(parent)
     result = ActionEditor(parent)
-    result.edit(ACTION)
+    result.edit(ACTION, TODAY)
     yield result
 
 
@@ -174,7 +177,7 @@ def test_busy_blocks_saving(editor: ActionEditor) -> None:
 
 def test_each_edit_starts_from_the_new_action(editor: ActionEditor) -> None:
     editor.title.setText("Unsaved change")
-    editor.edit(make_action(title="Another action"))
+    editor.edit(make_action(title="Another action"), TODAY)
 
     assert editor.title.text() == "Another action"
     assert editor.steps.count() == 0
@@ -206,7 +209,7 @@ def test_each_edit_starts_from_the_new_action(editor: ActionEditor) -> None:
 def test_a_deadline_is_shown_as_the_email_states_it(
     editor: ActionEditor, deadline: dict[str, object], shown: str
 ) -> None:
-    editor.edit(make_action(**deadline))
+    editor.edit(make_action(**deadline), TODAY)
 
     assert editor.deadline.text() == shown
 
@@ -245,7 +248,7 @@ def test_a_step_over_500_characters_is_refused_with_the_reason(editor: ActionEdi
 
 
 def test_a_title_with_markup_appears_literally(editor: ActionEditor) -> None:
-    editor.edit(make_action(title="<b>x</b> the deck"))
+    editor.edit(make_action(title="<b>x</b> the deck"), TODAY)
 
     assert editor.title.text() == "<b>x</b> the deck"
 
@@ -260,13 +263,13 @@ CHICAGO_FIVE = make_action(
 
 
 def test_an_exact_deadline_reads_in_the_owner_s_zone_like_the_brief(editor: ActionEditor) -> None:
-    editor.edit(CHICAGO_FIVE, ZoneInfo("America/Toronto"))
+    editor.edit(CHICAGO_FIVE, TODAY, ZoneInfo("America/Toronto"))
 
     assert editor.deadline.text() == (
         "2026-10-02T17:00-04:00 (16:00 America/Chicago as the email states)"
     )
 
-    editor.edit(CHICAGO_FIVE, ZoneInfo("America/Chicago"))
+    editor.edit(CHICAGO_FIVE, TODAY, ZoneInfo("America/Chicago"))
     assert editor.deadline.text() == "2026-10-02T16:00-05:00 (as the email states)"
 
 
@@ -283,7 +286,7 @@ def test_a_date_deadline_reads_the_same_in_any_owner_zone(
         deadline_timezone="America/Toronto",
     )
 
-    editor.edit(dated, None if zone is None else ZoneInfo(zone))
+    editor.edit(dated, TODAY, None if zone is None else ZoneInfo(zone))
 
     assert editor.deadline.text() == "2026-10-02 (date only)"
 
@@ -297,7 +300,7 @@ def test_an_owner_in_utc_sees_utc_and_the_email_s_own_time(editor: ActionEditor)
         deadline_timezone="America/Toronto",
     )
 
-    editor.edit(toronto_five, ZoneInfo("UTC"))
+    editor.edit(toronto_five, TODAY, ZoneInfo("UTC"))
 
     assert editor.deadline.text() == (
         "2026-10-02T21:00+00:00 (17:00 America/Toronto as the email states)"
@@ -402,8 +405,16 @@ def test_an_unchecked_target_stays_disabled_after_a_failed_save(editor: ActionEd
 def test_editing_another_action_clears_a_stuck_save(editor: ActionEditor) -> None:
     save(editor)
 
-    editor.edit(make_action(title="Another action"))
+    editor.edit(make_action(title="Another action"), TODAY)
 
     assert editor.title.isEnabled()
     assert editor.status.text() == ""
     assert button(editor, QDialogButtonBox.StandardButton.Save).isEnabled()
+
+
+def test_without_a_target_the_picker_offers_the_owner_s_today(editor: ActionEditor) -> None:
+    editor.edit(make_action(), date(2031, 1, 2))
+
+    assert not editor.has_target.isChecked()
+    assert not editor.target.isEnabled()
+    assert editor.target.date() == QDate(2031, 1, 2)
