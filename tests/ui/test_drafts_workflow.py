@@ -597,3 +597,20 @@ async def test_draft_operations_without_an_open_draft_do_nothing(
     assert backend.draft_calls == []
     assert window.draft_writes.idle
     assert window.draft_editor.status.text() == "Save your text as a new draft first."
+
+
+def test_a_write_queued_without_a_running_loop_is_dropped_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    writes = DraftWrites()
+    ran: list[str] = []
+
+    async def save() -> None:
+        ran.append("save")
+
+    with caplog.at_level(logging.WARNING, logger="mailbrief.desktop"):
+        writes.autosave(save)
+        writes.run(save)
+
+    assert ran == [] and writes.idle
+    assert caplog.text.count("exception=RuntimeError") == 2

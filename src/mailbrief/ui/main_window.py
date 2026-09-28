@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Protocol
@@ -184,8 +184,14 @@ class DraftWrites:
         while pending := [task for task in self._tasks if not task.done()]:
             await asyncio.gather(*pending, return_exceptions=True)
 
-    def _spawn(self, work: Awaitable[None]) -> None:
-        task = asyncio.ensure_future(work)
+    def _spawn(self, work: Coroutine[object, object, None]) -> None:
+        try:
+            task = asyncio.get_running_loop().create_task(work)
+        except RuntimeError as exc:
+            # Only possible once the event loop has stopped, when nothing can be saved.
+            work.close()
+            log_failure(exc)
+            return
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
