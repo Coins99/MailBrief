@@ -66,7 +66,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   Mail and AI text reaches the UI only through plain-text widgets or escaped HTML, and only
   `https://mail.google.com` message links are ever opened.
 - Accepted actions belong to the owner: AI runs never write to them, and they survive
-  message, cache and account deletion through their source snapshots. Every change bumps
+  message, cache and account deletion through their source snapshots. The owner's
+  decisions on suggestions survive the same deletions: they are keyed by provider account,
+  provider message ID and title fingerprint, never by a cached row. Every change bumps
   the action's revision, and every change except restoring a deleted action needs the
   revision the caller saw. Change decisions and actions through ORM objects, never bulk
   UPDATE or DELETE statements, which leave loaded rows stale.

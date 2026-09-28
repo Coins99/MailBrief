@@ -16,6 +16,7 @@ recorded in [ADR 0011](adr/0011-actions-and-suggestions.md).
 - Actions appear in **Open** (yours), **Waiting** (on someone else) and **Completed**
   lists, marked "overdue" once their deadline passes and "carried over" from an earlier
   day. An action whose email is gone from the local cache says so and keeps its details.
+  An exact deadline is shown in your time zone, in the brief and in the lists.
 
 ## Desktop
 
@@ -23,7 +24,9 @@ recorded in [ADR 0011](adr/0011-actions-and-suggestions.md).
   links; accepted ones say so. The links work from the keyboard.
 - **Your actions** lists the three views. **Edit…** (or Return on a row) changes the
   title, whose it is, effort, target date, notes and the plan: add, rename (F2; Return on
-  macOS), reorder, check off or remove steps. One save is one revision.
+  macOS), reorder, check off or remove steps. One save is one revision. The editor stays
+  open until the save succeeds; if it fails, or the action changed in the meantime, your
+  edits stay in the dialog with a message saying what to do.
   **Complete**/**Reopen**, **Delete** and **Open source** (Gmail only) act on the selected
   action.
 - **Undo** reverses the latest accept, dismiss, complete, reopen or delete. It is withdrawn
@@ -45,6 +48,11 @@ An unknown ID, or a change that isn't allowed (such as dismissing an accepted su
 exits 3 with a fixed message. `brief --show` prints suggestion titles, targets and steps,
 never evidence.
 
+- Suggestion IDs are never reused, so an ID from an older `brief --show` whose suggestion
+  has since been replaced is not found, rather than accepting a different suggestion.
+- `actions accept N` on a suggestion you dismissed accepts it anyway: naming the ID is
+  your choice. If you deleted the action it became, accepting it brings that action back.
+
 ## Limits
 
 - Suggestion titles and steps are at most 120 characters; a suggestion evidence quote at
@@ -54,9 +62,15 @@ never evidence.
 - After a model or prompt change, a reworded suggestion may be offered again even though
   an earlier wording was dismissed (see ADR 0011).
 - Targets ignore holidays and your calendar; there is no scheduling yet.
-- The first brief after upgrading re-analyzes today's shortlist once (schema version 6).
-- Migration 0005 runs automatically, after the usual pre-upgrade backup. The app from
-  before M6 cannot open an upgraded database; restore the backup to go back.
+- The first brief after upgrading re-analyzes today's shortlist once (schema version 6
+  and a new prompt version).
+- Accept and dismiss decisions are kept per Gmail account and message, so they survive
+  removing the email from the local cache, and disconnecting and reconnecting the same
+  account: when the email is synced again, it shows the same decisions.
+- In the desktop app, a deleted action comes back only through Undo. Deleted actions,
+  and decisions whose email is gone, stay in the database until M9's retention controls.
+- Migrations 0005 and 0006 run automatically, after the usual pre-upgrade backup. The app
+  from before M6 cannot open an upgraded database; restore the backup to go back.
 
 ## Live acceptance checklist
 
@@ -86,6 +100,8 @@ never evidence.
 - Domain: `domain/actions.py`; suggestions live in `domain/analysis.py` (schema 6).
 - Services: `services/actions.py` (`ActionService`); target rule in
   `services/deadlines.py`; suggestion validation in `services/analysis.py`.
-- Storage: `storage/actions.py`, migration `20260927_0005_actions`.
+- Storage: `storage/actions.py`, migrations `20260927_0005_actions` and
+  `20260928_0006_stable_decisions` (decisions keyed by `DecisionKey`, suggestion IDs never
+  reused).
 - UI: `ui/actions_view.py`, `ui/action_editor.py`; the desktop runtime opens one session
   per action call.

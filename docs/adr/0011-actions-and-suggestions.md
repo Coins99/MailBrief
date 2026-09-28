@@ -55,3 +55,26 @@ text meant to mislead the owner's screen or terminal.
   Reruns with the same model and prompt reuse the cache, so they cannot do this.
 - Decisions and actions must be changed through ORM objects, never bulk statements:
   loaded rows would otherwise go stale within a session.
+
+## Amendment (2026-09-28)
+
+After the PR #15 review:
+
+- **Decisions are keyed by provider account, Gmail message ID and title fingerprint**,
+  with no foreign key to messages or accounts. They survive deleting a message, clearing
+  the cache and deleting an account, so re-syncing the same email, or reconnecting the
+  same Gmail account, finds them again: a dismissal stays dismissed, and an accepted
+  suggestion still points at its action instead of becoming a second one. A decision from
+  another account never matches, even for the same message ID. Migration 0006 rebuilds the
+  table and copies every decision unchanged; downgrading to 0005 drops the decisions whose
+  message is no longer cached, because that schema keys them by message row.
+- **Suggestion IDs are never reused.** Re-saving an analysis replaces its suggestion rows,
+  and `action_suggestions` is now AUTOINCREMENT, so an old ID (from an earlier
+  `brief --show`, say) is not found instead of naming another suggestion.
+- **In the desktop app, a deleted action comes back only through Undo.** There is no list
+  of deleted actions yet.
+- **Deleted actions and orphaned decisions are kept** until M9's retention controls; a
+  decision whose email is gone is simply never matched.
+- **Accepting a dismissed suggestion by its ID in the CLI overrides the dismissal**, by
+  design: naming the ID is an explicit choice. When the suggestion's action was deleted,
+  accepting it restores that action rather than copying it.
