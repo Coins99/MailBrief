@@ -298,6 +298,7 @@ class DraftRepository:
                     placeholder_count=len(draft.placeholders),
                     action_title=draft.action_title,
                     source_subject=subjects.get(row.id),
+                    revision=draft.revision,
                 )
             )
         return summaries

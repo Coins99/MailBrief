@@ -34,8 +34,13 @@ def test_metadata_contains_all_initial_tables() -> None:
         "action_steps",
         "action_sources",
         "suggestion_decisions",
+        "drafts",
+        "draft_versions",
+        "draft_sources",
     }
     assert "body" not in Base.metadata.tables["messages"].columns
+    # A draft's body is the owner's own writing (ADR 0012); its sources are snapshots only.
+    assert "body" not in Base.metadata.tables["draft_sources"].columns
 
 
 @pytest.mark.asyncio

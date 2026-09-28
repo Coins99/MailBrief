@@ -22,10 +22,12 @@ from mailbrief.services.brief import ConsentGate, ShortlistGate
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
 from tests.factories import make_action, make_digest_item, make_message
+from tests.ui.fake_drafts import FakeDrafts
 
 
-class FakeBackend:
+class FakeBackend(FakeDrafts):
     def __init__(self) -> None:
+        super().__init__()
         self.saved = DailyDigest(
             account_id="owner@example.com",
             local_date=date(2026, 9, 4),

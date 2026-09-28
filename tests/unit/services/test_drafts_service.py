@@ -497,10 +497,11 @@ async def test_the_list_is_newest_first_and_never_capped(
         "Re: Budget review",
         "Budget review",
     )
-    assert (summaries[1].display_title, summaries[1].placeholder_count) == (
-        "Hi [[name]] 249 [[x]]",
-        2,
-    )
+    assert (
+        summaries[1].display_title,
+        summaries[1].placeholder_count,
+        summaries[1].revision,
+    ) == ("Hi [[name]] 249 [[x]]", 2, 2)
     assert summaries[-1].public_id == linked.public_id
     assert (summaries[-1].action_title, summaries[-1].source_subject) == (
         "Send the deck",

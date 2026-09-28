@@ -187,6 +187,7 @@ class DraftSummary(DomainModel):
     placeholder_count: int = Field(ge=0)
     action_title: str | None = Field(default=None, repr=False)
     source_subject: str | None = Field(default=None, repr=False)
+    revision: int = Field(ge=1)  # So deleting from the list names the revision it showed.
 
     @field_validator("updated_at_utc")
     @classmethod

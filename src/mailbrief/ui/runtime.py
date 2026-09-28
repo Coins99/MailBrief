@@ -11,6 +11,14 @@ from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.briefs import BriefRunResult
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, SyncProgress
+from mailbrief.domain.drafts import (
+    Draft,
+    DraftEdit,
+    DraftKind,
+    DraftSummary,
+    DraftVersion,
+    DraftVersionInfo,
+)
 from mailbrief.domain.messages import ProviderKind
 from mailbrief.providers.gmail.cache import GmailCredentialStore
 from mailbrief.providers.gmail.factory import gmail_provider
@@ -24,6 +32,7 @@ from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import BriefService, ConsentGate, ShortlistGate
 from mailbrief.services.calendar import local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.drafts import DraftService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -251,6 +260,60 @@ class DesktopRuntime:
     async def restore_action(self, public_id: str) -> Action:
         async with self._storage().session() as session:
             return await ActionService(session).restore(public_id)
+
+    # Drafts use local storage only: no call here reaches Gmail, Groq or the network.
+
+    async def list_drafts(self) -> tuple[DraftSummary, ...]:
+        async with self._storage().session() as session:
+            return await DraftService(session).list_summaries()
+
+    async def get_draft(self, public_id: str) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).get(public_id)
+
+    async def create_draft(self, kind: DraftKind) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).create(kind)
+
+    async def create_reply_draft(self, account_email: str, provider_message_id: str) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).create_reply(account_email, provider_message_id)
+
+    async def create_draft_for_action(self, public_id: str, kind: DraftKind) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).create_for_action(public_id, kind)
+
+    async def autosave_draft(self, public_id: str, revision: int, edit: DraftEdit) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).autosave(public_id, revision, edit)
+
+    async def checkpoint_draft(self, public_id: str, revision: int) -> DraftVersionInfo | None:
+        async with self._storage().session() as session:
+            return await DraftService(session).checkpoint(public_id, revision)
+
+    async def draft_versions(self, public_id: str) -> tuple[DraftVersionInfo, ...]:
+        async with self._storage().session() as session:
+            return await DraftService(session).versions(public_id)
+
+    async def draft_version(self, public_id: str, number: int) -> DraftVersion:
+        async with self._storage().session() as session:
+            return await DraftService(session).version(public_id, number)
+
+    async def restore_draft_version(self, public_id: str, revision: int, number: int) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).restore_version(public_id, revision, number)
+
+    async def save_draft_as_new(self, public_id: str, edit: DraftEdit) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).save_as_new(public_id, edit)
+
+    async def delete_draft(self, public_id: str, revision: int) -> None:
+        async with self._storage().session() as session:
+            await DraftService(session).delete(public_id, revision)
+
+    async def restore_draft(self, public_id: str) -> Draft:
+        async with self._storage().session() as session:
+            return await DraftService(session).restore(public_id)
 
     async def close(self) -> None:
         if self._database is not None:

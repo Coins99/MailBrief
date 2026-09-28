@@ -42,11 +42,13 @@ def _suggestion_html(view: SuggestionView, accept: str, dismiss: str, zone: Zone
 
 
 class DigestView(QTextBrowser):
-    """Suggestion links only emit ``suggestion_requested(kind, suggestion_id)``; the window
-    decides what happens. Unknown links, including any an email could smuggle in, do nothing.
+    """Suggestion links only emit ``suggestion_requested(kind, suggestion_id)``, and reply
+    links ``reply_requested(account_email, message_id)``; the window decides what happens.
+    Unknown links, including any an email could smuggle in, do nothing.
     """
 
     suggestion_requested = Signal(str, int)
+    reply_requested = Signal(str, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -56,6 +58,7 @@ class DigestView(QTextBrowser):
         self.anchorClicked.connect(self._open_source)
         self._sources: dict[str, str] = {}
         self._suggestions: dict[str, tuple[str, int]] = {}
+        self._replies: dict[str, tuple[str, str]] = {}
         self.setPlainText("No saved brief yet. Connect Gmail, then sync and review your shortlist.")
 
     def _open_source(self, url: QUrl) -> None:
@@ -67,10 +70,15 @@ class DigestView(QTextBrowser):
         request = self._suggestions.get(key)
         if request is not None:
             self.suggestion_requested.emit(*request)
+            return
+        reply = self._replies.get(key)
+        if reply is not None:
+            self.reply_requested.emit(*reply)
 
     def show_digest(self, digest: DailyDigest) -> None:
         self._sources.clear()
         self._suggestions.clear()
+        self._replies.clear()
         age = max(0, int((datetime.now(UTC) - digest.generated_at_utc).total_seconds() // 60))
         count, unit = (age, "minute") if age < 60 else (age // 60, "hour")
         if age >= 1440:
@@ -122,9 +130,15 @@ class DigestView(QTextBrowser):
                     parts.append(
                         _suggestion_html(view, accept, dismiss, ZoneInfo(digest.timezone_name))
                     )
+            # The brief's account_id is the account's email address, and each item's
+            # message_key is its Gmail message ID.
+            reply = f"mailbrief:reply/{index}"
+            self._replies[reply] = (digest.account_id, item.message_key)
+            links = [f'<a href="{reply}">Draft a reply</a>']
             source = item.source_url
             if source.scheme == "https" and source.host == "mail.google.com":
                 link = f"mailbrief:source/{index}"
                 self._sources[link] = str(source)
-                parts.append(f'<p><a href="{link}">Open source in Gmail</a></p>')
+                links.append(f'<a href="{link}">Open source in Gmail</a>')
+            parts.append(f"<p>{' · '.join(links)}</p>")
         self.setHtml("".join(parts))

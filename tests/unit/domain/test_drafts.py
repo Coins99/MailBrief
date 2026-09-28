@@ -188,6 +188,7 @@ def test_source_and_listing_models() -> None:
         display_title="Plan",
         updated_at_utc=AT,
         placeholder_count=0,
+        revision=1,
     )
     assert summary.action_title is None
     info = DraftVersionInfo(

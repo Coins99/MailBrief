@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.actions import Action, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
+from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.deadline_text import deadline_text
 
 EDIT = "edit"
@@ -62,6 +64,16 @@ def describe(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> s
     return action.title + (" — " + " · ".join(details) if details else "")
 
 
+def can_reply(action: Action) -> bool:
+    """Whether the action's first email still in local mail can be answered from Gmail.
+
+    The draft service replies to that same email.
+    """
+    source = next((source for source in action.sources if source.available), None)
+    link = None if source is None else source.web_link
+    return link is not None and link.scheme == "https" and link.host == "mail.google.com"
+
+
 def gmail_source(action: Action) -> str | None:
     """The first source link that opens Gmail, if any; nothing else is ever opened."""
     for source in action.sources:
@@ -89,10 +101,12 @@ class ActionsPanel(QWidget):
     """Lists actions per view and asks the window to act; it changes nothing itself.
 
     ``action_requested(kind, action)`` carries EDIT, COMPLETE, REOPEN or DELETE and the
-    selected Action. Opening a source needs no backend, so the panel does it directly.
+    selected Action, and ``draft_requested(kind, action)`` a DraftKind and the Action.
+    Opening a source needs no backend, so the panel does it directly.
     """
 
     action_requested = Signal(str, object)
+    draft_requested = Signal(object, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -121,11 +135,26 @@ class ActionsPanel(QWidget):
         self.complete_button = QPushButton("Com&plete")
         self.delete_button = QPushButton("De&lete")
         self.source_button = QPushButton("Open s&ource")
+        self.draft_button = QPushButton("Dra&ft…")
+        self.draft_menu = QMenu(self.draft_button)
+        self.reply_draft = self.draft_menu.addAction("Reply to its email")
+        self.reply_draft.triggered.connect(lambda: self._request_draft(DraftKind.REPLY))
+        for kind, name in (
+            (DraftKind.EMAIL, "Email"),
+            (DraftKind.NOTE, "Note"),
+            (DraftKind.MESSAGE, "Message"),
+        ):
+            menu_action = self.draft_menu.addAction(name)
+            menu_action.triggered.connect(
+                lambda _checked=False, chosen=kind: self._request_draft(chosen)
+            )
+        self.draft_button.setMenu(self.draft_menu)
         for button in (
             self.edit_button,
             self.complete_button,
             self.delete_button,
             self.source_button,
+            self.draft_button,
         ):
             buttons.addWidget(button)
         layout.addLayout(buttons)
@@ -183,11 +212,19 @@ class ActionsPanel(QWidget):
         for button in (self.edit_button, self.complete_button, self.delete_button):
             button.setEnabled(enabled)
         self.source_button.setEnabled(action is not None and gmail_source(action) is not None)
+        self.draft_button.setEnabled(enabled)
+        self.reply_draft.setEnabled(action is not None and can_reply(action))
 
     def _request(self, kind: str) -> None:
         action = self.selected()
         if action is not None and not self._busy:
             self.action_requested.emit(kind, action)
+
+    def _request_draft(self, kind: DraftKind) -> None:
+        action = self.selected()
+        if action is None or self._busy or (kind is DraftKind.REPLY and not can_reply(action)):
+            return
+        self.draft_requested.emit(kind, action)
 
     def _complete_or_reopen(self) -> None:
         self._request(REOPEN if self.view() is ActionFilter.COMPLETED else COMPLETE)

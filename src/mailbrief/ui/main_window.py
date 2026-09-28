@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Protocol
 
 from pydantic import SecretStr
@@ -25,8 +26,19 @@ from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncStatus
+from mailbrief.domain.drafts import (
+    KIND_NAMES,
+    Draft,
+    DraftEdit,
+    DraftKind,
+    DraftSummary,
+    DraftVersion,
+    DraftVersionInfo,
+    placeholders,
+)
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.errors import ConfigurationError
+from mailbrief.infra.files import write_text_atomically
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.actions import (
     ActionConflictError,
@@ -35,12 +47,18 @@ from mailbrief.services.actions import (
 )
 from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
 from mailbrief.services.calendar import resolve_timezone
+from mailbrief.services.drafts import DraftConflictError, DraftNotFoundError, SourceNotFoundError
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.ui.action_editor import ActionEditor
 from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPanel
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
 from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
+from mailbrief.ui.draft_editor import DraftEditor, still_to_fill
+from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
+from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
+from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
+from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.settings_view import SettingsDialog
 
@@ -83,10 +101,31 @@ class DesktopBackend(Protocol):
     async def reopen_action(self, public_id: str, revision: int) -> Action: ...
     async def delete_action(self, public_id: str, revision: int) -> None: ...
     async def restore_action(self, public_id: str) -> Action: ...
+    async def list_drafts(self) -> tuple[DraftSummary, ...]: ...
+    async def get_draft(self, public_id: str) -> Draft: ...
+    async def create_draft(self, kind: DraftKind) -> Draft: ...
+    async def create_reply_draft(self, account_email: str, provider_message_id: str) -> Draft: ...
+    async def create_draft_for_action(self, public_id: str, kind: DraftKind) -> Draft: ...
+    async def autosave_draft(self, public_id: str, revision: int, edit: DraftEdit) -> Draft: ...
+    async def checkpoint_draft(self, public_id: str, revision: int) -> DraftVersionInfo | None: ...
+    async def draft_versions(self, public_id: str) -> tuple[DraftVersionInfo, ...]: ...
+    async def draft_version(self, public_id: str, number: int) -> DraftVersion: ...
+    async def restore_draft_version(self, public_id: str, revision: int, number: int) -> Draft: ...
+    async def save_draft_as_new(self, public_id: str, edit: DraftEdit) -> Draft: ...
+    async def delete_draft(self, public_id: str, revision: int) -> None: ...
+    async def restore_draft(self, public_id: str) -> Draft: ...
 
 
-# Raised when the brief or an action changed since it was shown; the window reloads.
-_STALE = (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError)
+# Raised when the brief, an action or a draft changed since it was shown; the window reloads.
+_STALE = (
+    ActionConflictError,
+    ActionNotFoundError,
+    SuggestionNotFoundError,
+    DraftConflictError,
+    DraftNotFoundError,
+)
+# Raised when the open draft changed elsewhere; the editor keeps the text.
+_DRAFT_STALE = (DraftConflictError, DraftNotFoundError)
 _PICK_ONE = "Select at least one message to analyze, or Cancel."
 _NOT_REFRESHED = "The view could not be refreshed; restart MailBrief to see the latest."
 _EDITOR_WAIT = "MailBrief is busy; try again in a moment."
@@ -95,6 +134,9 @@ _EDITOR_STALE = (
     "need, then Cancel and reopen the action."
 )
 _EDITOR_FAILED = "Couldn't save. Your edits are still here; try again."
+_NO_SOURCE = "That email is no longer in local mail."
+_DRAFT_CLOSE_FAILED = "Couldn't save. Your text is still here; try again."
+_DRAFT_EXPORT_FAILED = "Couldn't export. Check the folder and try again."
 
 
 def plain_label(text: str) -> QLabel:
@@ -103,6 +145,67 @@ def plain_label(text: str) -> QLabel:
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
     return label
+
+
+class DraftWrites:
+    """One serialized, coalescing queue for the open draft's writes.
+
+    The owner's typing never makes the window busy, so draft writes do not go through
+    MainWindow.start(). Autosaves coalesce: only the newest waiting snapshot is saved, and
+    it is read when its turn comes. Every other operation waits for waiting snapshots
+    first. drain() waits for everything queued, so shutdown can finish it before the
+    database is closed. Operations handle their own failures; anything left is logged.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._snapshot: Callable[[], Awaitable[object]] | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    @property
+    def idle(self) -> bool:
+        return all(task.done() for task in self._tasks)
+
+    def autosave(self, save: Callable[[], Awaitable[object]]) -> None:
+        """Queue a save; it replaces any save still waiting."""
+        self._snapshot = save
+        self._spawn(self._flush())
+
+    def run(self, operation: Callable[[], Awaitable[object]]) -> None:
+        """Queue an operation to run once every earlier write, and any waiting save, is done."""
+        self._spawn(self._then(operation))
+
+    async def drain(self) -> None:
+        # Finished tasks leave the set only once the loop runs their callbacks, and gather()
+        # returns without yielding when every task is done, so wait only for unfinished ones.
+        while pending := [task for task in self._tasks if not task.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _spawn(self, work: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(work)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _save_waiting(self) -> None:
+        save, self._snapshot = self._snapshot, None
+        if save is not None:
+            await save()
+
+    async def _flush(self) -> None:
+        async with self._lock:
+            await self._guard(self._save_waiting)
+
+    async def _then(self, operation: Callable[[], Awaitable[object]]) -> None:
+        async with self._lock:
+            await self._guard(self._save_waiting)
+            await self._guard(operation)
+
+    @staticmethod
+    async def _guard(operation: Callable[[], Awaitable[object]]) -> None:
+        try:
+            await operation()
+        except Exception as exc:
+            log_failure(exc)
 
 
 class MainWindow(QMainWindow):
@@ -128,6 +231,9 @@ class MainWindow(QMainWindow):
         self.zone = resolve_timezone(None)
         self.action_editor = ActionEditor(self)
         self.action_editor.save_requested.connect(self._request_save_action)
+        self.draft_writes = DraftWrites()
+        self.draft_editor = DraftEditor(self)
+        self._connect_draft_editor(self.draft_editor)
         self.cached_dialog = CachedMailDialog(self)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
@@ -216,7 +322,13 @@ class MainWindow(QMainWindow):
         self.actions_panel = ActionsPanel()
         self.actions_panel.setMinimumHeight(220)
         self.actions_panel.action_requested.connect(self._request_action)
+        self.actions_panel.draft_requested.connect(self._request_action_draft)
         layout.addWidget(self.actions_panel, 1)
+        self.drafts_panel = DraftsPanel()
+        self.drafts_panel.setMinimumHeight(200)
+        self.drafts_panel.draft_requested.connect(self._request_draft)
+        layout.addWidget(self.drafts_panel, 1)
+        self.digest.reply_requested.connect(self._request_reply)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
@@ -248,6 +360,7 @@ class MainWindow(QMainWindow):
         self.undo_button.setEnabled(not busy)
         self.actions_panel.set_busy(busy)
         self.action_editor.set_busy(busy)
+        self.drafts_panel.set_busy(busy)
 
     def _offer_undo(
         self, label: str | None = None, operation: Callable[[], Awaitable[None]] | None = None
@@ -287,9 +400,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._note_not_refreshed(exc)
 
+    async def _refresh_drafts(self) -> None:
+        try:
+            self.drafts_panel.show_drafts(await self.backend.list_drafts(), self.zone)
+        except Exception as exc:
+            self._note_not_refreshed(exc)
+
     async def _refresh_views(self) -> None:
         await self._reload_brief()
         await self._refresh_actions()
+        await self._refresh_drafts()
 
     async def _stale(self, exc: Exception) -> None:
         log_failure(exc)
@@ -418,6 +538,247 @@ class MainWindow(QMainWindow):
         self._offer_undo()  # An edit has no undo; an older offer would refer to a past revision.
         self.status.setText(f"Saved: {saved.title}.")
         await self._refresh_views()
+
+    # Drafts. Creating, opening and deleting use start(); the open draft's writes go
+    # through draft_writes, so typing never makes the window busy.
+
+    def _request_reply(self, account_email: str, message_id: str) -> None:
+        self.start(
+            lambda: self._open_new_draft(
+                lambda: self.backend.create_reply_draft(account_email, message_id)
+            ),
+            cancellable=False,
+        )
+
+    def _request_action_draft(self, kind: DraftKind, action: Action) -> None:
+        public_id = action.public_id
+        self.start(
+            lambda: self._open_new_draft(
+                lambda: self.backend.create_draft_for_action(public_id, kind)
+            ),
+            cancellable=False,
+        )
+
+    def _request_draft(self, kind: str, value: object) -> None:
+        if kind == NEW_DRAFT and isinstance(value, DraftKind):
+            new_kind = value
+            self.start(
+                lambda: self._open_new_draft(lambda: self.backend.create_draft(new_kind)),
+                cancellable=False,
+            )
+        elif isinstance(value, DraftSummary):
+            summary = value
+            if kind == OPEN_DRAFT:
+                self.start(lambda: self._open_draft(summary), cancellable=False)
+            elif kind == DELETE_DRAFT:
+                self.start(lambda: self._delete_draft(summary), cancellable=False)
+
+    async def _open_new_draft(self, create: Callable[[], Awaitable[Draft]]) -> None:
+        try:
+            draft = await create()
+        except SourceNotFoundError as exc:
+            log_failure(exc)
+            self.status.setText(_NO_SOURCE)
+            return
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._edit_draft(draft)
+        self.status.setText(f"{KIND_NAMES[draft.kind]} draft started. It saves as you type.")
+        await self._refresh_drafts()
+
+    async def _open_draft(self, summary: DraftSummary) -> None:
+        try:
+            draft = await self.backend.get_draft(summary.public_id)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._edit_draft(draft)
+
+    def _edit_draft(self, draft: Draft) -> None:
+        self.draft_editor.load(draft, self.zone)
+        self.draft_editor.open()
+
+    async def _delete_draft(self, summary: DraftSummary) -> None:
+        try:
+            await self.backend.delete_draft(summary.public_id, summary.revision)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        public_id = summary.public_id
+
+        async def undo() -> None:
+            await self.backend.restore_draft(public_id)
+
+        self._offer_undo("Undo delete", undo)
+        self.status.setText(f"Deleted: {summary.display_title}.")
+        await self._refresh_views()
+
+    def _connect_draft_editor(self, editor: DraftEditor) -> None:
+        writes = self.draft_writes
+        editor.autosave_requested.connect(self._queue_autosave)
+        editor.checkpoint_requested.connect(lambda: writes.run(self._checkpoint_draft))
+        editor.versions_requested.connect(lambda: writes.run(self._list_draft_versions))
+        editor.version_requested.connect(
+            lambda number: writes.run(lambda: self._show_draft_version(number))
+        )
+        editor.restore_requested.connect(
+            lambda number: writes.run(lambda: self._restore_draft_version(number))
+        )
+        editor.save_as_new_requested.connect(
+            lambda edit: writes.run(lambda: self._save_draft_as_new(edit))
+        )
+        editor.export_requested.connect(
+            lambda path, text: writes.run(lambda: self._export_draft(Path(path), text))
+        )
+        editor.close_requested.connect(lambda edit: writes.run(lambda: self._close_draft(edit)))
+
+    def _queue_autosave(self, edit: DraftEdit) -> None:
+        draft = self.draft_editor.draft
+        if draft is not None:
+            public_id = draft.public_id
+            self.draft_writes.autosave(lambda: self._autosave_draft(public_id, edit))
+
+    async def _autosave_draft(self, public_id: str, edit: DraftEdit) -> bool:
+        """Save ``edit`` at the editor's latest revision; False when it was not saved."""
+        editor = self.draft_editor
+        draft = editor.draft
+        if draft is None or draft.public_id != public_id or editor.in_conflict:
+            return False
+        try:
+            saved = await self.backend.autosave_draft(public_id, draft.revision, edit)
+        except _DRAFT_STALE as exc:
+            log_failure(exc)
+            editor.show_conflict()
+            return False
+        except Exception as exc:
+            log_failure(exc)
+            editor.save_failed()
+            return False
+        editor.saved(saved, edit)
+        return True
+
+    def _writable_draft(self) -> Draft | None:
+        editor = self.draft_editor
+        return None if editor.in_conflict else editor.draft
+
+    async def _checkpoint_draft(self) -> None:
+        editor = self.draft_editor
+        draft = self._writable_draft()
+        if draft is None:
+            return
+        try:
+            info = await self.backend.checkpoint_draft(draft.public_id, draft.revision)
+        except _DRAFT_STALE as exc:
+            log_failure(exc)
+            editor.show_conflict()
+            return
+        except Exception as exc:
+            log_failure(exc)
+            editor.set_status("Couldn't save a version; try again.")
+            return
+        editor.checkpointed(info)
+
+    async def _list_draft_versions(self) -> None:
+        editor = self.draft_editor
+        draft = editor.draft
+        if draft is None:
+            return
+        try:
+            versions = await self.backend.draft_versions(draft.public_id)
+        except Exception as exc:
+            log_failure(exc)
+            editor.set_status("Couldn't load the saved versions; try again.")
+            return
+        editor.show_versions(versions)
+
+    async def _show_draft_version(self, number: int) -> None:
+        editor = self.draft_editor
+        draft = editor.draft
+        if draft is None:
+            return
+        try:
+            version = await self.backend.draft_version(draft.public_id, number)
+        except Exception as exc:
+            log_failure(exc)
+            editor.set_status("Couldn't load that version; try again.")
+            return
+        editor.show_version(version)
+
+    async def _restore_draft_version(self, number: int) -> None:
+        editor = self.draft_editor
+        draft = self._writable_draft()
+        if draft is None:
+            editor.restore_failed("Save your text as a new draft first.")
+            return
+        try:
+            restored = await self.backend.restore_draft_version(
+                draft.public_id, draft.revision, number
+            )
+        except _DRAFT_STALE as exc:
+            log_failure(exc)
+            editor.show_conflict()
+            editor.restore_failed("")
+            return
+        except Exception as exc:
+            log_failure(exc)
+            editor.restore_failed("Couldn't restore that version; try again.")
+            return
+        editor.restored(restored, number)
+
+    async def _save_draft_as_new(self, edit: DraftEdit) -> None:
+        editor = self.draft_editor
+        draft = editor.draft
+        if draft is None:
+            return
+        try:
+            copy = await self.backend.save_draft_as_new(draft.public_id, edit)
+        except Exception as exc:
+            log_failure(exc)
+            editor.set_status("Couldn't save a new draft; try again.")
+            return
+        editor.continue_as(copy)
+        await self._refresh_drafts()
+
+    async def _export_draft(self, path: Path, text: str) -> None:
+        """Write the owner's chosen file in a worker thread, replacing it atomically."""
+        editor = self.draft_editor
+        try:
+            await asyncio.to_thread(write_text_atomically, path, text, overwrite=True)
+        except Exception as exc:
+            log_failure(exc)
+            editor.set_status(_DRAFT_EXPORT_FAILED)
+            return
+        count = len(placeholders(text))
+        editor.set_status(f"Exported {path.name}." + (f" {still_to_fill(count)}" if count else ""))
+
+    async def _close_draft(self, edit: DraftEdit | None) -> None:
+        """Save any unsaved text and a version, then let the editor close."""
+        editor = self.draft_editor
+        draft = editor.draft
+        if draft is None:
+            editor.finish_closed()
+            return
+        if edit is not None and not await self._autosave_draft(draft.public_id, edit):
+            editor.cancel_close(None if editor.in_conflict else _DRAFT_CLOSE_FAILED)
+            return
+        draft = editor.draft
+        assert draft is not None
+        try:
+            await self.backend.checkpoint_draft(draft.public_id, draft.revision)
+        except _DRAFT_STALE as exc:
+            log_failure(exc)
+            editor.show_conflict()
+            editor.cancel_close()
+            return
+        except Exception as exc:
+            log_failure(exc)
+            editor.cancel_close(_DRAFT_CLOSE_FAILED)
+            return
+        editor.finish_closed()
+        if not self._closing:
+            self.status.setText(f"Saved: {draft.display_title}.")
+            await self._refresh_drafts()
 
     def start(self, operation: Callable[[], Awaitable[None]], *, cancellable: bool = True) -> bool:
         """Only one operation may own the providers and workflow at a time.
@@ -550,6 +911,7 @@ class MainWindow(QMainWindow):
             )
         self.status.setText("Ready. Sync to review today's messages.")
         await self._refresh_actions()
+        await self._refresh_drafts()
         await self._refresh_ai_status()
         try:
             email = await self.backend.connect(silent_only=True)
@@ -707,6 +1069,10 @@ class MainWindow(QMainWindow):
         self.settings_dialog.reject()
         self.cached_dialog.reject()
         self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
+        final = self.draft_editor.final_edit() if self.draft_editor.isVisible() else None
+        if final is not None:
+            self._queue_autosave(final)  # shutdown() drains it before closing the database.
+        self.draft_editor.force_close()
         self.cancel()
         self.closing.emit()
 
@@ -718,6 +1084,7 @@ class MainWindow(QMainWindow):
             if self.task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self.task
+            await self.draft_writes.drain()
         finally:
             try:
                 await self.backend.close()
