@@ -3,6 +3,7 @@
 Nothing here reads or sends email. A reply is built from the cached message row alone
 (subject and sender); no body is ever downloaded or quoted. Drafting has no "sent" state
 and never changes an action. Errors carry static messages, and nothing logs draft text.
+AI drafting (services/drafting.py) changes drafts only through apply_generated().
 """
 
 import re
@@ -14,6 +15,7 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.common import normalize_utc
+from mailbrief.domain.drafting import DraftGenerationInfo, GeneratedDraft
 from mailbrief.domain.drafts import (
     DRAFT_TITLE_MAX_CHARS,
     EMAIL_KINDS,
@@ -266,6 +268,54 @@ class DraftService:
         async def run(now: datetime) -> DraftVersionInfo | None:
             row = await self._live(public_id, expected_revision)
             return await self._save_version(row, DraftVersionOrigin.EDITED, now)
+
+        return await self._write(run)
+
+    async def keep_own_text(self, public_id: str, expected_revision: int) -> int:
+        """Make sure a version holds the draft's current text, and return its number.
+
+        Like checkpoint(), but when the text already matches the latest version, that
+        version's number is returned. AI drafting calls it before anything is sent.
+        """
+
+        async def run(now: datetime) -> int:
+            row = await self._live(public_id, expected_revision)
+            saved = await self._save_version(row, DraftVersionOrigin.EDITED, now)
+            if saved is not None:
+                return saved.number
+            latest = await self._repository.latest_version(row.id)
+            assert latest is not None  # Every draft is created with its first version.
+            return latest.number
+
+        return await self._write(run)
+
+    async def apply_generated(
+        self,
+        public_id: str,
+        expected_revision: int,
+        generated: GeneratedDraft,
+        info: DraftGenerationInfo,
+    ) -> tuple[Draft, int]:
+        """Put AI-written text into the draft as one revision and one "generated" version.
+
+        The body is replaced; a generated subject becomes the title only when the draft has
+        none. Recipients are never touched. Returns the draft and the new version's number.
+        """
+
+        async def run(now: datetime) -> tuple[Draft, int]:
+            row = await self._live(public_id, expected_revision)
+            content = content_of(row)
+            title = content.title
+            if generated.subject is not None and not title.strip():
+                title = generated.subject
+            apply_content(row, content.model_copy(update={"title": title, "body": generated.body}))
+            _touch(row, now)
+            version = await self._repository.add_version(
+                row.id, DraftVersionOrigin.GENERATED, content_of(row), now
+            )
+            await self._repository.add_generation(version.id, info)
+            await self._repository.prune_versions(row.id, MAX_DRAFT_VERSIONS)
+            return await self._load(row), version.number
 
         return await self._write(run)
 

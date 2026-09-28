@@ -3,6 +3,7 @@
 import pytest
 
 from mailbrief.text.prepare import (
+    clean_generated_block,
     clean_generated_text,
     looks_like_forward,
     normalize_text,
@@ -196,3 +197,21 @@ def test_quoted_apple_forward_is_never_trimmed() -> None:
 )
 def test_generated_text_loses_control_and_format_characters(raw: str, clean: str) -> None:
     assert clean_generated_text(raw) == clean
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Hi Alex,\r\n\r\nThanks.\r\n", "Hi Alex,\n\nThanks."),
+        ("One\rTwo Three Four\x85Five\x0bSix", "One\nTwo\nThree\nFour\nFive\nSix"),
+        ("Tab\tkept  \t \nnext   ", "Tab\tkept\nnext"),
+        ("a\n\n\n\n\n\nb", "a\n\n\nb"),
+        ("a\n\n\nb", "a\n\n\nb"),
+        ("\n\n  \nBody\n \n\n", "Body"),
+        ("bell\x07 esc\x1b[31m red‮ rtl​ zwspᅟ fill", "bell esc[31m red rtl zwsp fill"),
+        ("", ""),
+        ("  indented line", "  indented line"),
+    ],
+)
+def test_clean_generated_block(raw: str, expected: str) -> None:
+    assert clean_generated_block(raw) == expected

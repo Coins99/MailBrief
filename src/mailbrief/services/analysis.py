@@ -351,7 +351,8 @@ def provider_detail(exc: ProviderError) -> str | None:
     return ", ".join(parts) or None
 
 
-def _error_code(exc: ProviderError) -> str:
+def provider_error_code(exc: ProviderError) -> str:
+    """The AI_* code for an expected provider error; shared with AI drafting."""
     if isinstance(exc, ProviderUsageLimitError):
         return "AI_USAGE_LIMIT"
     if isinstance(exc, AICredentialsMissingError):
@@ -607,7 +608,7 @@ class AnalysisService:
         try:
             response = await self._provider.analyze(requests)
         except ProviderError as exc:
-            code = _error_code(exc)
+            code = provider_error_code(exc)
             # INFO: the CLI already reports the failure and its detail to the owner.
             logger.info("AI provider call failed: %s", code)
             if code != REQUEST_REJECTED:
