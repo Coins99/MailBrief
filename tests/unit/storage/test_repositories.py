@@ -990,7 +990,7 @@ async def test_to_domain_rejects_a_suggestion_row_that_no_longer_validates(
 
 
 @pytest.mark.asyncio
-async def test_deleting_an_account_keeps_actions_and_their_source_snapshots(
+async def test_deleting_an_account_keeps_actions_decisions_and_source_snapshots(
     database: Database,
 ) -> None:
     account_id, (message_id,) = await _account_and_messages(database, "msg-1")
@@ -1031,7 +1031,9 @@ async def test_deleting_an_account_keeps_actions_and_their_source_snapshots(
         )
         await session.execute(
             insert(SuggestionDecisionTable).values(
-                message_id=message_id,
+                provider="microsoft",
+                provider_account_id="ms-1",
+                provider_message_id="msg-1",
                 fingerprint=SUGGESTIONS[0].fingerprint,
                 decision="accepted",
                 action_id=action_id,
@@ -1058,7 +1060,7 @@ async def test_deleting_an_account_keeps_actions_and_their_source_snapshots(
         "messages": 0,
         "analyses": 0,
         "action_suggestions": 0,
-        "suggestion_decisions": 0,
+        "suggestion_decisions": 1,  # Kept under the provider identity for a reconnect.
     }
     assert source.message_id is None
     assert source.action_id == action_id

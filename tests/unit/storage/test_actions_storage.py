@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,11 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mailbrief.domain.actions import SuggestionState
 from mailbrief.domain.analysis import ActionSuggestion
 from mailbrief.domain.messages import AccountIdentity, EmailContact, ProviderKind
+from mailbrief.services.actions import ActionService, SuggestionNotFoundError
 from mailbrief.storage import actions as storage_actions
-from mailbrief.storage.actions import ActionRepository, suggestion_views
-from mailbrief.storage.database import Database
+from mailbrief.storage.actions import ActionRepository, DecisionKey, suggestion_views
+from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE, Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
 from mailbrief.storage.tables import (
+    AccountTable,
     ActionSourceTable,
     ActionStepTable,
     ActionSuggestionTable,
@@ -50,14 +53,17 @@ async def database(tmp_path: Path) -> AsyncIterator[Database]:
         await database.dispose()
 
 
-async def messages(session: AsyncSession, count: int) -> list[int]:
-    account = await AccountRepository(session).upsert(
+async def messages(session: AsyncSession, count: int, *, account: str = "gmail-1") -> list[int]:
+    """Messages msg-0, msg-1 and so on in one Gmail account."""
+    row = await AccountRepository(session).upsert(
         AccountIdentity(
-            provider=ProviderKind.GMAIL, provider_account_id="gmail-1", email_address="me@x.com"
+            provider=ProviderKind.GMAIL,
+            provider_account_id=account,
+            email_address=f"{account}@x.com",
         )
     )
     rows = await MessageRepository(session).upsert_messages(
-        account.id, [make_message(provider_message_id=f"msg-{index}") for index in range(count)]
+        row.id, [make_message(provider_message_id=f"msg-{index}") for index in range(count)]
     )
     return [row.id for row in rows]
 
@@ -95,6 +101,21 @@ async def action(session: AsyncSession, public_id: str, *, deleted: bool = False
     return action_id
 
 
+async def key_for(session: AsyncSession, message_id: int, title: str) -> DecisionKey:
+    """The key a decision on this message's suggestion is kept under."""
+    found = await session.execute(
+        select(
+            AccountTable.provider,
+            AccountTable.provider_account_id,
+            MessageTable.provider_message_id,
+        )
+        .join(AccountTable, MessageTable.account_id == AccountTable.id)
+        .where(MessageTable.id == message_id)
+    )
+    provider, account_id, provider_message_id = found.tuples().one()
+    return DecisionKey(provider, account_id, provider_message_id, fingerprint_of(title))
+
+
 async def decide(
     session: AsyncSession,
     message_id: int,
@@ -102,10 +123,13 @@ async def decide(
     decision: str,
     action_id: int | None = None,
 ) -> None:
+    key = await key_for(session, message_id, title)
     await session.execute(
         insert(SuggestionDecisionTable).values(
-            message_id=message_id,
-            fingerprint=fingerprint_of(title),
+            provider=key.provider,
+            provider_account_id=key.provider_account_id,
+            provider_message_id=key.provider_message_id,
+            fingerprint=key.fingerprint,
             decision=decision,
             action_id=action_id,
             decided_at_utc=NOW,
@@ -292,7 +316,8 @@ async def test_views_take_one_query_per_kind_of_row(database: Database, selects:
 
         views = await suggestion_views(session, pairs)
 
-    assert len(selects) == 3
+    # Suggestions, message identities, decisions and actions.
+    assert len(selects) == 4
     assert [len(views[key]) for key, _ in pairs] == [5, 5, 1]
 
 
@@ -312,12 +337,93 @@ async def test_large_requests_are_chunked(
 
         views = await suggestion_views(session, pairs)
 
-    # Five messages give three chunks each of suggestions and decisions. Six accepted
-    # decisions keep an action (C, D and one per other message): three more chunks.
-    assert len(selects) == 9
+    # Five messages give three chunks each of suggestions, identities and decisions. Six
+    # accepted decisions keep an action (C, D and one per other message): three more chunks.
+    assert len(selects) == 12
     assert states(views[message_id]) == EVERY_STATE
     for other in others:
         assert states(views[other]) == [("A", SuggestionState.ACCEPTED, f"{other:036d}")]
+
+
+async def test_views_stay_correct_past_one_batch(database: Database, selects: list[str]) -> None:
+    count = MAX_SQLITE_BATCH_SIZE + 5
+    expected: dict[int, tuple[SuggestionState, str | None]] = {}
+    async with database.session() as session:
+        pairs: list[tuple[int, int]] = []
+        for index, message_id in enumerate(await messages(session, count)):
+            pairs.append((message_id, await analysis_with(session, message_id, FIVE[:1])))
+            if index % 3 == 1:
+                await decide(session, message_id, "A", "dismissed")
+                expected[message_id] = (SuggestionState.DISMISSED, None)
+            elif index % 3 == 2:
+                public_id = f"{message_id:036d}"
+                await decide(session, message_id, "A", "accepted", await action(session, public_id))
+                expected[message_id] = (SuggestionState.ACCEPTED, public_id)
+            else:
+                expected[message_id] = (SuggestionState.PENDING, None)
+        await session.commit()
+        selects.clear()
+
+        views = await suggestion_views(session, pairs)
+
+    # Two chunks each of suggestions, identities and decisions; 35 actions fit in one.
+    assert len(selects) == 7
+    assert {
+        message_id: (view.state, view.action_public_id) for message_id, (view,) in views.items()
+    } == expected
+
+
+async def test_a_decision_from_another_account_never_matches(database: Database) -> None:
+    async with database.session() as session:
+        (mine,) = await messages(session, 1, account="gmail-1")
+        # gmail-2 has the same Gmail message ID, msg-0, and one more, msg-1.
+        theirs, their_next = await messages(session, 2, account="gmail-2")
+        analyses = {
+            message_id: await analysis_with(session, message_id, FIVE[:2])
+            for message_id in (mine, theirs, their_next)
+        }
+        await decide(session, theirs, "A", "dismissed")
+        await decide(session, theirs, "B", "accepted", await action(session, LIVE_ID))
+        await session.commit()
+
+        both = await suggestion_views(session, [(mine, analyses[mine]), (theirs, analyses[theirs])])
+        # gmail-1's msg-0 and gmail-2's msg-1 also read gmail-2's msg-0 decisions; neither
+        # message matches them.
+        crossed = await suggestion_views(
+            session, [(mine, analyses[mine]), (their_next, analyses[their_next])]
+        )
+
+    pending = [("A", SuggestionState.PENDING, None), ("B", SuggestionState.PENDING, None)]
+    assert states(both[mine]) == pending
+    assert states(both[theirs]) == [
+        ("A", SuggestionState.DISMISSED, None),
+        ("B", SuggestionState.ACCEPTED, LIVE_ID),
+    ]
+    assert states(crossed[mine]) == states(crossed[their_next]) == pending
+
+
+async def test_resaving_an_analysis_never_reuses_a_suggestion_id(database: Database) -> None:
+    async with database.session() as session:
+        (message_id,) = await messages(session, 1)
+        analysis_id = await analysis_with(session, message_id, FIVE)
+        await session.commit()
+        old_ids = list(await session.scalars(select(ActionSuggestionTable.id)))
+
+        # The same cache identity, saved again with other suggestions, replaces the rows.
+        again = await analysis_with(session, message_id, (suggestion(0, "F"), suggestion(1, "G")))
+        await session.commit()
+        new_ids = list(await session.scalars(select(ActionSuggestionTable.id)))
+
+        service = ActionService(session)
+        for old_id in old_ids:
+            with pytest.raises(SuggestionNotFoundError):
+                await service.accept(old_id)
+        remaining = await session.scalar(select(func.count()).select_from(ActionTable))
+
+    assert again == analysis_id
+    assert len(new_ids) == 2
+    assert min(new_ids) > max(old_ids)
+    assert remaining == 0
 
 
 async def test_loading_many_actions_takes_one_query_for_steps_and_one_for_sources(
@@ -356,8 +462,7 @@ async def test_pending_cannot_be_saved_as_a_decision(database: Database) -> None
 
         with pytest.raises(ValueError, match="absence of a decision"):
             await ActionRepository(session).save_decision(
-                message_id=message_id,
-                fingerprint=fingerprint_of("A"),
+                await key_for(session, message_id, "A"),
                 decision=SuggestionState.PENDING,
                 action_id=None,
                 decided_at_utc=NOW,
@@ -374,8 +479,11 @@ async def test_deleting_a_decision_that_was_never_stored_changes_nothing(
         message_id, analysis_id = await seed_every_state(session)
         repository = ActionRepository(session)
 
-        await repository.delete_decision(message_id, fingerprint_of("A"))  # A is pending.
-        await repository.delete_decision(message_id + 1, fingerprint_of("B"))  # No such message.
+        pending = await key_for(session, message_id, "A")
+        dismissed = await key_for(session, message_id, "B")
+        await repository.delete_decision(pending)
+        await repository.delete_decision(replace(dismissed, provider_message_id="msg-other"))
+        await repository.delete_decision(replace(dismissed, provider_account_id="gmail-2"))
         await session.commit()
 
         views = await suggestion_views(session, [(message_id, analysis_id)])

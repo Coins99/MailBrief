@@ -22,7 +22,7 @@ from mailbrief.domain.actions import (
 )
 from mailbrief.domain.analysis import ActionSuggestion
 from mailbrief.domain.common import normalize_utc
-from mailbrief.storage.actions import ActionRepository, suggestion_from_row
+from mailbrief.storage.actions import ActionRepository, DecisionKey, suggestion_from_row
 from mailbrief.storage.tables import (
     ActionStepTable,
     ActionTable,
@@ -123,15 +123,25 @@ class ActionService:
             raise
         return result
 
-    async def _suggestion(self, suggestion_id: int) -> tuple[ActionSuggestion, MessageTable]:
+    async def _suggestion(
+        self, suggestion_id: int
+    ) -> tuple[ActionSuggestion, MessageTable, DecisionKey]:
+        """The suggestion, its message and the key its decision is kept under."""
         found = await self._repository.get_suggestion(suggestion_id)
         if found is None:
             raise SuggestionNotFoundError(_SUGGESTION_NOT_FOUND)
-        row, message = found
+        row, message, account = found
         try:
-            return suggestion_from_row(row), message
+            suggestion = suggestion_from_row(row)
         except ValueError:
             raise SuggestionNotFoundError(_SUGGESTION_NOT_FOUND) from None
+        key = DecisionKey(
+            provider=account.provider,
+            provider_account_id=account.provider_account_id,
+            provider_message_id=message.provider_message_id,
+            fingerprint=suggestion.fingerprint,
+        )
+        return suggestion, message, key
 
     async def _live(self, public_id: str, expected_revision: int | None) -> ActionTable:
         row = await self._repository.get_action(public_id)
@@ -170,8 +180,8 @@ class ActionService:
         """
 
         async def run(now: datetime) -> Action:
-            suggestion, message = await self._suggestion(suggestion_id)
-            decision = await self._repository.get_decision(message.id, suggestion.fingerprint)
+            suggestion, message, key = await self._suggestion(suggestion_id)
+            decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id is not None:
                 existing = await self._repository.get_action_by_id(accepted_id)
@@ -208,11 +218,7 @@ class ActionService:
                 self._repository.add_step(row.id, position, text, None)
             await self._repository.add_source(row.id, message)
             await self._repository.save_decision(
-                message_id=message.id,
-                fingerprint=suggestion.fingerprint,
-                decision=SuggestionState.ACCEPTED,
-                action_id=row.id,
-                decided_at_utc=now,
+                key, decision=SuggestionState.ACCEPTED, action_id=row.id, decided_at_utc=now
             )
             return await self._load(row)
 
@@ -227,9 +233,9 @@ class ActionService:
         """
 
         async def run(now: datetime) -> Action:
-            suggestion, message = await self._suggestion(suggestion_id)
+            _, message, key = await self._suggestion(suggestion_id)
             target = await self._live(public_id, None)
-            decision = await self._repository.get_decision(message.id, suggestion.fingerprint)
+            decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id == target.id:
                 return await self._load(target)
@@ -241,11 +247,7 @@ class ActionService:
                 raise ActionConflictError(_STALE)
             await self._repository.add_source(target.id, message)
             await self._repository.save_decision(
-                message_id=message.id,
-                fingerprint=suggestion.fingerprint,
-                decision=SuggestionState.ACCEPTED,
-                action_id=target.id,
-                decided_at_utc=now,
+                key, decision=SuggestionState.ACCEPTED, action_id=target.id, decided_at_utc=now
             )
             _touch(target, now)
             return await self._load(target)
@@ -256,8 +258,8 @@ class ActionService:
         """Hide a suggestion from later briefs; repeating it changes nothing."""
 
         async def run(now: datetime) -> None:
-            suggestion, message = await self._suggestion(suggestion_id)
-            decision = await self._repository.get_decision(message.id, suggestion.fingerprint)
+            _, _, key = await self._suggestion(suggestion_id)
+            decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id is not None:
                 action = await self._repository.get_action_by_id(accepted_id)
@@ -270,11 +272,7 @@ class ActionService:
             elif decision is not None and decision.decision == SuggestionState.DISMISSED.value:
                 return  # Already dismissed; keep the original time.
             await self._repository.save_decision(
-                message_id=message.id,
-                fingerprint=suggestion.fingerprint,
-                decision=SuggestionState.DISMISSED,
-                action_id=None,
-                decided_at_utc=now,
+                key, decision=SuggestionState.DISMISSED, action_id=None, decided_at_utc=now
             )
 
         await self._write(run)
@@ -283,8 +281,8 @@ class ActionService:
         """Undo a dismissal: the suggestion is pending again, or its deleted action returns."""
 
         async def run(now: datetime) -> None:
-            suggestion, message = await self._suggestion(suggestion_id)
-            decision = await self._repository.get_decision(message.id, suggestion.fingerprint)
+            _, _, key = await self._suggestion(suggestion_id)
+            decision = await self._repository.get_decision(key)
             if decision is None:
                 return
             accepted_id = _accepted_action_id(decision)
@@ -294,7 +292,7 @@ class ActionService:
                 else await self._repository.get_action_by_id(accepted_id)
             )
             if action is None:
-                await self._repository.delete_decision(message.id, suggestion.fingerprint)
+                await self._repository.delete_decision(key)
             elif action.deleted_at_utc is not None:
                 action.deleted_at_utc = None
                 _touch(action, now)

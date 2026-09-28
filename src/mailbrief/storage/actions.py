@@ -5,6 +5,7 @@ repositories.py imports this module, so it must never import repositories.py.
 
 import logging
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic import HttpUrl
@@ -29,6 +30,7 @@ from mailbrief.domain.analysis import (
 )
 from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
 from mailbrief.storage.tables import (
+    AccountTable,
     ActionSourceTable,
     ActionStepTable,
     ActionSuggestionTable,
@@ -39,6 +41,20 @@ from mailbrief.storage.tables import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionKey:
+    """What a decision is kept under: the provider message and the suggestion's fingerprint.
+
+    It names no internal row, so a decision outlives the message, cache and account rows
+    and applies again when the same message is synced once more.
+    """
+
+    provider: str
+    provider_account_id: str
+    provider_message_id: str
+    fingerprint: str
 
 
 def suggestion_from_row(row: ActionSuggestionTable) -> ActionSuggestion:
@@ -63,7 +79,7 @@ def suggestion_from_row(row: ActionSuggestionTable) -> ActionSuggestion:
     )
 
 
-def _chunks(values: Iterable[int]) -> Iterator[list[int]]:
+def _chunks[T: (int, str)](values: Iterable[T]) -> Iterator[list[T]]:
     ordered = sorted(set(values))
     for start in range(0, len(ordered), MAX_SQLITE_BATCH_SIZE):
         yield ordered[start : start + MAX_SQLITE_BATCH_SIZE]
@@ -94,8 +110,9 @@ async def suggestion_views(
     """Each message's suggestions, in position order, with the owner's decision on each.
 
     ``pairs`` holds (message ID, analysis ID or None). Every message gets an entry, which
-    is empty without an analysis or suggestions. A decision is found by message and title
-    fingerprint:
+    is empty without an analysis or suggestions. A decision is found by its full key
+    (provider, provider account ID, provider message ID and title fingerprint), so one
+    from another account never matches:
 
     - none: pending;
     - dismissed: dismissed;
@@ -104,7 +121,8 @@ async def suggestion_views(
     - accepted, with its action gone: pending.
 
     A stored row that no longer validates is skipped, and only the count is logged. The
-    rows are read with three queries (suggestions, decisions, actions), each chunked.
+    rows are read with four queries (suggestions, message identities, decisions,
+    actions), each chunked.
     """
     wanted: list[tuple[int, int | None]] = list(pairs)
     rows: dict[int, list[ActionSuggestionTable]] = {}
@@ -117,14 +135,42 @@ async def suggestion_views(
         for row in result:
             rows.setdefault(row.analysis_id, []).append(row)
 
-    decisions: dict[tuple[int, str], SuggestionDecisionTable] = {}
+    # (provider, provider account ID, provider message ID) -> message ID. Accounts and
+    # messages are unique on these, so each identity names one message.
+    identities: dict[tuple[str, str, str], int] = {}
     with_suggestions = (message_id for message_id, analysis_id in wanted if analysis_id in rows)
     for chunk in _chunks(with_suggestions):
+        result_identities = await session.execute(
+            select(
+                MessageTable.id,
+                AccountTable.provider,
+                AccountTable.provider_account_id,
+                MessageTable.provider_message_id,
+            )
+            .join(AccountTable, MessageTable.account_id == AccountTable.id)
+            .where(MessageTable.id.in_(chunk))
+        )
+        for message_id, provider, account_id, provider_message_id in result_identities.tuples():
+            identities[(provider, account_id, provider_message_id)] = message_id
+
+    decisions: dict[tuple[int, str], SuggestionDecisionTable] = {}
+    providers = sorted({provider for provider, _, _ in identities})
+    account_ids = sorted({account_id for _, account_id, _ in identities})
+    for chunk_ids in _chunks(provider_message_id for _, _, provider_message_id in identities):
+        # The account filters let SQLite use the identity index; the match below is exact.
         result_decisions = await session.scalars(
-            select(SuggestionDecisionTable).where(SuggestionDecisionTable.message_id.in_(chunk))
+            select(SuggestionDecisionTable).where(
+                SuggestionDecisionTable.provider.in_(providers),
+                SuggestionDecisionTable.provider_account_id.in_(account_ids),
+                SuggestionDecisionTable.provider_message_id.in_(chunk_ids),
+            )
         )
         for decision in result_decisions:
-            decisions[(decision.message_id, decision.fingerprint)] = decision
+            matched = identities.get(
+                (decision.provider, decision.provider_account_id, decision.provider_message_id)
+            )
+            if matched is not None:
+                decisions[(matched, decision.fingerprint)] = decision
 
     actions: dict[int, tuple[str, datetime | None]] = {}
     accepted = (
@@ -230,47 +276,49 @@ class ActionRepository:
 
     async def get_suggestion(
         self, suggestion_id: int
-    ) -> tuple[ActionSuggestionTable, MessageTable] | None:
-        """A stored suggestion with the message its analysis describes."""
+    ) -> tuple[ActionSuggestionTable, MessageTable, AccountTable] | None:
+        """A stored suggestion with the message its analysis describes and its account."""
         result = await self._session.execute(
-            select(ActionSuggestionTable, MessageTable)
+            select(ActionSuggestionTable, MessageTable, AccountTable)
             .join(AnalysisTable, ActionSuggestionTable.analysis_id == AnalysisTable.id)
             .join(MessageTable, AnalysisTable.message_id == MessageTable.id)
+            .join(AccountTable, MessageTable.account_id == AccountTable.id)
             .where(ActionSuggestionTable.id == suggestion_id)
             .execution_options(populate_existing=True)
         )
         found = result.tuples().first()
-        return None if found is None else (found[0], found[1])
+        return None if found is None else (found[0], found[1], found[2])
 
-    async def get_decision(
-        self, message_id: int, fingerprint: str
-    ) -> SuggestionDecisionTable | None:
+    async def get_decision(self, key: DecisionKey) -> SuggestionDecisionTable | None:
         result = await self._session.scalars(
             select(SuggestionDecisionTable).where(
-                SuggestionDecisionTable.message_id == message_id,
-                SuggestionDecisionTable.fingerprint == fingerprint,
+                SuggestionDecisionTable.provider == key.provider,
+                SuggestionDecisionTable.provider_account_id == key.provider_account_id,
+                SuggestionDecisionTable.provider_message_id == key.provider_message_id,
+                SuggestionDecisionTable.fingerprint == key.fingerprint,
             )
         )
         return result.first()
 
     async def save_decision(
         self,
+        key: DecisionKey,
         *,
-        message_id: int,
-        fingerprint: str,
         decision: SuggestionState,
         action_id: int | None,
         decided_at_utc: datetime,
     ) -> None:
-        """Record a decision, updating the existing row for this message and fingerprint."""
+        """Record a decision, updating the existing row for this key."""
         if decision is SuggestionState.PENDING:
             raise ValueError("pending is the absence of a decision")
-        row = await self.get_decision(message_id, fingerprint)
+        row = await self.get_decision(key)
         if row is None:
             self._session.add(
                 SuggestionDecisionTable(
-                    message_id=message_id,
-                    fingerprint=fingerprint,
+                    provider=key.provider,
+                    provider_account_id=key.provider_account_id,
+                    provider_message_id=key.provider_message_id,
+                    fingerprint=key.fingerprint,
                     decision=decision.value,
                     action_id=action_id,
                     decided_at_utc=decided_at_utc,
@@ -281,8 +329,8 @@ class ActionRepository:
         row.action_id = action_id
         row.decided_at_utc = decided_at_utc
 
-    async def delete_decision(self, message_id: int, fingerprint: str) -> None:
-        row = await self.get_decision(message_id, fingerprint)
+    async def delete_decision(self, key: DecisionKey) -> None:
+        row = await self.get_decision(key)
         if row is not None:
             await self._session.delete(row)
 

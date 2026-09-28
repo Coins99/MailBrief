@@ -65,7 +65,8 @@ def test_initial_migration_upgrades_and_downgrades(tmp_path: Path) -> None:
 
     command.downgrade(config, "base")
 
-    assert table_names(database_path) <= {"alembic_version"}
+    # SQLite never drops sqlite_sequence once an AUTOINCREMENT table has existed.
+    assert table_names(database_path) - {"sqlite_sequence"} <= {"alembic_version"}
 
 
 def test_m2_upgrade_preserves_existing_provider_rows(tmp_path: Path) -> None:
@@ -468,7 +469,7 @@ def test_action_tables_upgrade_and_downgrade_keep_existing_rows(tmp_path: Path) 
     _seed_before_actions(path)
     before = _rows(path, _OLD_ROWS)
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260927_0005")
 
     assert table_names(path) >= _ACTION_TABLES
     assert _rows(path, _OLD_ROWS) == before
@@ -494,7 +495,7 @@ def test_action_tables_upgrade_and_downgrade_keep_existing_rows(tmp_path: Path) 
 
 
 def _schema(path: Path) -> dict[str, dict[str, object]]:
-    """Each table's columns, foreign keys, unique column sets, indexes and CHECK names."""
+    """Each table's columns, keys, indexes, CHECK and constraint names, and AUTOINCREMENT."""
     shape: dict[str, dict[str, object]] = {}
     with closing(sqlite3.connect(path)) as connection:
         tables = [
@@ -527,6 +528,8 @@ def _schema(path: Path) -> dict[str, dict[str, object]]:
                 "unique": unique,
                 "indexes": indexes,
                 "checks": set(re.findall(r"CONSTRAINT (ck_\w+) CHECK", str(sql))),
+                "constraints": set(re.findall(r"CONSTRAINT (\w+)", str(sql))),
+                "autoincrement": "AUTOINCREMENT" in str(sql),
             }
     return shape
 
@@ -561,6 +564,16 @@ def test_head_schema_matches_the_orm(tmp_path: Path) -> None:
         frozenset({"analysis_id", "position"}),
         frozenset({"analysis_id", "fingerprint"}),
     }
+    assert created_schema["action_suggestions"]["autoincrement"] is True
+    assert created_schema["suggestion_decisions"]["unique"] == {
+        frozenset({"provider", "provider_account_id", "provider_message_id", "fingerprint"})
+    }
+    assert created_schema["suggestion_decisions"]["constraints"] == {
+        "pk_suggestion_decisions",
+        "ck_suggestion_decisions_decision_known",
+        "fk_suggestion_decisions_action_id_actions",
+        "uq_suggestion_decisions_identity",
+    }
 
 
 def test_alembic_ini_keeps_existing_loggers_enabled(tmp_path: Path) -> None:
@@ -574,3 +587,117 @@ def test_alembic_ini_keeps_existing_loggers_enabled(tmp_path: Path) -> None:
     command.upgrade(_alembic_config(tmp_path / "logging.sqlite3"), "head")
 
     assert not existing.disabled
+
+
+_DECIDED = ("2026-09-27 10:00:00.000000", "2026-09-27 11:00:00.000000")
+
+
+def _seed_decisions(path: Path) -> int:
+    """At revision 0005: suggestions 4 and 9, one accepted with its action, one dismissed."""
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        action_id = connection.execute(
+            "INSERT INTO actions(public_id,title,ownership,status,created_at_utc,updated_at_utc) "
+            "VALUES('0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44','Approve it','mine','open',"
+            "'2026-09-27 00:00:00','2026-09-27 00:00:00')"
+        ).lastrowid
+        assert action_id is not None
+        connection.executemany(
+            "INSERT INTO action_suggestions(id,analysis_id,position,title,ownership,steps_json,"
+            "fingerprint) VALUES(?,7,?,?,'mine','[]',?)",
+            [(4, 0, "Approve it", "a" * 64), (9, 1, "Book a room", "b" * 64)],
+        )
+        connection.executemany(
+            "INSERT INTO suggestion_decisions(id,message_id,fingerprint,decision,action_id,"
+            "decided_at_utc) VALUES(?,1,?,?,?,?)",
+            [
+                (3, "a" * 64, "accepted", action_id, _DECIDED[0]),
+                (8, "b" * 64, "dismissed", None, _DECIDED[1]),
+            ],
+        )
+        connection.commit()
+    return action_id
+
+
+def _query(path: Path, sql: str) -> list[tuple[object, ...]]:
+    with closing(sqlite3.connect(path)) as connection:
+        return connection.execute(sql).fetchall()
+
+
+def _identity_decisions(path: Path) -> list[tuple[object, ...]]:
+    return _query(
+        path,
+        "SELECT id,provider,provider_account_id,provider_message_id,fingerprint,decision,"
+        "action_id,decided_at_utc FROM suggestion_decisions ORDER BY id",
+    )
+
+
+def test_stable_decisions_keep_every_decision_and_never_reuse_suggestion_ids(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "m6.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)
+    kept = (*_OLD_ROWS, "actions")
+    before = _rows(path, kept)
+    identified = [
+        (3, "gmail", "account-1", "message-1", "a" * 64, "accepted", action_id, _DECIDED[0]),
+        (8, "gmail", "account-1", "message-1", "b" * 64, "dismissed", None, _DECIDED[1]),
+    ]
+
+    upgrade_database(path)
+
+    assert len(list(tmp_path.glob("*.pre-upgrade-*.sqlite3"))) == 1
+    assert _identity_decisions(path) == identified
+    assert _query(path, "SELECT id FROM action_suggestions ORDER BY id") == [(4,), (9,)]
+    assert _query(path, "PRAGMA foreign_key_check") == []
+    assert _rows(path, kept) == before
+    assert _foreign_keys(path, "suggestion_decisions") == {
+        ("actions", "action_id", "id", "SET NULL")
+    }
+    assert _foreign_keys(path, "action_suggestions") == {
+        ("analyses", "analysis_id", "id", "CASCADE")
+    }
+    assert _query(path, "SELECT seq FROM sqlite_sequence WHERE name='action_suggestions'") == [(9,)]
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("DELETE FROM action_suggestions WHERE id = 9")
+        reused = connection.execute(
+            "INSERT INTO action_suggestions(analysis_id,position,title,ownership,steps_json,"
+            "fingerprint) VALUES(7,1,'Call Sam','mine','[]',?)",
+            ("c" * 64,),
+        ).lastrowid
+        # Decisions whose message or account is no longer stored.
+        connection.executemany(
+            "INSERT INTO suggestion_decisions(provider,provider_account_id,provider_message_id,"
+            "fingerprint,decision,decided_at_utc) VALUES('gmail',?,?,?,'dismissed',?)",
+            [
+                ("account-1", "message-gone", "d" * 64, _DECIDED[1]),
+                ("account-gone", "message-1", "e" * 64, _DECIDED[1]),
+            ],
+        )
+        connection.commit()
+    assert reused == 10
+
+    command.downgrade(config, "20260927_0005")
+
+    assert _query(
+        path,
+        "SELECT id,message_id,fingerprint,decision,action_id,decided_at_utc "
+        "FROM suggestion_decisions ORDER BY id",
+    ) == [
+        (3, 1, "a" * 64, "accepted", action_id, _DECIDED[0]),
+        (8, 1, "b" * 64, "dismissed", None, _DECIDED[1]),
+    ]
+    assert _query(path, "PRAGMA foreign_key_check") == []
+    fresh = tmp_path / "fresh-0005.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260927_0005")
+    assert _schema(path) == _schema(fresh)
+
+    command.upgrade(config, "head")
+
+    assert _identity_decisions(path) == identified
+    assert _query(path, "SELECT id FROM action_suggestions ORDER BY id") == [(4,), (10,)]

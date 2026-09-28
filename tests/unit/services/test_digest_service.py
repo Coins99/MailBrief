@@ -364,7 +364,9 @@ async def test_saved_items_carry_their_suggestions_and_states(session: AsyncSess
     ):
         await session.execute(
             insert(SuggestionDecisionTable).values(
-                message_id=with_suggestions.message_row_id,
+                provider="gmail",
+                provider_account_id="g-1",
+                provider_message_id="suggested",
                 fingerprint=fingerprint_of(title),
                 decision=decision,
                 action_id=decided_action,

@@ -42,6 +42,7 @@ from mailbrief.storage.tables import (
     ActionStepTable,
     ActionSuggestionTable,
     ActionTable,
+    MessageTable,
     SuggestionDecisionTable,
 )
 from tests.factories import make_analysis, make_message, make_suggestion
@@ -1025,8 +1026,77 @@ async def test_deleting_the_account_keeps_the_action_with_its_source_unavailable
     kept = await service.get(action.public_id)
     (source,) = kept.sources
     assert (source.available, source.in_inbox, source.subject) == (False, None, "Subject of msg-1")
-    assert await count(session, SuggestionDecisionTable) == 0
+    assert await count(session, SuggestionDecisionTable) == 1  # Kept for a reconnect.
     assert await count(session, ActionSuggestionTable) == 0
+
+
+async def delete_message(session: AsyncSession, seeded: Seeded) -> None:
+    """Delete a cached message row; its analysis and suggestions go with it."""
+    await session.execute(delete(MessageTable).where(MessageTable.id == seeded.message_id))
+    await session.commit()
+    session.expunge_all()
+
+
+async def test_an_acceptance_survives_deleting_and_resyncing_its_message(
+    session: AsyncSession, service: ActionService
+) -> None:
+    seeded = await seed(session)
+    await seed(session, (suggestion(0, "Other"),), message="msg-2")  # Holds the highest row ID.
+    action = await service.accept(seeded.suggestion_ids[0])
+    await delete_message(session, seeded)
+
+    again = await seed(session)  # The same Gmail message and suggestion titles.
+
+    assert again.message_id != seeded.message_id
+    assert await states(session, again) == [
+        (SuggestionState.ACCEPTED, action.public_id),
+        (SuggestionState.PENDING, None),
+    ]
+    accepted = await service.accept(again.suggestion_ids[0])
+    assert (accepted.public_id, accepted.revision) == (action.public_id, 1)
+    opened = await service.list_actions(ActionFilter.OPEN)
+    assert [item.public_id for item in opened] == [action.public_id]
+
+
+async def test_a_dismissal_survives_deleting_and_resyncing_its_message(
+    session: AsyncSession, service: ActionService
+) -> None:
+    seeded = await seed(session)
+    await seed(session, (suggestion(0, "Other"),), message="msg-2")
+    await service.dismiss(seeded.suggestion_ids[1])
+    await delete_message(session, seeded)
+
+    again = await seed(session)
+
+    assert again.message_id != seeded.message_id
+    assert await states(session, again) == [
+        (SuggestionState.PENDING, None),
+        (SuggestionState.DISMISSED, None),
+    ]
+    assert await count(session, SuggestionDecisionTable) == 1
+
+
+async def test_decisions_survive_deleting_and_reconnecting_the_account(
+    session: AsyncSession, service: ActionService
+) -> None:
+    seeded = await seed(session)
+    action = await service.accept(seeded.suggestion_ids[0])
+    await service.dismiss(seeded.suggestion_ids[1])
+    account_id = await session.scalar(select(AccountTable.id))
+    assert account_id is not None
+    assert await AccountRepository(session).delete_by_id(account_id)
+    await session.commit()
+    session.expunge_all()
+
+    again = await seed(session)  # Reconnect the same Gmail account and sync again.
+
+    assert await states(session, again) == [
+        (SuggestionState.ACCEPTED, action.public_id),
+        (SuggestionState.DISMISSED, None),
+    ]
+    assert (await service.accept(again.suggestion_ids[0])).public_id == action.public_id
+    assert len(await service.list_actions(ActionFilter.OPEN)) == 1
+    assert await count(session, SuggestionDecisionTable) == 2
 
 
 async def test_an_action_survives_closing_and_reopening_the_database(tmp_path: Path) -> None:

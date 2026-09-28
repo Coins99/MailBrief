@@ -355,6 +355,8 @@ class ActionSuggestionTable(Base):
         CheckConstraint("position >= 0", name="position_nonnegative"),
         CheckConstraint(_OWNERSHIP_CHECK, name="ownership_known"),
         CheckConstraint(_PRECISION_CHECK, name="deadline_precision_known"),
+        # A deleted suggestion's ID is never given to another, so a stale ID fails.
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -431,20 +433,29 @@ class ActionSourceTable(Base):
 
 
 class SuggestionDecisionTable(Base):
-    """The owner's decision on one suggestion, kept per message and title fingerprint."""
+    """The owner's decision on one suggestion, kept per provider message and title fingerprint.
+
+    Decisions have no message or account foreign key: they are keyed by the provider
+    account and message IDs, so they survive message, cache and account deletion.
+    """
 
     __tablename__ = "suggestion_decisions"
     __table_args__ = (
-        UniqueConstraint("message_id", "fingerprint", name="uq_suggestion_decisions_fingerprint"),
+        UniqueConstraint(
+            "provider",
+            "provider_account_id",
+            "provider_message_id",
+            "fingerprint",
+            name="uq_suggestion_decisions_identity",
+        ),
         CheckConstraint("decision IN ('accepted','dismissed')", name="decision_known"),
         Index("ix_suggestion_decisions_action_id", "action_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    message_id: Mapped[int] = mapped_column(
-        ForeignKey("messages.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_account_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_message_id: Mapped[str] = mapped_column(String(512), nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"))
