@@ -41,6 +41,7 @@ from mailbrief.domain.drafts import (
     export_text,
     placeholders,
     recipient_warnings,
+    still_to_fill,
 )
 
 DEBOUNCE_MS = 1_500
@@ -74,10 +75,6 @@ def gmail_link(source: DraftSource) -> str | None:
     """The source's link when it opens Gmail; nothing else is ever opened."""
     link = source.web_link
     return str(link) if link.scheme == "https" and link.host == "mail.google.com" else None
-
-
-def still_to_fill(count: int) -> str:
-    return f"{count} placeholder{' still needs' if count == 1 else 's still need'} filling."
 
 
 class DraftEditor(QDialog):

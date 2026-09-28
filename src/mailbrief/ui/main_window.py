@@ -35,6 +35,7 @@ from mailbrief.domain.drafts import (
     DraftVersion,
     DraftVersionInfo,
     placeholders,
+    still_to_fill,
 )
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.errors import ConfigurationError
@@ -54,7 +55,7 @@ from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPan
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
 from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
-from mailbrief.ui.draft_editor import DraftEditor, still_to_fill
+from mailbrief.ui.draft_editor import DraftEditor
 from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
 from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT

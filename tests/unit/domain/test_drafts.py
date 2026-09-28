@@ -24,6 +24,7 @@ from mailbrief.domain.drafts import (
     first_line,
     placeholders,
     recipient_warnings,
+    still_to_fill,
 )
 
 AT = datetime(2026, 9, 28, 13, tzinfo=UTC)
@@ -257,3 +258,8 @@ def test_export_filename(fields: dict[str, Any], expected: str) -> None:
 
 def test_export_filename_uses_the_suffix() -> None:
     assert export_filename(draft(title="Plan"), ".txt") == "Plan.txt"
+
+
+def test_still_to_fill() -> None:
+    assert still_to_fill(1) == "1 placeholder still needs filling."
+    assert still_to_fill(3) == "3 placeholders still need filling."

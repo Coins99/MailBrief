@@ -90,6 +90,11 @@ def placeholders(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(match.group(0) for match in _PLACEHOLDER.finditer(text)))
 
 
+def still_to_fill(count: int) -> str:
+    """The reminder shown after copying or exporting text that still has placeholders."""
+    return f"{count} placeholder{' still needs' if count == 1 else 's still need'} filling."
+
+
 def first_line(text: str, limit: int = PREVIEW_MAX_CHARS) -> str:
     """The first line with any text, stripped and cut to ``limit`` characters."""
     for line in text.splitlines():

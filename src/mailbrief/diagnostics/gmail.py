@@ -1,4 +1,5 @@
-"""Gmail connection checks, daily sync, body review, the consented AI brief and actions."""
+"""Gmail connection checks, daily sync, body review, the consented AI brief, actions and
+local drafts."""
 
 import argparse
 import asyncio
@@ -6,6 +7,7 @@ import contextlib
 import getpass
 import logging
 import threading
+import unicodedata
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -26,7 +28,9 @@ from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.bodies import BodyStatus, PreparedBody
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncStatus
+from mailbrief.domain.drafts import KIND_NAMES, export_markdown, export_text, still_to_fill
 from mailbrief.errors import ConfigurationError
+from mailbrief.infra.files import write_text_atomically
 from mailbrief.paths import AppPaths
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.providers.gmail.cache import GmailCredentialStore
@@ -52,6 +56,7 @@ from mailbrief.services.brief import (
 )
 from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.drafts import DraftNotFoundError, DraftService
 from mailbrief.services.ranking import ShortlistReviewError
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
@@ -61,11 +66,14 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     SyncRunRepository,
 )
+from mailbrief.text.prepare import clean_generated_text
 
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 # Commands whose setup errors are shown as they are: static, actionable messages.
-_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions"}
+_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts"}
 _ACTION_REFUSED = "That suggestion or action was not found or cannot change now."
+_DRAFT_NOT_FOUND = "That draft was not found."
+_FILE_EXISTS = "That file already exists; nothing was written. Choose another --out path."
 _SETUP_UNAVAILABLE = (
     "Gmail configuration or secure storage is unavailable. See docs/gmail-setup.md."
 )
@@ -613,6 +621,56 @@ async def actions(
     return 0
 
 
+def _terminal_safe(text: str) -> str:
+    """Owner text without control characters that could drive a terminal; lines and tabs stay."""
+    return "".join(ch for ch in text if ch in "\n\t" or unicodedata.category(ch) != "Cc")
+
+
+async def drafts(
+    action: str,
+    *,
+    database_path: Path | None,
+    public_id: str | None = None,
+    output_format: str = "text",
+    out: Path | None = None,
+) -> int:
+    """List drafts, or export one to stdout or a new file; needs no Gmail or AI access."""
+    path = database_path or AppPaths.from_qt().database_path
+    await asyncio.to_thread(upgrade_database, path)
+    database = Database.from_path(path)
+    try:
+        async with database.session() as session:
+            service = DraftService(session)
+            if action == "list":
+                summaries = await service.list_summaries()
+            else:
+                assert public_id is not None
+                draft = await service.get(public_id)
+    finally:
+        await database.dispose()
+    if action == "list":
+        if not summaries:
+            print("No drafts.")
+            return 0
+        zone = resolve_timezone(None)
+        for summary in summaries:
+            updated = summary.updated_at_utc.astimezone(zone).isoformat(timespec="minutes")
+            title = clean_generated_text(summary.display_title)
+            print(
+                f"{summary.public_id} [{KIND_NAMES[summary.kind].lower()}] {title}; "
+                f"updated {updated}; placeholders {summary.placeholder_count}"
+            )
+        return 0
+    document = export_markdown(draft) if output_format == "markdown" else export_text(draft)
+    if out is None:
+        print(_terminal_safe(document), end="")
+        return 0
+    await asyncio.to_thread(write_text_atomically, out, document, overwrite=False)
+    count = len(draft.placeholders)
+    print(f"Exported to {out}." + (f" {still_to_fill(count)}" if count else ""))
+    return 0
+
+
 def _add_day_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--silent-only", action="store_true", help="Never open a browser.")
     parser.add_argument("--database", type=Path, help="Optional SQLite path; defaults to app data.")
@@ -713,6 +771,25 @@ def main(arguments: Sequence[str] | None = None) -> int:
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
+    drafts_parser = commands.add_parser(
+        "drafts", help="List local drafts and notes, or export one. Nothing is sent."
+    )
+    draft_commands = drafts_parser.add_subparsers(dest="action", required=True)
+    drafts_list = draft_commands.add_parser("list", help="List drafts, newest first.")
+    drafts_export = draft_commands.add_parser(
+        "export", help="Print a draft, or write it to a new file with --out."
+    )
+    drafts_export.add_argument("public_id", help="The draft ID shown by drafts list.")
+    drafts_export.add_argument(
+        "--format", choices=("text", "markdown"), default="text", help="Default text."
+    )
+    drafts_export.add_argument(
+        "--out", type=Path, help="Write to this new file; an existing file is never replaced."
+    )
+    for subcommand in (drafts_list, drafts_export):
+        subcommand.add_argument(
+            "--database", type=Path, help="Optional SQLite path; defaults to app data."
+        )
     args = parser.parse_args(arguments)
     # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
     for name in ("httpx", "httpcore", "groq"):
@@ -740,6 +817,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     view=getattr(args, "view", ActionFilter.OPEN.value),
                     timezone=getattr(args, "timezone", None),
                     suggestion_id=getattr(args, "suggestion_id", None),
+                )
+            )
+        if args.command == "drafts":
+            return asyncio.run(
+                drafts(
+                    args.action,
+                    database_path=args.database,
+                    public_id=getattr(args, "public_id", None),
+                    output_format=getattr(args, "format", "text"),
+                    out=getattr(args, "out", None),
                 )
             )
         if args.command == "ai-consent":
@@ -790,6 +877,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except ProviderError as exc:
         print(str(exc))
         return 4
+    except DraftNotFoundError:
+        print(_DRAFT_NOT_FOUND)
+        return 3
+    except FileExistsError:
+        print(_FILE_EXISTS)
+        return 3
     except (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError):
         # Before ValueError: ActionConflictError is one. Messages stay static.
         print(_ACTION_REFUSED)
