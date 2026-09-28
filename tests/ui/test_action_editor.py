@@ -6,7 +6,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtWidgets import QDialogButtonBox, QLabel, QWidget
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QDialogButtonBox, QLabel, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import Action, ActionEdit, ActionSource, ActionStep, StepEdit
@@ -62,10 +63,14 @@ def saved(editor: ActionEditor) -> list[tuple[Action, ActionEdit, list[StepEdit]
     return found
 
 
+def button(editor: ActionEditor, which: QDialogButtonBox.StandardButton) -> QPushButton:
+    found = editor.buttons.button(which)
+    assert found is not None
+    return found
+
+
 def save(editor: ActionEditor) -> None:
-    button = editor.buttons.button(QDialogButtonBox.StandardButton.Save)
-    assert button is not None
-    button.click()
+    button(editor, QDialogButtonBox.StandardButton.Save).click()
 
 
 def test_it_shows_the_action_as_plain_text(editor: ActionEditor) -> None:
@@ -307,3 +312,98 @@ def test_the_rename_hint_names_a_gesture_that_works_on_every_platform(
 
     assert not any("F2" in text for text in texts)
     assert any("double-click" in text for text in texts)
+
+
+def test_save_asks_and_waits_locked_until_the_window_answers(editor: ActionEditor) -> None:
+    requests = saved(editor)
+    editor.open()
+    editor.title.setText("Send the final deck")
+
+    save(editor)
+
+    assert len(requests) == 1
+    assert editor.isVisible()
+    assert editor.status.text() == "Saving…"
+    locked = (
+        editor.title,
+        editor.notes,
+        editor.steps,
+        editor.add_step,
+        editor.remove_step,
+        editor.up,
+        editor.down,
+        button(editor, QDialogButtonBox.StandardButton.Save),
+        button(editor, QDialogButtonBox.StandardButton.Cancel),
+    )
+    assert not any(widget.isEnabled() for widget in locked)
+    save(editor)  # Refused: the first save is still running.
+    assert len(requests) == 1
+
+    editor.finish_saved()
+
+    assert not editor.isVisible()
+    assert editor.result() == ActionEditor.DialogCode.Accepted
+
+
+def test_escape_cancel_and_the_close_button_are_ignored_while_saving(
+    editor: ActionEditor,
+) -> None:
+    editor.open()
+    save(editor)
+
+    QTest.keyClick(editor, Qt.Key.Key_Escape)
+    editor.reject()
+    editor.close()
+
+    assert editor.isVisible()
+    editor.force_close()
+    assert not editor.isVisible()
+    assert button(editor, QDialogButtonBox.StandardButton.Cancel).isEnabled()
+
+
+def test_keep_open_unlocks_the_dialog_with_every_edit_intact(editor: ActionEditor) -> None:
+    editor.open()
+    editor.title.setText("Send the final deck")
+    editor.notes.setPlainText("n" * 10_000)
+    editor.steps.item(1).setText("Draft the slides")
+    editor.steps.item(1).setCheckState(Qt.CheckState.Checked)
+    editor.steps.setCurrentRow(0)
+    save(editor)
+
+    editor.keep_open("Couldn't save. Your edits are still here; try again.")
+
+    assert editor.isVisible()
+    assert editor.status.text() == "Couldn't save. Your edits are still here; try again."
+    assert editor.title.text() == "Send the final deck"
+    assert editor.notes.toPlainText() == "n" * 10_000
+    assert editor._current_steps() == [
+        (11, "Collect figures", True),
+        (12, "Draft the slides", True),
+    ]
+    assert editor.title.isEnabled() and editor.steps.isEnabled()
+    assert (editor.remove_step.isEnabled(), editor.up.isEnabled()) == (True, False)
+    assert editor.has_target.isChecked() and editor.target.isEnabled()
+    requests = saved(editor)
+    save(editor)  # The owner can try again.
+    assert len(requests) == 1
+
+
+def test_an_unchecked_target_stays_disabled_after_a_failed_save(editor: ActionEditor) -> None:
+    editor.open()
+    editor.has_target.setChecked(False)
+    save(editor)
+
+    editor.keep_open("Try again.")
+
+    assert editor.has_target.isEnabled()
+    assert not editor.target.isEnabled()
+
+
+def test_editing_another_action_clears_a_stuck_save(editor: ActionEditor) -> None:
+    save(editor)
+
+    editor.edit(make_action(title="Another action"))
+
+    assert editor.title.isEnabled()
+    assert editor.status.text() == ""
+    assert button(editor, QDialogButtonBox.StandardButton.Save).isEnabled()

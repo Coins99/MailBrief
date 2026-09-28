@@ -89,6 +89,12 @@ class DesktopBackend(Protocol):
 _STALE = (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError)
 _PICK_ONE = "Select at least one message to analyze, or Cancel."
 _NOT_REFRESHED = "The view could not be refreshed; restart MailBrief to see the latest."
+_EDITOR_WAIT = "MailBrief is busy; try again in a moment."
+_EDITOR_STALE = (
+    "This action changed since you opened it. Your edits are still here — copy what you "
+    "need, then Cancel and reopen the action."
+)
+_EDITOR_FAILED = "Couldn't save. Your edits are still here; try again."
 
 
 def plain_label(text: str) -> QLabel:
@@ -346,7 +352,9 @@ class MainWindow(QMainWindow):
     def _request_save_action(
         self, action: Action, edit: ActionEdit, steps: Sequence[StepEdit] | None
     ) -> None:
-        self.start(lambda: self._save_action(action, edit, steps), cancellable=False)
+        started = self.start(lambda: self._save_action(action, edit, steps), cancellable=False)
+        if not started and not self._closing:
+            self.action_editor.keep_open(_EDITOR_WAIT)
 
     async def _complete_action(self, action: Action) -> None:
         try:
@@ -394,23 +402,35 @@ class MainWindow(QMainWindow):
     async def _save_action(
         self, action: Action, edit: ActionEdit, steps: Sequence[StepEdit] | None
     ) -> None:
+        """The editor closes only once the save succeeds; otherwise it keeps the edits."""
         try:
             saved = await self.backend.save_action(action.public_id, action.revision, edit, steps)
         except _STALE as exc:
+            if not self._closing:
+                self.action_editor.keep_open(_EDITOR_STALE)
             await self._stale(exc)
             return
+        except Exception:
+            if not self._closing:
+                self.action_editor.keep_open(_EDITOR_FAILED)
+            raise  # _run logs it and reports the failure.
+        self.action_editor.finish_saved()
         self._offer_undo()  # An edit has no undo; an older offer would refer to a past revision.
         self.status.setText(f"Saved: {saved.title}.")
         await self._refresh_views()
 
-    def start(self, operation: Callable[[], Awaitable[None]], *, cancellable: bool = True) -> None:
-        """Only one operation may own the providers and workflow at a time."""
+    def start(self, operation: Callable[[], Awaitable[None]], *, cancellable: bool = True) -> bool:
+        """Only one operation may own the providers and workflow at a time.
+
+        Returns whether this operation started; it does not while closing or busy.
+        """
         if self._closing or (self.task is not None and not self.task.done()):
-            return
+            return False
         self._cancel = asyncio.Event()
         self._cancellable = cancellable
         self._set_busy(True)
         self.task = asyncio.create_task(self._run(operation))
+        return True
 
     async def _run(self, operation: Callable[[], Awaitable[None]]) -> None:
         try:
@@ -686,7 +706,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self.settings_dialog.reject()
         self.cached_dialog.reject()
-        self.action_editor.reject()  # A Save during shutdown would be refused silently.
+        self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
         self.cancel()
         self.closing.emit()
 

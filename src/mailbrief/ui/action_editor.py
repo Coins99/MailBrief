@@ -73,6 +73,8 @@ class ActionEditor(QDialog):
     """``save_requested(action, edit, steps)``: steps is None when the plan is unchanged.
 
     The dialog validates what it can; the service still checks every bound and the revision.
+    After asking, it stays open and locked until the window calls finish_saved(), which
+    closes it, or keep_open(), which unlocks it with every field as the owner left it.
     """
 
     save_requested = Signal(object, object, object)
@@ -82,7 +84,13 @@ class ActionEditor(QDialog):
         self.setWindowTitle("Edit action")
         self._action: Action | None = None
         self._original: list[tuple[int | None, str, bool]] = []
+        self._busy = False  # Another operation is running, so Save waits.
+        self._saving = False  # This dialog's save is running, so nothing can change.
         layout = QVBoxLayout(self)
+        # Every field and step control, so one switch locks them all while saving.
+        self._fields = QWidget()
+        fields = QVBoxLayout(self._fields)
+        fields.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         self.title = QLineEdit()
         self.title.setMaxLength(ACTION_TITLE_MAX_CHARS)
@@ -113,13 +121,13 @@ class ActionEditor(QDialog):
         self.notes = QPlainTextEdit()
         self.notes.setTabChangesFocus(True)
         form.addRow("&Notes", self.notes)
-        layout.addLayout(form)
-        layout.addWidget(
+        fields.addLayout(form)
+        fields.addWidget(
             _plain("Plan (check a step when it's done; double-click a step to rename it):")
         )
         self.steps = QListWidget()
         self.steps.setAccessibleName("Plan steps")
-        layout.addWidget(self.steps)
+        fields.addWidget(self.steps)
         step_buttons = QHBoxLayout()
         self.add_step = QPushButton("&Add step")
         self.remove_step = QPushButton("&Remove step")
@@ -127,7 +135,8 @@ class ActionEditor(QDialog):
         self.down = QPushButton("Move do&wn")
         for button in (self.add_step, self.remove_step, self.up, self.down):
             step_buttons.addWidget(button)
-        layout.addLayout(step_buttons)
+        fields.addLayout(step_buttons)
+        layout.addWidget(self._fields)
         self.status = _plain("")
         layout.addWidget(self.status)
         self.buttons = QDialogButtonBox(
@@ -141,13 +150,13 @@ class ActionEditor(QDialog):
         self.steps.currentRowChanged.connect(lambda _row: self._update_step_buttons())
         self.buttons.accepted.connect(self._save)
         self.buttons.rejected.connect(self.reject)
-        self._busy = False
 
     def edit(self, action: Action, zone: ZoneInfo | None = None) -> None:
         """Show one action's current values; nothing is kept from an earlier edit.
 
         ``zone`` is the owner's, so an exact deadline reads like it does in the brief.
         """
+        self._set_saving(False)
         self._action = action
         self.title.setText(action.title)
         self.owner.setCurrentIndex([value for value, _ in _OWNERS].index(action.ownership))
@@ -181,10 +190,42 @@ class ActionEditor(QDialog):
         self._update_step_buttons()
 
     def set_busy(self, busy: bool) -> None:
+        """Another operation is running: Save waits for it, but Cancel still works."""
         self._busy = busy
+        self._update_buttons()
+
+    def finish_saved(self) -> None:
+        """The save succeeded: close the dialog."""
+        self._set_saving(False)
+        self.accept()
+
+    def keep_open(self, message: str) -> None:
+        """The save did not happen: unlock the dialog, keep every field and say why."""
+        self._set_saving(False)
+        self.status.setText(message)
+
+    def force_close(self) -> None:
+        """Close even while a save is running, as the window does when it quits."""
+        self._set_saving(False)
+        super().reject()
+
+    def reject(self) -> None:
+        """Cancel, Esc and the close button do nothing while a save is running."""
+        if not self._saving:
+            super().reject()
+
+    def _set_saving(self, saving: bool) -> None:
+        self._saving = saving
+        self._fields.setEnabled(not saving)
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
         save = self.buttons.button(QDialogButtonBox.StandardButton.Save)
         if save is not None:
-            save.setEnabled(not busy)
+            save.setEnabled(not (self._busy or self._saving))
+        cancel = self.buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel is not None:
+            cancel.setEnabled(not self._saving)
 
     def _append_step(self, text: str, done: bool, step_id: int | None) -> QListWidgetItem:
         item = QListWidgetItem(text)
@@ -242,7 +283,7 @@ class ActionEditor(QDialog):
 
     def _save(self) -> None:
         action = self._action
-        if action is None or self._busy:
+        if action is None or self._busy or self._saving:
             return
         title = self.title.text().strip()
         notes = self.notes.toPlainText()
@@ -273,5 +314,7 @@ class ActionEditor(QDialog):
             if steps == self._original
             else [StepEdit(step_id=step_id, text=text, done=done) for step_id, text, done in steps]
         )
+        # Lock first: the window may answer with keep_open() before emit() returns.
+        self._set_saving(True)
+        self.status.setText("Saving…")
         self.save_requested.emit(action, edit, plan)
-        self.accept()

@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, date, datetime
+from typing import Any
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialogButtonBox
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.actions import ActionEdit, ActionFilter, ActionStatus
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.services.actions import ActionConflictError
 from mailbrief.ui.digest_view import ACCEPT, DISMISS
@@ -127,6 +128,7 @@ async def test_editing_saves_through_the_backend_and_withdraws_undo(
     assert isinstance(edit, ActionEdit) and edit.title == "Send the final deck"
     assert window.status.text() == "Saved: Send the final deck."
     assert window.undo_button.isHidden()
+    assert not window.action_editor.isVisible()  # Closed only once the save succeeded.
 
 
 async def test_a_stale_action_reloads_the_views(window: MainWindow, backend: FakeBackend) -> None:
@@ -310,3 +312,170 @@ async def test_a_save_after_the_window_closes_starts_nothing(window: MainWindow)
     assert window.task is None
     assert spy.mock_calls == []
     await window.shutdown()
+
+
+def click_save(window: MainWindow) -> None:
+    button = window.action_editor.buttons.button(QDialogButtonBox.StandardButton.Save)
+    assert button is not None
+    button.click()
+
+
+def edit_everything(window: MainWindow) -> None:
+    """Open the editor on OPEN and change its title, notes and plan."""
+    window.actions_panel.edit_button.click()
+    editor = window.action_editor
+    editor.title.setText("Send the final deck")
+    editor.notes.setPlainText("Ask Sam for the churn slide.")
+    editor.add_step.click()
+    added = editor.steps.item(editor.steps.count() - 1)
+    assert added is not None
+    added.setText("Book a review")
+
+
+EDITED = ("Send the final deck", "Ask Sam for the churn slide.", [(None, "Book a review", False)])
+
+
+def edits(window: MainWindow) -> tuple[str, str, list[tuple[int | None, str, bool]]]:
+    editor = window.action_editor
+    return editor.title.text(), editor.notes.toPlainText(), editor._current_steps()
+
+
+async def test_the_editor_stays_open_while_its_save_runs(
+    window: MainWindow, backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await window.initialize()
+    release = asyncio.Event()
+    save_action = backend.save_action
+
+    async def slow_save(*args: Any) -> Action:
+        await release.wait()
+        return await save_action(*args)
+
+    monkeypatch.setattr(backend, "save_action", slow_save)
+    edit_everything(window)
+
+    click_save(window)
+    await asyncio.sleep(0)
+
+    editor = window.action_editor
+    assert editor.isVisible()
+    assert editor.status.text() == "Saving…"
+    assert not editor.title.isEnabled()
+    QTest.keyClick(editor, Qt.Key.Key_Escape)
+    assert editor.isVisible()
+    release.set()
+    await finish(window)
+    assert not editor.isVisible()
+    assert window.status.text() == "Saved: Send the final deck."
+
+
+async def test_a_conflicting_save_keeps_the_edits_and_reloads(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    edit_everything(window)
+    backend.action_fail = ActionConflictError("stale")
+    loads, lists = backend.loads, backend.list_calls
+
+    click_save(window)
+    await finish(window)
+
+    editor = window.action_editor
+    assert editor.isVisible()
+    assert editor.status.text() == (
+        "This action changed since you opened it. Your edits are still here — copy what you "
+        "need, then Cancel and reopen the action."
+    )
+    assert edits(window) == EDITED
+    assert editor.title.isEnabled()
+    assert (backend.loads, backend.list_calls) == (loads + 1, lists + 3)
+    assert window.status.text() == "That changed or is no longer available; the view was reloaded."
+    editor.reject()  # Cancel works again.
+    assert not editor.isVisible()
+
+
+async def test_a_failed_save_keeps_the_edits_and_lets_the_owner_retry(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    edit_everything(window)
+    backend.action_fail = RuntimeError("database is locked")
+
+    click_save(window)
+    await finish(window)
+
+    editor = window.action_editor
+    assert editor.isVisible()
+    assert editor.status.text() == "Couldn't save. Your edits are still here; try again."
+    assert edits(window) == EDITED
+    assert window.status.text() == "Operation failed. The displayed saved brief is unchanged."
+    assert "database is locked" not in editor.status.text() + window.status.text()
+
+    click_save(window)  # The failure was one-off, so the retry saves.
+    await finish(window)
+
+    assert not editor.isVisible()
+    assert window.status.text() == "Saved: Send the final deck."
+    assert [call[0] for call in backend.action_calls] == ["save_action", "save_action"]
+
+
+async def test_a_save_while_another_operation_runs_keeps_the_editor_open(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    edit_everything(window)
+    editor = window.action_editor
+    editor._set_saving(True)  # As if Save was clicked just before another operation began.
+    window.start(window._generate)
+    await asyncio.sleep(0)
+
+    editor.save_requested.emit(
+        OPEN,
+        ActionEdit(
+            title="Too soon", ownership=OPEN.ownership, effort=None, target_date=None, notes=""
+        ),
+        None,
+    )
+
+    assert editor.isVisible()
+    assert editor.status.text() == "MailBrief is busy; try again in a moment."
+    assert edits(window) == EDITED
+    assert editor.title.isEnabled()
+    assert backend.action_calls == []
+    window.cancel()
+    await finish(window)
+
+
+@pytest.mark.parametrize("outcome", [None, ActionConflictError("stale"), RuntimeError("locked")])
+async def test_quitting_during_a_save_lets_it_finish_and_shuts_down(
+    window: MainWindow,
+    backend: FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: Exception | None,
+) -> None:
+    await window.initialize()
+    release = asyncio.Event()
+    save_action = backend.save_action
+
+    async def slow_save(*args: Any) -> Action:
+        await release.wait()
+        backend.action_fail = outcome
+        return await save_action(*args)
+
+    monkeypatch.setattr(backend, "save_action", slow_save)
+    edit_everything(window)
+    click_save(window)
+    await asyncio.sleep(0)
+
+    window.close()
+
+    assert not window.action_editor.isVisible()
+    shutdown = asyncio.create_task(window.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()  # The save is not cancelled; shutdown waits for it.
+    release.set()
+    await shutdown
+    assert backend.closed
+    assert backend.action_calls[-1][0] == "save_action"
+    assert not window.action_editor.isVisible()
+    assert window.action_editor.status.text() == "Saving…"  # Nothing more to tell anyone.
