@@ -22,6 +22,9 @@ later use after Microsoft Entra access is resolved.
   graphical settings, and native packaging scripts.
   See [desktop usage, builds and remaining acceptance](docs/m5-desktop.md).
   macOS package execution and packaged live-account checks remain pending.
+- Implemented, awaiting live acceptance: M6 action suggestions on the brief, accepted
+  actions with editable plans and target dates, open/waiting/completed lists and undo.
+  See [M6 actions](docs/m6-actions.md).
 
 ## Start here
 
@@ -33,6 +36,7 @@ later use after Microsoft Entra access is resolved.
 - [Gmail metadata synchronization and shortlist review](docs/gmail-metadata.md)
 - [Gmail bodies (M3) and live acceptance](docs/gmail-bodies.md)
 - [AI analysis, consent and the daily brief (M4)](docs/ai-analysis.md)
+- [Actions, target dates and plans (M6)](docs/m6-actions.md)
 - [File change map](docs/change-map.md)
 - [Microsoft work retained for later](docs/microsoft-setup.md)
 
