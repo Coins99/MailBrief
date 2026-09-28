@@ -43,6 +43,8 @@ class FakeBackend:
         self.loads = 0
         self.action_calls: list[tuple[object, ...]] = []
         self.action_fail: Exception | None = None
+        self.list_calls = 0
+        self.list_fail: Exception | None = None
         self.actions: dict[ActionFilter, tuple[Action, ...]] = {}
         self.candidates: tuple[str, ...] = ("message-1",)
         self.closed = False
@@ -76,7 +78,9 @@ class FakeBackend:
             raise failure
 
     async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]:
-        await self._act("list_actions", view)
+        self.list_calls += 1
+        if self.list_fail is not None:
+            raise self.list_fail
         return self.actions.get(view, ())
 
     async def accept_suggestion(self, suggestion_id: int) -> Action:
