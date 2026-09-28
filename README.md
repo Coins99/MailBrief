@@ -25,6 +25,8 @@ later use after Microsoft Entra access is resolved.
 - Implemented, awaiting live acceptance: M6 action suggestions on the brief, accepted
   actions with editable plans and target dates, open/waiting/completed lists and undo.
   See [M6 actions](docs/m6-actions.md).
+- M7 in progress on feat/m7-drafts: local drafts and notes implemented; AI drafting next.
+  See [M7 drafts, notes and messages](docs/m7-drafts.md).
 
 ## Start here
 
@@ -37,6 +39,7 @@ later use after Microsoft Entra access is resolved.
 - [Gmail bodies (M3) and live acceptance](docs/gmail-bodies.md)
 - [AI analysis, consent and the daily brief (M4)](docs/ai-analysis.md)
 - [Actions, target dates and plans (M6)](docs/m6-actions.md)
+- [Drafts, notes and messages (M7)](docs/m7-drafts.md)
 - [File change map](docs/change-map.md)
 - [Microsoft work retained for later](docs/microsoft-setup.md)
 

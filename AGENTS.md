@@ -24,6 +24,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   editable plans and target dates, open/waiting/completed lists and undo (desktop, plus
   `brief --show` and `mailbrief-gmail-diagnostic actions`). See `docs/m6-actions.md` and
   ADR 0011.
+- M7 in progress on feat/m7-drafts: local drafts and notes implemented; AI drafting next.
+  Replies, emails, notes and messages with autosave, versions, copy and export (desktop,
+  plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md` and ADR 0012.
 
 ## Layout (ports and adapters)
 
@@ -32,17 +35,20 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
   `providers/groq/`: active AI adapter (Structured Outputs), API key store and factory.
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
-  analysis, deadlines, digest and brief; for M6: actions.
-- `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`, and
-  `actions.py` for suggestions, decisions and accepted actions.
+  analysis, deadlines, digest and brief; for M6: actions; for M7: drafts.
+- `src/mailbrief/domain/drafts.py`: draft kinds, limits, placeholders and exports.
+- `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
+  `actions.py` for suggestions, decisions and accepted actions, and `drafts.py` for drafts,
+  their versions and source snapshots.
   Alembic revisions live in `migrations/versions/`.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
-- `src/mailbrief/infra/`: HTTP retry classification and `vault.py`, the explicit OS
-  credential vault.
+- `src/mailbrief/infra/`: HTTP retry classification, `vault.py`, the explicit OS
+  credential vault, and `files.py`, atomic writes for exports the owner chooses.
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
-  desktop service composition, saved-brief display, the actions pane and editor; `app.py`
-  owns the qasync loop.
+  desktop service composition, saved-brief display, the actions pane and editor, the
+  drafts pane (`drafts_view.py`) and editor (`draft_editor.py`); `app.py` owns the qasync
+  loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
 
@@ -72,6 +78,17 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   the action's revision, and every change except restoring a deleted action needs the
   revision the caller saw. Change decisions and actions through ORM objects, never bulk
   UPDATE or DELETE statements, which leave loaded rows stale.
+- Drafts and notes belong to the owner (ADR 0012). They may store the owner's writing
+  (title or subject, recipients as typed, body and its versions), a source-email snapshot
+  (subject, sender address, link, received time) and an action link with a title snapshot.
+  They never store a downloaded incoming body, and MailBrief never inserts quoted incoming
+  history; text the owner types or pastes is stored as entered. They have no account
+  foreign key and survive message, cache, account and action deletion; delete is soft and
+  restorable. A draft keeps at most 100 versions. Draft text never reaches logs,
+  exceptions or files other than an export the owner chooses. Drafting never writes to the
+  mailbox, has no "sent" state and never changes an action. Every change needs the
+  revision the caller saw, except restoring a deleted draft; drafts and versions change
+  only through ORM objects.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
@@ -115,8 +132,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Tests mirror `src/` under `tests/`. Use `tests/factories.py`, `respx` for HTTP and
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
-- Coverage: at least 80% overall and 90% for the synchronization, ranking, body and digest
-  services.
+- Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest
+  and drafts services.
 
 ## Dormant Microsoft notes
 
