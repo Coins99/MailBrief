@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import QDate, Qt
@@ -242,3 +243,57 @@ def test_a_title_with_markup_appears_literally(editor: ActionEditor) -> None:
     editor.edit(make_action(title="<b>x</b> the deck"))
 
     assert editor.title.text() == "<b>x</b> the deck"
+
+
+CHICAGO_FIVE = make_action(
+    deadline_text="Friday 4 PM Central",
+    deadline_precision=DeadlinePrecision.DATETIME,
+    deadline_date=date(2026, 10, 2),
+    deadline_at_utc=datetime(2026, 10, 2, 21, 0, tzinfo=UTC),
+    deadline_timezone="America/Chicago",
+)
+
+
+def test_an_exact_deadline_reads_in_the_owner_s_zone_like_the_brief(editor: ActionEditor) -> None:
+    editor.edit(CHICAGO_FIVE, ZoneInfo("America/Toronto"))
+
+    assert editor.deadline.text() == (
+        "2026-10-02T17:00-04:00 (16:00 America/Chicago as the email states)"
+    )
+
+    editor.edit(CHICAGO_FIVE, ZoneInfo("America/Chicago"))
+    assert editor.deadline.text() == "2026-10-02T16:00-05:00 (as the email states)"
+
+
+@pytest.mark.parametrize(
+    "zone", [None, "UTC", "Pacific/Kiritimati", "Pacific/Pago_Pago", "America/Toronto"]
+)
+def test_a_date_deadline_reads_the_same_in_any_owner_zone(
+    editor: ActionEditor, zone: str | None
+) -> None:
+    dated = make_action(
+        deadline_text="by Friday",
+        deadline_precision=DeadlinePrecision.DATE,
+        deadline_date=date(2026, 10, 2),
+        deadline_timezone="America/Toronto",
+    )
+
+    editor.edit(dated, None if zone is None else ZoneInfo(zone))
+
+    assert editor.deadline.text() == "2026-10-02 (date only)"
+
+
+def test_an_owner_in_utc_sees_utc_and_the_email_s_own_time(editor: ActionEditor) -> None:
+    toronto_five = make_action(
+        deadline_text="Friday 5 PM",
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_date=date(2026, 10, 2),
+        deadline_at_utc=datetime(2026, 10, 2, 21, 0, tzinfo=UTC),
+        deadline_timezone="America/Toronto",
+    )
+
+    editor.edit(toronto_five, ZoneInfo("UTC"))
+
+    assert editor.deadline.text() == (
+        "2026-10-02T21:00+00:00 (17:00 America/Toronto as the email states)"
+    )

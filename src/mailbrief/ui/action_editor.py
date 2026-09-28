@@ -52,11 +52,16 @@ def _plain(text: str) -> QLabel:
     return label
 
 
-def _deadline(action: Action) -> str:
+def _deadline(action: Action, owner_zone: ZoneInfo | None) -> str:
+    """An exact deadline in the owner's zone, like the brief, naming the email's own time
+    when the email stated it in another zone."""
     at, zone = action.deadline_at_utc, action.deadline_timezone
     if action.deadline_precision is DeadlinePrecision.DATETIME and at and zone:
         stated = at.astimezone(ZoneInfo(zone))  # The zone the time was stated in, not UTC.
-        return f"{stated.isoformat(timespec='minutes')} (as the email states)"
+        shown = at.astimezone(owner_zone) if owner_zone is not None else stated
+        if owner_zone is None or owner_zone.key == zone:
+            return f"{shown.isoformat(timespec='minutes')} (as the email states)"
+        return f"{shown.isoformat(timespec='minutes')} ({stated:%H:%M} {zone} as the email states)"
     if action.deadline_precision is DeadlinePrecision.DATE and action.deadline_date:
         return f"{action.deadline_date.isoformat()} (date only)"
     if action.deadline_text:
@@ -136,8 +141,11 @@ class ActionEditor(QDialog):
         self.buttons.rejected.connect(self.reject)
         self._busy = False
 
-    def edit(self, action: Action) -> None:
-        """Show one action's current values; nothing is kept from an earlier edit."""
+    def edit(self, action: Action, zone: ZoneInfo | None = None) -> None:
+        """Show one action's current values; nothing is kept from an earlier edit.
+
+        ``zone`` is the owner's, so an exact deadline reads like it does in the brief.
+        """
         self._action = action
         self.title.setText(action.title)
         self.owner.setCurrentIndex([value for value, _ in _OWNERS].index(action.ownership))
@@ -146,7 +154,7 @@ class ActionEditor(QDialog):
         self.target.setEnabled(action.target_date is not None)
         shown = action.target_date or action.suggested_target_date or date.today()
         self.target.setDate(QDate(shown.year, shown.month, shown.day))
-        self.deadline.setText(_deadline(action))
+        self.deadline.setText(_deadline(action, zone))
         if action.suggested_target_date is not None and action.target_reason is not None:
             self.suggested.setText(
                 f"{action.suggested_target_date.isoformat()}, "

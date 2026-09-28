@@ -1,7 +1,8 @@
 """The window's action flows: lists at startup, complete, reopen, delete, edit and undo."""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import QDialogButtonBox
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionEdit, ActionFilter, ActionStatus
+from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.services.actions import ActionConflictError
 from mailbrief.ui.digest_view import ACCEPT, DISMISS
 from mailbrief.ui.main_window import MainWindow
@@ -252,3 +254,59 @@ async def test_enter_on_an_action_row_opens_the_editor_for_it(
     assert window.action_editor.isVisible()
     assert window.action_editor.title.text() == "Send the deck"
     window.action_editor.reject()
+
+
+async def test_the_editor_shows_deadlines_in_the_window_s_zone(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    backend.actions = {
+        ActionFilter.OPEN: (
+            make_action(
+                deadline_text="Friday 4 PM Central",
+                deadline_precision=DeadlinePrecision.DATETIME,
+                deadline_date=date(2026, 10, 2),
+                deadline_at_utc=datetime(2026, 10, 2, 21, 0, tzinfo=UTC),
+                deadline_timezone="America/Chicago",
+            ),
+        )
+    }
+    window.zone = ZoneInfo("America/Toronto")
+    await window.initialize()
+
+    window.actions_panel.edit_button.click()
+
+    assert window.action_editor.deadline.text().startswith("2026-10-02T17:00-04:00 (16:00")
+
+
+async def test_closing_the_window_dismisses_an_open_editor(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    window.actions_panel.edit_button.click()
+    assert window.action_editor.isVisible()
+
+    window.close()
+
+    assert not window.action_editor.isVisible()
+    assert window.task is None or window.task.done()
+    await window.shutdown()
+
+
+async def test_a_save_after_the_window_closes_starts_nothing(window: MainWindow) -> None:
+    await window.initialize()
+    spy = AsyncMock()
+    window.backend = spy
+    window.close()
+
+    window.action_editor.save_requested.emit(
+        OPEN,
+        ActionEdit(
+            title="Too late", ownership=OPEN.ownership, effort=None, target_date=None, notes=""
+        ),
+        None,
+    )
+    await asyncio.sleep(0)
+
+    assert window.task is None
+    assert spy.mock_calls == []
+    await window.shutdown()

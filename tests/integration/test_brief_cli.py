@@ -943,3 +943,23 @@ def test_brief_show_prints_no_terminal_control_characters_the_ai_wrote(
     assert re.search(r"^   \[pending #\d+\] .*Approve the budget \(mine\)$", output, re.MULTILINE)
     assert re.search(r"^     - Check .*the totals$", output, re.MULTILINE)
     assert re.search(r"^     - .*Reply to finance$", output, re.MULTILINE)
+
+
+@pytest.mark.parametrize(
+    ("action", "documented"),
+    [
+        ("list", ("--database", "--view {open,waiting,completed}", "--timezone")),
+        ("accept", ("--database", "suggestion_id")),
+        ("dismiss", ("--database", "suggestion_id")),
+    ],
+)
+def test_each_actions_subcommand_has_the_options_the_docs_show(
+    action: str, documented: tuple[str, ...], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exited:
+        gmail.main(["actions", action, "--help"])
+
+    assert exited.value.code == 0
+    shown = capsys.readouterr().out
+    for option in documented:
+        assert option in shown
