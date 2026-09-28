@@ -377,6 +377,27 @@ def test_a_rejected_key_exits_4_with_the_ai_key_hint(
     ]
 
 
+def test_answers_groq_could_not_finish_explain_the_output_limit(
+    tmp_path: Path,
+    mailbox: Mailbox,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = respx_mock.post(CHAT_URL).respond(400, json=error_body("json_validate_failed"))
+    replies(monkeypatch, "yes")
+
+    assert run_brief(tmp_path / "brief.sqlite3") == 4
+
+    output = capsys.readouterr().out
+    assert route.call_count == 2  # The one message is tried once more.
+    assert (
+        "Groq couldn't finish some answers within the output limit, so they were left out. "
+        "Try again, or raise MAILBRIEF_AI_MAX_OUTPUT_TOKENS."
+    ) in output
+    assert "rejected" not in output and "Groq detail" not in output
+
+
 @pytest.mark.parametrize(
     ("code", "detail"),
     [

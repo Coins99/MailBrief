@@ -99,6 +99,10 @@ _AI_ERROR_MESSAGES = {
     ),
     "AI_NETWORK_ERROR": "Could not reach Groq; check your connection and retry.",
     "AI_PROVIDER_ERROR": "Groq request failed; check MAILBRIEF_GROQ_MODEL.",
+    "AI_OUTPUT_INCOMPLETE": (
+        "Groq couldn't finish some answers within the output limit, so they were left out. "
+        "Try again, or raise MAILBRIEF_AI_MAX_OUTPUT_TOKENS."
+    ),
     "ANALYSIS_FAILED": "No message could be analyzed.",
 }
 
