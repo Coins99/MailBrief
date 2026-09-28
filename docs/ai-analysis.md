@@ -17,12 +17,15 @@ exceptions. Usage metadata is retained even with ZDR. See
    It is kept only in Windows Credential Manager or the macOS Keychain, under
    `MailBrief.Groq`. `ai-key status` says whether one is saved; `ai-key clear` removes it.
 2. Set `MAILBRIEF_GROQ_MODEL` to `openai/gpt-oss-120b`, which supports strict Structured Outputs on Groq.
-   This model name does not require an OpenAI API account.
+   This model name does not require an OpenAI API account. MailBrief asks `openai/gpt-oss-*`
+   models for low reasoning effort, because their reasoning shares the output limit with
+   the answer; other models get no reasoning setting, since Groq rejects values a model
+   does not support.
 3. Optional settings:
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
-| `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` | 2000 | 256-64000 | Output limit per Groq call |
+| `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` | 4000 | 256-64000 | Output limit per Groq call, reasoning included |
 | `MAILBRIEF_AI_MAX_REQUESTS_PER_RUN` | 10 | 1-1000 | Maximum HTTP attempts per connection/run, including retries |
 | `MAILBRIEF_AI_TIMEOUT_SECONDS` | 120 | 10-600 | Time limit per request |
 | `MAILBRIEF_AI_BODY_CHARACTER_LIMIT` | 4000 | 1-8000 | Prepared body characters per email |
@@ -40,7 +43,7 @@ uv run mailbrief-gmail-diagnostic ai-key status
 $env:MAILBRIEF_GROQ_MODEL = "openai/gpt-oss-120b"
 $env:MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH = "C:\path\to\gmail-client.json"
 $env:MAILBRIEF_AI_MAX_REQUESTS_PER_RUN = "5"
-$env:MAILBRIEF_AI_MAX_OUTPUT_TOKENS = "2000"
+$env:MAILBRIEF_AI_MAX_OUTPUT_TOKENS = "4000"
 uv run mailbrief-gmail-diagnostic brief
 ```
 
@@ -63,7 +66,7 @@ every other message has had its first attempt; a message Groq rejects is not sen
 MailBrief stops making requests, retains successful analyses and reports a partial brief
 (exit 4), or preserves the previous brief if nothing could be analyzed.
 
-The example above permits at most five requests with at most 2,000 output tokens each.
+The example above permits at most five requests with at most 4,000 output tokens each.
 On paid plans, input tokens are also billable. These controls are not a dollar cap:
 starting another run resets the counter, and processes have separate counters.
 

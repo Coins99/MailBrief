@@ -60,10 +60,13 @@ never evidence.
 
 ## Live acceptance checklist
 
-1. [ ] On a throwaway database, send yourself an email with two requests and a Friday
-   deadline, then run `brief --database <tmp path> --show`. Two `[pending #N]` lines
-   appear with targets and steps; the `AI:` line shows no Groq rejection, and output
-   tokens per request stay well under 2,000.
+1. [ ] On a throwaway database, send yourself two emails: one with five separate requests,
+   one of them due Friday, and one written in Chinese. Run
+   `brief --database <tmp path> --show` with `openai/gpt-oss-120b`. The first shows five
+   `[pending #N]` lines and the second its own, with targets and steps. No message is
+   reported as "Incomplete" or rejected by Groq. Record the output tokens per request
+   (the `AI:` line's output tokens divided by its requests): ______; they stay under
+   4,000.
 2. [ ] `actions accept N`, `actions dismiss M` and `actions list` behave as described.
    Rerun `brief --database <tmp path> --yes --show`: the accepted suggestion shows
    `[accepted]`, the dismissed one is gone, and `AI: nothing sent this run`.

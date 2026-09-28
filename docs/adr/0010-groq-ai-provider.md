@@ -41,3 +41,15 @@ See [the implementation plan](../groq-migration-plan.md) and
   naming an unreported zone keeps only the date. Stored evidence is at most 300 characters
   and never a whole body (schema version 3). Legacy deadline rows load without being
   hidden. Calls are paced when the token window is smaller than the last call.
+
+## Amendment (2026-09-28)
+
+- The default output limit is 4,000 tokens, up from 2,000. Since M6, one email with five
+  full suggestions is about 6,600 characters of JSON (about 1,650 to 2,200 tokens), and
+  gpt-oss's reasoning shares `max_completion_tokens` with that answer, so 2,000 could cut
+  off the emails with several requests that M6 is for.
+- MailBrief sends `reasoning_effort: "low"` only to `openai/gpt-oss-*` models. Groq
+  rejects a value a model does not support with HTTP 400, so other models get none.
+- The prompt version is `groq-2026-09-28.1`, so results cached under the earlier prompt
+  are not reused. Nothing sent to Groq about the email changes, so the schema version (6)
+  and the consent disclosure (version 2) stay as they were.

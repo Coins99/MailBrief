@@ -38,6 +38,8 @@ from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.providers.groq.provider import (
     AUTH_MESSAGE,
+    GPT_OSS_MODEL_PREFIX,
+    GPT_OSS_REASONING_EFFORT,
     INSTRUCTIONS,
     PRIVACY_NOTICE,
     PROMPT_VERSION,
@@ -64,8 +66,8 @@ BODY = "Please approve the quarterly budget by Friday 5 PM."
 MARKER = "GROQ-ERROR-MARKER-5d2e"
 REQUEST_KEYS = {"model", "messages", "response_format", "max_completion_tokens"}
 PINNED_PROMPT = (
-    "groq-2026-09-27.1",
-    "dcb4f920ac7c811790f6ec9f3e0573c0ce8f38face4c6a0672e766573e585a10",
+    "groq-2026-09-28.1",
+    "9912995de884fe8bd2d094eff1eef74ee1763725c52242fcd023e46173134366",
 )
 STEP_5_3_KEYS = {
     "message_key",
@@ -171,11 +173,34 @@ def test_the_prompt_version_changes_with_the_prompt_or_schema() -> None:
     schema = json.dumps(
         AnalysisWireBatch.model_json_schema(), sort_keys=True, separators=(",", ":")
     )
-    fingerprint = hashlib.sha256(f"{INSTRUCTIONS}\n{schema}".encode()).hexdigest()
+    options = f"{GPT_OSS_MODEL_PREFIX}*: reasoning_effort={GPT_OSS_REASONING_EFFORT}"
+    fingerprint = hashlib.sha256(f"{INSTRUCTIONS}\n{schema}\n{options}".encode()).hexdigest()
 
     assert (PROMPT_VERSION, fingerprint) == PINNED_PROMPT, (
-        "prompt or schema changed: bump PROMPT_VERSION and this hash"
+        "prompt, schema or request options changed: bump PROMPT_VERSION and this hash"
     )
+
+
+@pytest.mark.parametrize(
+    ("model", "reasoning_effort"),
+    [("openai/gpt-oss-120b", "low"), ("openai/gpt-oss-20b", "low"), ("test-model", None)],
+)
+async def test_only_gpt_oss_is_asked_for_low_reasoning_effort(
+    respx_mock: respx.MockRouter,
+    sleeps: RecordedSleeps,
+    model: str,
+    reasoning_effort: str | None,
+) -> None:
+    route = respx_mock.post(CHAT_URL).mock(side_effect=answer_every_message)
+    settings = Settings(groq_model=model)
+
+    async with groq_provider(settings, key_store=store(), sleep=sleeps) as built:
+        await built.analyze([make_request()])
+
+    body = json.loads(route.calls.last.request.content)
+    assert body.get("reasoning_effort") == reasoning_effort
+    assert set(body) - {"reasoning_effort"} == REQUEST_KEYS
+    assert (body["model"], body["max_completion_tokens"]) == (model, 4_000)
 
 
 def test_actions_are_a_required_array_of_strict_objects_without_limits() -> None:

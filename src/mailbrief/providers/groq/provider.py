@@ -41,7 +41,7 @@ from mailbrief.ports.errors import (
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "groq-2026-09-27.1"
+PROMPT_VERSION = "groq-2026-09-28.1"
 CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 PROVIDER_NAME = "groq"
 MAX_RETRIES = 3
@@ -97,6 +97,12 @@ INSTRUCTIONS = (
     "subject or body that supports this action, at most 160 characters, without ellipses."
 )
 
+# gpt-oss reasons before it answers, and its reasoning shares max_completion_tokens with the
+# answer, so low effort leaves room for five full suggestions. Groq rejects a
+# reasoning_effort value a model does not support with HTTP 400, so only gpt-oss gets one.
+GPT_OSS_MODEL_PREFIX = "openai/gpt-oss-"
+GPT_OSS_REASONING_EFFORT = "low"
+
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _ERROR_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 # Statuses that reject this particular request; other requests may still succeed.
@@ -144,6 +150,13 @@ class AnalysisWireBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     results: list[AnalysisWireResult]
+
+
+def _model_options(model: str) -> dict[str, str]:
+    """Request options that depend on the model: low reasoning effort for gpt-oss only."""
+    if model.startswith(GPT_OSS_MODEL_PREFIX):
+        return {"reasoning_effort": GPT_OSS_REASONING_EFFORT}
+    return {}
 
 
 def _received_local(request: AnalysisRequest) -> str:
@@ -413,6 +426,7 @@ class GroqProvider:
                             },
                         },
                         "max_completion_tokens": self._max_output_tokens,
+                        **_model_options(self._model),
                     },
                     headers={
                         "Authorization": f"Bearer {key.get_secret_value()}",
