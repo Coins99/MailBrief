@@ -574,6 +574,31 @@ def test_head_schema_matches_the_orm(tmp_path: Path) -> None:
         "fk_suggestion_decisions_action_id_actions",
         "uq_suggestion_decisions_identity",
     }
+    assert set(migrated_schema) >= _DRAFT_TABLES
+    assert created_schema["drafts"]["constraints"] == {
+        "pk_drafts",
+        "uq_drafts_public_id",
+        "ck_drafts_kind_known",
+        "ck_drafts_revision_positive",
+        "fk_drafts_action_id_actions",
+    }
+    assert created_schema["draft_versions"]["constraints"] == {
+        "pk_draft_versions",
+        "uq_draft_versions_number",
+        "ck_draft_versions_number_positive",
+        "ck_draft_versions_origin_known",
+        "fk_draft_versions_draft_id_drafts",
+    }
+    assert created_schema["draft_sources"]["constraints"] == {
+        "pk_draft_sources",
+        "uq_draft_sources_message",
+        "fk_draft_sources_draft_id_drafts",
+        "fk_draft_sources_message_id_messages",
+    }
+    assert created_schema["drafts"]["indexes"] == {
+        ("ix_drafts_updated_at_utc", ("updated_at_utc",)),
+        ("ix_drafts_action_id", ("action_id",)),
+    }
 
 
 def test_alembic_ini_keeps_existing_loggers_enabled(tmp_path: Path) -> None:
@@ -701,3 +726,103 @@ def test_stable_decisions_keep_every_decision_and_never_reuse_suggestion_ids(
 
     assert _identity_decisions(path) == identified
     assert _query(path, "SELECT id FROM action_suggestions ORDER BY id") == [(4,), (10,)]
+
+
+_DRAFT_TABLES = {"drafts", "draft_versions", "draft_sources"}
+_DRAFT_ID = "5b1d7c2e-3f4a-4b6c-8d9e-0a1b2c3d4e5f"
+
+
+def _use_draft_tables(path: Path, action_id: int) -> None:
+    """At revision 0007: one reply draft linked to the action and message, with a version."""
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        draft_id = connection.execute(
+            "INSERT INTO drafts(public_id,kind,action_id,action_title,created_at_utc,"
+            "updated_at_utc) VALUES(?,'reply',?,'Approve it','2026-09-28 00:00:00',"
+            "'2026-09-28 00:00:00')",
+            (_DRAFT_ID, action_id),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO draft_versions(draft_id,number,origin,created_at_utc) "
+            "VALUES(?,1,'created','2026-09-28 00:00:00')",
+            (draft_id,),
+        )
+        connection.execute(
+            "INSERT INTO draft_sources(draft_id,message_id,provider_message_id,subject,"
+            "sender_address,web_link,received_at_utc) VALUES(?,1,'message-1','Subject',"
+            "'sender@example.com','https://example.com','2026-09-25 00:00:00')",
+            (draft_id,),
+        )
+        defaults = connection.execute(
+            "SELECT title,to_text,cc_text,body,revision,deleted_at_utc FROM drafts"
+        ).fetchone()
+        version = connection.execute(
+            "SELECT title,to_text,cc_text,body FROM draft_versions"
+        ).fetchone()
+        for rejected in (
+            "UPDATE drafts SET kind='letter'",
+            "UPDATE drafts SET revision=0",
+            "UPDATE draft_versions SET number=0",
+            "UPDATE draft_versions SET origin='imported'",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(rejected)
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            connection.execute(
+                "INSERT INTO draft_versions(draft_id,number,origin,created_at_utc) "
+                "VALUES(?,1,'edited','2026-09-28 00:00:00')",
+                (draft_id,),
+            )
+        # Deleting the action and the message leaves the draft and its snapshots.
+        connection.execute("DELETE FROM suggestion_decisions")
+        connection.execute("DELETE FROM actions WHERE id = ?", (action_id,))
+        connection.execute("DELETE FROM digest_items")
+        connection.execute("DELETE FROM analyses")
+        connection.execute("DELETE FROM messages")
+        connection.commit()
+    assert defaults == ("", "", "", "", 1, None)
+    assert version == ("", "", "", "")
+
+
+def test_draft_tables_upgrade_and_downgrade_keep_existing_rows(tmp_path: Path) -> None:
+    path = tmp_path / "m6.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)
+    command.upgrade(config, "20260928_0006")
+    kept = (*_OLD_ROWS, "actions", "action_suggestions", "suggestion_decisions")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260928_0007")
+
+    assert table_names(path) >= _DRAFT_TABLES
+    assert _rows(path, kept) == before
+    assert _foreign_keys(path, "drafts") == {("actions", "action_id", "id", "SET NULL")}
+    assert _foreign_keys(path, "draft_versions") == {("drafts", "draft_id", "id", "CASCADE")}
+    assert _foreign_keys(path, "draft_sources") == {
+        ("drafts", "draft_id", "id", "CASCADE"),
+        ("messages", "message_id", "id", "SET NULL"),
+    }
+    _use_draft_tables(path, action_id)
+    assert _query(path, "SELECT public_id,action_id,action_title FROM drafts") == [
+        (_DRAFT_ID, None, "Approve it")
+    ]
+    assert _query(path, "SELECT message_id,subject FROM draft_sources") == [(None, "Subject")]
+    assert _query(path, "SELECT count(*) FROM draft_versions") == [(1,)]
+    assert _query(path, "PRAGMA foreign_key_check") == []
+    after_use = _rows(path, ("accounts", "digests", "action_suggestions"))
+
+    command.downgrade(config, "20260928_0006")
+
+    assert not _DRAFT_TABLES & table_names(path)
+    assert _rows(path, ("accounts", "digests", "action_suggestions")) == after_use
+    fresh = tmp_path / "fresh-0006.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260928_0006")
+    assert _schema(path) == _schema(fresh)
+
+    command.upgrade(config, "head")
+
+    assert table_names(path) >= _DRAFT_TABLES
+    assert _query(path, "SELECT count(*) FROM drafts") == [(0,)]
