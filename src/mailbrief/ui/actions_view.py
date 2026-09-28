@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.actions import Action, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
+from mailbrief.ui.deadline_text import deadline_text
 
 EDIT = "edit"
 COMPLETE = "complete"
@@ -36,14 +37,16 @@ _TAB_NAMES = {
 
 
 def describe(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> str:
-    """One line of plain text naming the action and what matters about it now."""
+    """One line of plain text naming the action and what matters about it now.
+
+    An exact deadline is shown in ``zone``, the owner's.
+    """
     details: list[str] = []
     if action.target_date is not None:
         details.append(f"target {action.target_date.isoformat()}")
-    if action.deadline_date is not None:
-        details.append(f"due {action.deadline_date.isoformat()}")
-    elif action.deadline_text:
-        details.append(f"due “{action.deadline_text}”")
+    due = deadline_text(action, zone)
+    if due is not None:
+        details.append(f"due {due}")
     if action.steps:
         done = sum(step.done for step in action.steps)
         details.append(f"{done}/{len(action.steps)} steps")

@@ -60,6 +60,28 @@ def row_text(panel: ActionsPanel, view: ActionFilter, row: int = 0) -> str:
     return item.text()
 
 
+def test_an_exact_deadline_reads_in_the_owner_s_zone(panel: ActionsPanel) -> None:
+    friday_night = action(
+        4,
+        deadline_text="Friday 11 PM Pacific",
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_date=date(2026, 10, 2),
+        deadline_at_utc=datetime(2026, 10, 3, 6, 0, tzinfo=UTC),
+        deadline_timezone="America/Los_Angeles",
+    )
+    toronto = ZoneInfo("America/Toronto")
+
+    panel.show_actions(
+        ActionFilter.OPEN,
+        (friday_night,),
+        today=date(2026, 10, 2),
+        zone=toronto,
+        now=datetime(2026, 10, 2, 16, tzinfo=UTC),
+    )
+
+    assert row_text(panel, ActionFilter.OPEN) == "Action 4 — due 2026-10-03 02:00"  # Saturday.
+
+
 def test_rows_are_plain_text_with_dates_progress_and_state(panel: ActionsPanel) -> None:
     late = action(
         1,

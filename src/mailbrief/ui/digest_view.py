@@ -11,13 +11,17 @@ from PySide6.QtWidgets import QTextBrowser
 from mailbrief.domain.actions import TARGET_REASON_TEXT, SuggestionState, SuggestionView
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.digests import DailyDigest
+from mailbrief.ui.deadline_text import deadline_text
 
 ACCEPT = "accept"
 DISMISS = "dismiss"
 
 
-def _suggestion_html(view: SuggestionView, accept: str, dismiss: str) -> str:
-    """One pending suggestion; every mail- or AI-derived string is escaped."""
+def _suggestion_html(view: SuggestionView, accept: str, dismiss: str, zone: ZoneInfo) -> str:
+    """One pending suggestion; every mail- or AI-derived string is escaped.
+
+    An exact deadline is shown in ``zone``, the brief's, like the message's own deadline.
+    """
     suggestion = view.suggestion
     owner = "yours" if suggestion.ownership is ActionOwnership.MINE else "waiting for someone"
     detail = [owner]
@@ -26,8 +30,9 @@ def _suggestion_html(view: SuggestionView, accept: str, dismiss: str) -> str:
             f"target {suggestion.suggested_target_date.isoformat()}, "
             f"{TARGET_REASON_TEXT[suggestion.target_reason]}"
         )
-    if suggestion.deadline_date is not None:
-        detail.append(f"due {suggestion.deadline_date.isoformat()}")
+    due = deadline_text(suggestion, zone)
+    if due is not None:
+        detail.append(f"due {due}")
     steps = "".join(f"<li>{escape(step)}</li>" for step in suggestion.steps)
     return (
         f"<p>Suggested: {escape(suggestion.title)} ({escape('; '.join(detail))})<br>"
@@ -114,7 +119,9 @@ class DigestView(QTextBrowser):
                     dismiss = f"mailbrief:dismiss/{view.suggestion_id}"
                     self._suggestions[accept] = (ACCEPT, view.suggestion_id)
                     self._suggestions[dismiss] = (DISMISS, view.suggestion_id)
-                    parts.append(_suggestion_html(view, accept, dismiss))
+                    parts.append(
+                        _suggestion_html(view, accept, dismiss, ZoneInfo(digest.timezone_name))
+                    )
             source = item.source_url
             if source.scheme == "https" and source.host == "mail.google.com":
                 link = f"mailbrief:source/{index}"

@@ -144,6 +144,53 @@ def test_a_suggestion_without_dates_names_only_its_owner(qtbot: QtBot) -> None:
     assert line == "Suggested: Book the room (yours)"  # No "target" or "due" part.
 
 
+def test_an_exact_suggestion_deadline_reads_in_the_brief_s_zone(qtbot: QtBot) -> None:
+    view = DigestView()
+    qtbot.addWidget(view)
+    friday_night = SuggestionView(
+        suggestion_id=11,
+        state=SuggestionState.PENDING,
+        suggestion=make_suggestion(
+            position=0,
+            title="Send the contract",
+            fingerprint=fingerprint_of("contract"),
+            steps=(),
+            deadline_text="Friday 11 PM Pacific",
+            deadline_precision=DeadlinePrecision.DATETIME,
+            deadline_date=date(2026, 10, 2),
+            deadline_at_utc=datetime(2026, 10, 3, 6, 0, tzinfo=UTC),
+            deadline_timezone="America/Los_Angeles",
+        ),
+    )
+
+    view.show_digest(brief(friday_night).model_copy(update={"timezone_name": "America/Toronto"}))
+
+    (line,) = [line for line in view.toPlainText().splitlines() if line.startswith("Suggested:")]
+    assert line == "Suggested: Send the contract (yours; due 2026-10-03 02:00)"  # Saturday.
+
+
+def test_an_unresolved_suggestion_deadline_shows_its_words(qtbot: QtBot) -> None:
+    view = DigestView()
+    qtbot.addWidget(view)
+    soon = SuggestionView(
+        suggestion_id=12,
+        state=SuggestionState.PENDING,
+        suggestion=make_suggestion(
+            position=0,
+            title="Reply to <Sam>",
+            fingerprint=fingerprint_of("sam"),
+            steps=(),
+            deadline_text="<b>soon</b>",
+            deadline_precision=DeadlinePrecision.UNRESOLVED,
+        ),
+    )
+
+    view.show_digest(brief(soon))
+
+    assert "Suggested: Reply to <Sam> (yours; due “<b>soon</b>”)" in view.toPlainText()
+    assert "<b>soon" not in view.toHtml()
+
+
 def test_suggestion_links_can_be_reached_from_the_keyboard(qtbot: QtBot) -> None:
     view = DigestView()
     qtbot.addWidget(view)
