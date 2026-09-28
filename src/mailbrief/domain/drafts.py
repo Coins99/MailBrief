@@ -130,6 +130,12 @@ class DraftEdit(DomainModel):
     def has_recipients(self) -> bool:
         return bool(self.to_text.strip() or self.cc_text.strip())
 
+    def content(self) -> "DraftEdit":
+        """Just the text, as an edit that would save it unchanged."""
+        return DraftEdit(
+            title=self.title, to_text=self.to_text, cc_text=self.cc_text, body=self.body
+        )
+
 
 class Draft(DraftEdit):
     """A draft the owner is writing, with its links and the revision it was read at."""
@@ -167,12 +173,6 @@ class Draft(DraftEdit):
     def display_title(self) -> str:
         """The title, else the body's first line (up to 80 characters), else "Untitled …"."""
         return self.title.strip() or first_line(self.body) or f"Untitled {self.kind.value}"
-
-    def content(self) -> DraftEdit:
-        """Just the text, as an edit that would save it unchanged."""
-        return DraftEdit(
-            title=self.title, to_text=self.to_text, cc_text=self.cc_text, body=self.body
-        )
 
 
 class DraftSummary(DomainModel):
