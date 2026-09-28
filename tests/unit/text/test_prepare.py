@@ -190,6 +190,8 @@ def test_quoted_apple_forward_is_never_trimmed() -> None:
         ("Line one\n\tLine two\r\n", "Line one Line two"),
         ("回复会议邀请 👍", "回复会议邀请 👍"),
         ("\x00\x07\x1b", ""),
+        ("by Friday\rDeadline none", "by Friday Deadline none"),
+        ("by\x1cFriday\x85soon\x0bnow\u2028ok", "by Friday soon now ok"),
     ],
 )
 def test_generated_text_loses_control_and_format_characters(raw: str, clean: str) -> None:

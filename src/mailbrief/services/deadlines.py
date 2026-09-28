@@ -13,6 +13,7 @@ from mailbrief.domain.analysis import (
     TargetReason,
 )
 from mailbrief.text.matching import appears_in
+from mailbrief.text.prepare import clean_generated_text
 
 _PAST_DAYS = 31
 _FUTURE_DAYS = 366
@@ -152,7 +153,9 @@ def resolve_deadline_fields(
     date. The zone for a time is chosen by _zone_for_time; when there is none, only the day
     is kept. Offsets are never guessed.
     """
-    text = _clean(text)
+    # The phrase is shown and printed later, so it is cleaned like AI-written text. Matching
+    # ignores whitespace differences, so cleaning never stops a real quote from matching.
+    text = None if text is None else clean_generated_text(text) or None
     raw_date = _clean(raw_date)
     raw_time = _clean(raw_time)
     stated_zone = _clean(stated_zone)

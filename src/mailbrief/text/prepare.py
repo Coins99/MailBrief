@@ -43,12 +43,13 @@ def clean_generated_text(text: str) -> str:
 
     Terminal escape sequences, bidirectional overrides and invisible padding are removed, so
     an email that steers the model's output can neither drive a terminal nor disguise text.
-    Line breaks and tabs become single spaces.
+    Every kind of whitespace, including carriage returns and other line or record
+    separators, becomes a single space, so matching text against the email still works.
     """
     kept = "".join(
-        " " if ch in "\n\t" else ch
+        " " if ch.isspace() else ch
         for ch in text
-        if ch in "\n\t" or (ch not in _FILLERS and unicodedata.category(ch) not in {"Cc", "Cf"})
+        if ch.isspace() or (ch not in _FILLERS and unicodedata.category(ch) not in {"Cc", "Cf"})
     )
     return " ".join(kept.split())
 

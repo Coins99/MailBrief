@@ -542,3 +542,37 @@ def test_suggest_target_takes_an_instant_on_its_day_in_the_owner_zone() -> None:
 )
 def test_suggest_target_needs_a_dated_deadline(deadline: ResolvedDeadline) -> None:
     assert suggest_target(deadline, request()) == (None, None)
+
+
+@pytest.mark.parametrize("separator", ["\r", "\x1c", "\x85", "\x0b", "\u2028"])
+def test_a_deadline_phrase_keeps_no_control_character_that_could_move_a_terminal(
+    separator: str,
+) -> None:
+    request = AnalysisRequest(
+        message_key="k1",
+        subject="Plan",
+        sender=EmailContact(address="alex@example.com"),
+        received_at_utc=datetime(2026, 9, 16, 12, tzinfo=UTC),
+        timezone_name="UTC",
+        body_text="Please reply by Friday Deadline none so we can plan.",
+    )
+
+    resolved = resolve_deadline_fields(
+        f"by Friday{separator}Deadline none", None, None, None, request
+    )
+
+    assert resolved.text == "by Friday Deadline none"
+
+
+def test_a_deadline_phrase_with_an_escape_character_still_does_not_quote_the_email() -> None:
+    request = AnalysisRequest(
+        message_key="k1",
+        subject="Plan",
+        sender=EmailContact(address="alex@example.com"),
+        received_at_utc=datetime(2026, 9, 16, 12, tzinfo=UTC),
+        timezone_name="UTC",
+        body_text="Please reply by Friday so we can plan.",
+    )
+
+    with pytest.raises(InvalidDeadlineError):
+        resolve_deadline_fields("by\x1bFriday", None, None, None, request)
