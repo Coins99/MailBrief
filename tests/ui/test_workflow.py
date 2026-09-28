@@ -48,6 +48,8 @@ class FakeBackend(FakeDrafts):
         self.list_calls = 0
         self.list_fail: Exception | None = None
         self.actions: dict[ActionFilter, tuple[Action, ...]] = {}
+        self.action_counts: dict[ActionFilter, int] = {}
+        self.count_calls: list[ActionFilter] = []
         self.candidates: tuple[str, ...] = ("message-1",)
         self.closed = False
         self.cleaned = False
@@ -84,6 +86,10 @@ class FakeBackend(FakeDrafts):
         if self.list_fail is not None:
             raise self.list_fail
         return self.actions.get(view, ())
+
+    async def count_actions(self, view: ActionFilter) -> int:
+        self.count_calls.append(view)
+        return self.action_counts.get(view, len(self.actions.get(view, ())))
 
     async def accept_suggestion(self, suggestion_id: int) -> Action:
         await self._act("accept_suggestion", suggestion_id)

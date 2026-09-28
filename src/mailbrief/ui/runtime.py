@@ -261,6 +261,10 @@ class DesktopRuntime:
         async with self._storage().session() as session:
             return await ActionService(session).restore(public_id)
 
+    async def count_actions(self, view: ActionFilter) -> int:
+        async with self._storage().session() as session:
+            return await ActionService(session).count_actions(view)
+
     # Drafts use local storage only: no call here reaches Gmail, Groq or the network.
 
     async def list_drafts(self) -> tuple[DraftSummary, ...]:

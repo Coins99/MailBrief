@@ -42,6 +42,7 @@ from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.actions import (
+    COMPLETED_LIST_LIMIT,
     ActionConflictError,
     ActionNotFoundError,
     SuggestionNotFoundError,
@@ -102,6 +103,7 @@ class DesktopBackend(Protocol):
     async def reopen_action(self, public_id: str, revision: int) -> Action: ...
     async def delete_action(self, public_id: str, revision: int) -> None: ...
     async def restore_action(self, public_id: str) -> Action: ...
+    async def count_actions(self, view: ActionFilter) -> int: ...
     async def list_drafts(self) -> tuple[DraftSummary, ...]: ...
     async def get_draft(self, public_id: str) -> Draft: ...
     async def create_draft(self, kind: DraftKind) -> Draft: ...
@@ -129,7 +131,7 @@ _STALE = (
 _DRAFT_STALE = (DraftConflictError, DraftNotFoundError)
 _PICK_ONE = "Select at least one message to analyze, or Cancel."
 _NOT_REFRESHED = "The view could not be refreshed; restart MailBrief to see the latest."
-_EDITOR_WAIT = "MailBrief is busy; try again in a moment."
+_BUSY = "MailBrief is busy; try again in a moment."
 _EDITOR_STALE = (
     "This action changed since you opened it. Your edits are still here — copy what you "
     "need, then Cancel and reopen the action."
@@ -391,12 +393,15 @@ class MainWindow(QMainWindow):
         today = now.astimezone(self.zone).date()
         try:
             for view in ActionFilter:
+                actions = await self.backend.list_actions(view)
+                # Only the completed list is capped; say so when more exist.
+                total = (
+                    await self.backend.count_actions(view)
+                    if view is ActionFilter.COMPLETED and len(actions) >= COMPLETED_LIST_LIMIT
+                    else None
+                )
                 self.actions_panel.show_actions(
-                    view,
-                    await self.backend.list_actions(view),
-                    today=today,
-                    zone=self.zone,
-                    now=now,
+                    view, actions, today=today, zone=self.zone, now=now, total=total
                 )
         except Exception as exc:
             self._note_not_refreshed(exc)
@@ -417,11 +422,16 @@ class MainWindow(QMainWindow):
         self.status.setText("That changed or is no longer available; the view was reloaded.")
         await self._refresh_views()
 
+    def _start_from_link(self, operation: Callable[[], Awaitable[None]]) -> None:
+        """Brief links stay clickable while busy, so a refused click says why."""
+        if not self.start(operation, cancellable=False) and not self._closing:
+            self.status.setText(_BUSY)
+
     def _request_suggestion(self, kind: str, suggestion_id: int) -> None:
         if kind == ACCEPT:
-            self.start(lambda: self._accept_suggestion(suggestion_id), cancellable=False)
+            self._start_from_link(lambda: self._accept_suggestion(suggestion_id))
         elif kind == DISMISS:
-            self.start(lambda: self._dismiss_suggestion(suggestion_id), cancellable=False)
+            self._start_from_link(lambda: self._dismiss_suggestion(suggestion_id))
 
     async def _accept_suggestion(self, suggestion_id: int) -> None:
         try:
@@ -475,7 +485,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         started = self.start(lambda: self._save_action(action, edit, steps), cancellable=False)
         if not started and not self._closing:
-            self.action_editor.keep_open(_EDITOR_WAIT)
+            self.action_editor.keep_open(_BUSY)
 
     async def _complete_action(self, action: Action) -> None:
         try:
@@ -544,11 +554,10 @@ class MainWindow(QMainWindow):
     # through draft_writes, so typing never makes the window busy.
 
     def _request_reply(self, account_email: str, message_id: str) -> None:
-        self.start(
+        self._start_from_link(
             lambda: self._open_new_draft(
                 lambda: self.backend.create_reply_draft(account_email, message_id)
-            ),
-            cancellable=False,
+            )
         )
 
     def _request_action_draft(self, kind: DraftKind, action: Action) -> None:

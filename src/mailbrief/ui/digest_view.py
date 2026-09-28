@@ -1,6 +1,6 @@
 """Saved brief rendering: escaped content, Gmail sources and suggestion decisions."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -59,6 +59,8 @@ class DigestView(QTextBrowser):
         self._sources: dict[str, str] = {}
         self._suggestions: dict[str, tuple[str, int]] = {}
         self._replies: dict[str, tuple[str, str]] = {}
+        # The brief shown: account, local date and when it was generated.
+        self._shown: tuple[str, date, datetime] | None = None
         self.setPlainText("No saved brief yet. Connect Gmail, then sync and review your shortlist.")
 
     def _open_source(self, url: QUrl) -> None:
@@ -76,6 +78,12 @@ class DigestView(QTextBrowser):
             self.reply_requested.emit(*reply)
 
     def show_digest(self, digest: DailyDigest) -> None:
+        """Render a brief. Re-rendering the same brief, as after Accept or Dismiss, keeps the
+        reader's place; a different brief starts at the top."""
+        identity = (digest.account_id, digest.local_date, digest.generated_at_utc)
+        same = identity == self._shown
+        position = self.verticalScrollBar().value()
+        self._shown = identity
         self._sources.clear()
         self._suggestions.clear()
         self._replies.clear()
@@ -142,3 +150,4 @@ class DigestView(QTextBrowser):
                 links.append(f'<a href="{link}">Open source in Gmail</a>')
             parts.append(f"<p>{' · '.join(links)}</p>")
         self.setHtml("".join(parts))
+        self.verticalScrollBar().setValue(position if same else 0)

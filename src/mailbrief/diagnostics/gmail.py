@@ -40,6 +40,7 @@ from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
 from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PROVIDER_NAME
 from mailbrief.services.actions import (
+    COMPLETED_LIST_LIMIT,
     ActionConflictError,
     ActionNotFoundError,
     ActionService,
@@ -592,6 +593,11 @@ async def actions(
                 print("Dismissed.")
                 return 0
             listed = await service.list_actions(ActionFilter(view))
+            total = (
+                await service.count_actions(ActionFilter.COMPLETED)
+                if view == ActionFilter.COMPLETED.value and len(listed) >= COMPLETED_LIST_LIMIT
+                else len(listed)
+            )
     finally:
         await database.dispose()
     if not listed:
@@ -618,6 +624,8 @@ async def actions(
         if item.status is ActionStatus.OPEN and item.is_overdue(now):
             line += "; overdue"
         print(line)
+    if total > len(listed):
+        print(f"Showing the newest {len(listed)} of {total} completed actions.")
     return 0
 
 

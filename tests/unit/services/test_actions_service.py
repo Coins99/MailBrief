@@ -1197,3 +1197,58 @@ async def test_save_changes_nothing_when_its_plan_is_rejected(
         await service.save(action.public_id, 7, edit)
 
     assert await service.get(action.public_id) == action
+
+
+async def add_bare_actions(
+    session: AsyncSession, count: int, *, status: str, ownership: str = "mine", start: int = 0
+) -> None:
+    """Actions straight into storage, completed a minute apart when completed."""
+    for index in range(start, start + count):
+        done = status == ActionStatus.COMPLETED.value
+        session.add(
+            ActionTable(
+                public_id=f"00000000-0000-4000-8000-{index:012d}",
+                title=f"Action {index}",
+                ownership=ownership,
+                status=status,
+                deadline_precision="none",
+                notes="",
+                created_at_utc=START,
+                updated_at_utc=START,
+                completed_at_utc=START + timedelta(minutes=index) if done else None,
+                revision=1,
+            )
+        )
+    await session.commit()
+
+
+async def test_open_and_waiting_lists_are_never_capped(
+    session: AsyncSession, service: ActionService
+) -> None:
+    await add_bare_actions(session, 205, status="open")
+    await add_bare_actions(session, 203, status="open", ownership="waiting_for", start=205)
+
+    assert len(await service.list_actions(ActionFilter.OPEN)) == 205
+    assert len(await service.list_actions(ActionFilter.WAITING)) == 203
+    assert await service.count_actions(ActionFilter.OPEN) == 205
+    assert await service.count_actions(ActionFilter.WAITING) == 203
+    assert await service.count_actions(ActionFilter.COMPLETED) == 0
+
+
+async def test_the_completed_list_shows_the_newest_200_and_counts_the_rest(
+    session: AsyncSession, service: ActionService
+) -> None:
+    await add_bare_actions(session, 203, status="completed")
+    deleted = await session.scalar(select(ActionTable).where(ActionTable.title == "Action 202"))
+    assert deleted is not None
+    deleted.deleted_at_utc = START
+    await session.commit()
+
+    listed = await service.list_actions(ActionFilter.COMPLETED)
+
+    assert len(listed) == 200
+    assert (listed[0].title, listed[-1].title) == ("Action 201", "Action 2")
+    assert await service.count_actions(ActionFilter.COMPLETED) == 202  # Not the deleted one.
+    assert len(await service.list_actions(ActionFilter.COMPLETED, limit=5)) == 5
+    rows = await ActionRepository(session).list_rows(ActionFilter.COMPLETED, limit=None)
+    assert len(rows) == 202  # Storage lists them all when asked without a cap.

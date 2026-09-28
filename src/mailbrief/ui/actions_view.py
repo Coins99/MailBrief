@@ -182,8 +182,13 @@ class ActionsPanel(QWidget):
         today: date,
         zone: ZoneInfo,
         now: datetime,
+        total: int | None = None,
     ) -> None:
-        """Replace one view's list, keeping the selection on the same action when it remains."""
+        """Replace one view's list, keeping the selection on the same action when it remains.
+
+        ``total`` is how many the view holds when the list shows only some, so the tab can
+        say "Completed (200+)".
+        """
         listing = self.lists[view]
         previous = self._actions[view]
         row = listing.currentRow()
@@ -197,7 +202,10 @@ class ActionsPanel(QWidget):
             listing.setCurrentRow(ids.index(kept))
         elif actions:
             listing.setCurrentRow(min(max(row, 0), len(actions) - 1))
-        self.tabs.setTabText(list(ActionFilter).index(view), f"{_TAB_NAMES[view]} ({len(actions)})")
+        more = "+" if total is not None and total > len(actions) else ""
+        self.tabs.setTabText(
+            list(ActionFilter).index(view), f"{_TAB_NAMES[view]} ({len(actions)}{more})"
+        )
         self._update_buttons()
 
     def set_busy(self, busy: bool) -> None:
