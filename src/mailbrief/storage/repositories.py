@@ -43,6 +43,7 @@ from mailbrief.storage.tables import (
     DigestItemTable,
     DigestTable,
     MessageTable,
+    OwnerConsentTable,
     SyncRunTable,
 )
 from mailbrief.text.prepare import truncate_at_boundary
@@ -913,6 +914,63 @@ class ConsentRepository:
         )
         revoked = await self._session.scalars(stmt)
         return len(revoked.all())
+
+
+class OwnerConsentRepository:
+    """The owner's consents that belong to no account, such as AI drafting (ADR 0013).
+
+    Rows change through ORM objects, so loaded consents always show the latest state.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def _find(
+        self, provider: str, scope: str, disclosure_version: str
+    ) -> OwnerConsentTable | None:
+        result = await self._session.scalars(
+            select(OwnerConsentTable).where(
+                OwnerConsentTable.provider == provider,
+                OwnerConsentTable.scope == scope,
+                OwnerConsentTable.disclosure_version == disclosure_version,
+            )
+        )
+        return result.first()
+
+    async def get_active(
+        self, provider: str, scope: str, disclosure_version: str
+    ) -> OwnerConsentTable | None:
+        """The consent to this disclosure version, unless it has been revoked."""
+        consent = await self._find(provider, scope, disclosure_version)
+        return consent if consent is not None and consent.revoked_at_utc is None else None
+
+    async def grant(
+        self, provider: str, scope: str, disclosure_version: str, now_utc: datetime
+    ) -> OwnerConsentTable:
+        """Record consent, reactivating a revoked grant of the same disclosure version."""
+        consent = await self._find(provider, scope, disclosure_version)
+        if consent is None:
+            consent = OwnerConsentTable(
+                provider=provider, scope=scope, disclosure_version=disclosure_version
+            )
+            self._session.add(consent)
+        consent.granted_at_utc = normalize_utc(now_utc)
+        consent.revoked_at_utc = None
+        await self._session.flush()
+        return consent
+
+    async def revoke_all(self, provider: str, now_utc: datetime) -> int:
+        """Revoke every active consent to the provider, in every scope; return how many."""
+        result = await self._session.scalars(
+            select(OwnerConsentTable).where(
+                OwnerConsentTable.provider == provider,
+                OwnerConsentTable.revoked_at_utc.is_(None),
+            )
+        )
+        active = list(result.all())
+        for consent in active:
+            consent.revoked_at_utc = normalize_utc(now_utc)
+        return len(active)
 
 
 class SyncRunRepository:

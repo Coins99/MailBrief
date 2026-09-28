@@ -6,13 +6,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import event, inspect, select
+from sqlalchemy import event, func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.drafts import DraftEdit, DraftKind, DraftVersionOrigin
+from mailbrief.domain.drafting import DraftContextPart, DraftGenerationInfo
+from mailbrief.domain.drafts import DraftEdit, DraftKind, DraftLength, DraftTone, DraftVersionOrigin
 from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE, Database
-from mailbrief.storage.drafts import DraftRepository
-from mailbrief.storage.tables import DraftSourceTable, DraftTable, DraftVersionTable
+from mailbrief.storage.drafts import DraftRepository, generation_info, version_info
+from mailbrief.storage.tables import (
+    DraftGenerationTable,
+    DraftSourceTable,
+    DraftTable,
+    DraftVersionTable,
+)
 
 AT = datetime(2026, 9, 28, 13, tzinfo=UTC)
 
@@ -120,3 +126,74 @@ async def test_summaries_never_read_versions(database: Database, session: AsyncS
     }
     assert statements
     assert not any("draft_versions" in statement for statement in statements)
+
+
+INFO = DraftGenerationInfo(
+    provider="groq",
+    model="openai/gpt-oss-120b",
+    prompt_version="groq-draft-1",
+    tone=DraftTone.FORMAL,
+    length=DraftLength.LONG,
+    parts=frozenset({DraftContextPart.ACTION, DraftContextPart.CURRENT_TEXT}),
+    instructions="Keep it short",
+    missing_context=("the date",),
+    created_at_utc=AT,
+)
+
+
+async def test_generation_records_load_and_label_their_versions(session: AsyncSession) -> None:
+    (row,) = await add_drafts(session, 1)
+    repository = DraftRepository(session)
+    await repository.add_version(row.id, DraftVersionOrigin.CREATED, DraftEdit(), AT)
+    generated = await repository.add_version(
+        row.id, DraftVersionOrigin.GENERATED, DraftEdit(body="AI text"), AT
+    )
+    await repository.add_generation(generated.id, INFO)
+    await session.commit()
+
+    (newest, stored), (oldest, none) = await repository.version_rows(row.id)
+
+    assert (newest.number, oldest.number, none) == (2, 1, None)
+    assert stored is not None
+    assert stored.parts_json == ["action", "current_text"]
+    assert generation_info(stored) == INFO
+    labelled = version_info(newest, stored)
+    assert labelled.generation == INFO.summary()
+    assert version_info(oldest, None).generation is None
+
+
+async def test_a_damaged_generation_record_loses_only_its_label(session: AsyncSession) -> None:
+    (row,) = await add_drafts(session, 1)
+    repository = DraftRepository(session)
+    version = await repository.add_version(
+        row.id, DraftVersionOrigin.GENERATED, DraftEdit(body="x"), AT
+    )
+    await repository.add_generation(version.id, INFO)
+    stored = await repository.get_generation(version.id)
+    assert stored is not None
+    stored.model = ""
+    stored.parts_json = "not a list"  # type: ignore[assignment]
+
+    assert version_info(version, stored).generation is None
+    with pytest.raises(ValueError):
+        generation_info(stored)
+
+
+async def test_pruning_removes_generation_records_through_the_session(
+    session: AsyncSession,
+) -> None:
+    (row,) = await add_drafts(session, 1)
+    repository = DraftRepository(session)
+    first = await repository.add_version(
+        row.id, DraftVersionOrigin.GENERATED, DraftEdit(body="old"), AT
+    )
+    await repository.add_generation(first.id, INFO)
+    record = await repository.get_generation(first.id)
+    await repository.add_version(row.id, DraftVersionOrigin.EDITED, DraftEdit(body="new"), AT)
+
+    assert await repository.prune_versions(row.id, 1) == 1
+    await session.flush()
+
+    assert record is not None and inspect(record).was_deleted
+    count = await session.scalar(select(func.count()).select_from(DraftGenerationTable))
+    assert count == 0

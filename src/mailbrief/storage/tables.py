@@ -40,6 +40,8 @@ _PRECISION_CHECK = "deadline_precision IN ('none','unresolved','date','datetime'
 _OWNERSHIP_CHECK = "ownership IN ('mine','waiting_for')"
 _DRAFT_KIND_CHECK = "kind IN ('reply','email','note','message')"
 _DRAFT_ORIGIN_CHECK = "origin IN ('created','edited','restored','generated')"
+_DRAFT_TONE_CHECK = "tone IN ('neutral','warm','formal','direct')"
+_DRAFT_LENGTH_CHECK = "length IN ('short','medium','long')"
 
 
 class Base(DeclarativeBase):
@@ -541,3 +543,49 @@ class DraftSourceTable(Base):
     sender_address: Mapped[str] = mapped_column(String(320), nullable=False)
     web_link: Mapped[str] = mapped_column(Text, nullable=False)
     received_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class OwnerConsentTable(Base):
+    """The owner's consent to one use of an AI provider, such as drafting (ADR 0013).
+
+    It mirrors ``ai_consents`` without an account: drafting consent belongs to the owner.
+    A consent is active until it is revoked.
+    """
+
+    __tablename__ = "owner_consents"
+    __table_args__ = (
+        UniqueConstraint("provider", "scope", "disclosure_version", name="uq_owner_consents_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    disclosure_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    granted_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    revoked_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class DraftGenerationTable(Base):
+    """How a generated draft version was made; it goes when its version is pruned."""
+
+    __tablename__ = "draft_generations"
+    __table_args__ = (
+        UniqueConstraint("version_id", name="uq_draft_generations_version"),
+        CheckConstraint(_DRAFT_TONE_CHECK, name="tone_known"),
+        CheckConstraint(_DRAFT_LENGTH_CHECK, name="length_known"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version_id: Mapped[int] = mapped_column(
+        ForeignKey("draft_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    tone: Mapped[str] = mapped_column(String(16), nullable=False)
+    length: Mapped[str] = mapped_column(String(16), nullable=False)
+    parts_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    missing_context_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

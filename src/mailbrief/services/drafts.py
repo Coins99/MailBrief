@@ -270,10 +270,11 @@ class DraftService:
         return await self._write(run)
 
     async def versions(self, public_id: str) -> tuple[DraftVersionInfo, ...]:
-        """A live draft's kept versions, newest first."""
+        """A live draft's kept versions, newest first; generated ones say how they were made."""
         row = await self._live(public_id, None)
         return tuple(
-            version_info(version) for version in await self._repository.version_rows(row.id)
+            version_info(version, generation)
+            for version, generation in await self._repository.version_rows(row.id)
         )
 
     async def version(self, public_id: str, number: int) -> DraftVersion:

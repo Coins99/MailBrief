@@ -11,12 +11,16 @@ from pydantic import HttpUrl
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mailbrief.domain.drafting import DraftContextPart, DraftGenerationInfo
 from mailbrief.domain.drafts import (
     Draft,
     DraftEdit,
+    DraftGenerationSummary,
     DraftKind,
+    DraftLength,
     DraftSource,
     DraftSummary,
+    DraftTone,
     DraftVersion,
     DraftVersionInfo,
     DraftVersionOrigin,
@@ -26,6 +30,7 @@ from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
 from mailbrief.storage.tables import (
     ActionSourceTable,
     ActionTable,
+    DraftGenerationTable,
     DraftSourceTable,
     DraftTable,
     DraftVersionTable,
@@ -82,14 +87,48 @@ def draft_from_rows(
     )
 
 
-def version_info(row: DraftVersionTable) -> DraftVersionInfo:
-    """A version's list entry: its body's first line, or its title when the body is blank."""
+def generation_info(row: DraftGenerationTable) -> DraftGenerationInfo:
+    """Rebuild a generation record; raises ValueError when the row no longer validates."""
+    if not isinstance(row.parts_json, list) or not isinstance(row.missing_context_json, list):
+        raise ValueError("stored generation lists must be lists")
+    return DraftGenerationInfo(
+        provider=row.provider,
+        model=row.model,
+        prompt_version=row.prompt_version,
+        tone=DraftTone(row.tone),
+        length=DraftLength(row.length),
+        parts=frozenset(DraftContextPart(part) for part in row.parts_json),
+        instructions=row.instructions,
+        missing_context=tuple(row.missing_context_json),
+        created_at_utc=row.created_at_utc,
+    )
+
+
+def _summary(row: DraftGenerationTable | None) -> DraftGenerationSummary | None:
+    if row is None:
+        return None
+    try:
+        return DraftGenerationSummary(
+            tone=DraftTone(row.tone), length=DraftLength(row.length), model=row.model
+        )
+    except ValueError:
+        return None  # A record that no longer validates only loses its label.
+
+
+def version_info(
+    row: DraftVersionTable, generation: DraftGenerationTable | None = None
+) -> DraftVersionInfo:
+    """A version's list entry: its body's first line, or its title when the body is blank.
+
+    A generated version also says how it was made.
+    """
     return DraftVersionInfo(
         number=row.number,
         origin=DraftVersionOrigin(row.origin),
         created_at_utc=row.created_at_utc,
         preview=first_line(row.body) or first_line(row.title),
         length=len(row.body),
+        generation=_summary(generation),
     )
 
 
@@ -142,14 +181,43 @@ class DraftRepository:
         )
         return result.first()
 
-    async def version_rows(self, draft_id: int) -> list[DraftVersionTable]:
-        """Every kept version, newest first."""
-        result = await self._session.scalars(
-            select(DraftVersionTable)
+    async def version_rows(
+        self, draft_id: int
+    ) -> list[tuple[DraftVersionTable, DraftGenerationTable | None]]:
+        """Every kept version, newest first, with its generation record when it has one."""
+        result = await self._session.execute(
+            select(DraftVersionTable, DraftGenerationTable)
+            .outerjoin(
+                DraftGenerationTable, DraftGenerationTable.version_id == DraftVersionTable.id
+            )
             .where(DraftVersionTable.draft_id == draft_id)
             .order_by(DraftVersionTable.number.desc())
         )
-        return list(result.all())
+        return [(version, generation) for version, generation in result.tuples()]
+
+    async def get_generation(self, version_id: int) -> DraftGenerationTable | None:
+        result = await self._session.scalars(
+            select(DraftGenerationTable).where(DraftGenerationTable.version_id == version_id)
+        )
+        return result.first()
+
+    async def add_generation(self, version_id: int, info: DraftGenerationInfo) -> None:
+        """Record how a generated version was made."""
+        self._session.add(
+            DraftGenerationTable(
+                version_id=version_id,
+                provider=info.provider,
+                model=info.model,
+                prompt_version=info.prompt_version,
+                tone=info.tone.value,
+                length=info.length.value,
+                parts_json=sorted(part.value for part in info.parts),
+                instructions=info.instructions,
+                missing_context_json=list(info.missing_context),
+                created_at_utc=info.created_at_utc,
+            )
+        )
+        await self._session.flush()
 
     async def add_version(
         self, draft_id: int, origin: DraftVersionOrigin, content: DraftEdit, now: datetime
@@ -182,6 +250,9 @@ class DraftRepository:
         )
         old = list(result.all())
         for row in old:
+            generation = await self.get_generation(row.id)
+            if generation is not None:
+                await self._session.delete(generation)
             await self._session.delete(row)
         return len(old)
 

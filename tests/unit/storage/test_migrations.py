@@ -595,6 +595,17 @@ def test_head_schema_matches_the_orm(tmp_path: Path) -> None:
         "fk_draft_sources_draft_id_drafts",
         "fk_draft_sources_message_id_messages",
     }
+    assert created_schema["owner_consents"]["constraints"] == {
+        "pk_owner_consents",
+        "uq_owner_consents_scope",
+    }
+    assert created_schema["draft_generations"]["constraints"] == {
+        "pk_draft_generations",
+        "uq_draft_generations_version",
+        "ck_draft_generations_tone_known",
+        "ck_draft_generations_length_known",
+        "fk_draft_generations_version_id_draft_versions",
+    }
     assert created_schema["drafts"]["indexes"] == {
         ("ix_drafts_updated_at_utc", ("updated_at_utc",)),
         ("ix_drafts_action_id", ("action_id",)),
@@ -826,3 +837,88 @@ def test_draft_tables_upgrade_and_downgrade_keep_existing_rows(tmp_path: Path) -
 
     assert table_names(path) >= _DRAFT_TABLES
     assert _query(path, "SELECT count(*) FROM drafts") == [(0,)]
+
+
+_DRAFTING_TABLES = {"owner_consents", "draft_generations"}
+
+
+def test_drafting_tables_upgrade_and_downgrade_keep_drafts(tmp_path: Path) -> None:
+    path = tmp_path / "m7.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)
+    command.upgrade(config, "20260928_0007")
+    with closing(sqlite3.connect(path)) as connection:
+        draft_id = connection.execute(
+            "INSERT INTO drafts(public_id,kind,body,action_id,created_at_utc,updated_at_utc) "
+            "VALUES(?,'note','Mine',?,'2026-09-28 00:00:00','2026-09-28 00:00:00')",
+            (_DRAFT_ID, action_id),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO draft_versions(draft_id,number,origin,body,created_at_utc) "
+            "VALUES(?,1,'created','Mine','2026-09-28 00:00:00')",
+            (draft_id,),
+        )
+        connection.commit()
+    kept = ("drafts", "draft_versions", "actions")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260928_0008")
+
+    assert table_names(path) >= _DRAFTING_TABLES
+    assert _rows(path, kept) == before
+    assert _foreign_keys(path, "owner_consents") == set()
+    assert _foreign_keys(path, "draft_generations") == {
+        ("draft_versions", "version_id", "id", "CASCADE")
+    }
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        version_id = connection.execute(
+            "INSERT INTO draft_versions(draft_id,number,origin,body,created_at_utc) "
+            "VALUES(?,2,'generated','Theirs','2026-09-28 00:01:00')",
+            (draft_id,),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO draft_generations(version_id,provider,model,prompt_version,tone,length,"
+            "parts_json,missing_context_json,created_at_utc) VALUES(?,'groq','m','p','warm',"
+            "'short','[]','[]','2026-09-28 00:01:00')",
+            (version_id,),
+        )
+        connection.execute(
+            "INSERT INTO owner_consents(provider,scope,disclosure_version,granted_at_utc) "
+            "VALUES('groq','drafting','1','2026-09-28 00:00:00')"
+        )
+        instructions = connection.execute("SELECT instructions FROM draft_generations").fetchone()
+        for rejected in (
+            "UPDATE draft_generations SET tone='angry'",
+            "UPDATE draft_generations SET length='epic'",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(rejected)
+        for duplicate in (
+            "INSERT INTO owner_consents(provider,scope,disclosure_version,granted_at_utc) "
+            "VALUES('groq','drafting','1','2026-09-29 00:00:00')",
+            "INSERT INTO draft_generations(version_id,provider,model,prompt_version,tone,length,"
+            f"parts_json,missing_context_json,created_at_utc) VALUES({version_id},'groq','m','p',"
+            "'warm','short','[]','[]','2026-09-28 00:01:00')",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                connection.execute(duplicate)
+        connection.execute("DELETE FROM draft_versions WHERE id = ?", (version_id,))
+        remaining = connection.execute("SELECT count(*) FROM draft_generations").fetchone()
+        connection.commit()
+    assert instructions == ("",)
+    assert remaining == (0,)  # Pruning a version removes its record.
+    assert _query(path, "PRAGMA foreign_key_check") == []
+
+    command.downgrade(config, "20260928_0007")
+
+    assert not _DRAFTING_TABLES & table_names(path)
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0007.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260928_0007")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert table_names(path) >= _DRAFTING_TABLES
