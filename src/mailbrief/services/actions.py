@@ -230,6 +230,7 @@ class ActionService:
         """Add a suggestion's message to an existing action as another source.
 
         Repeating this for the same action returns it unchanged, even with an old revision.
+        Nothing exposes this yet: it is reserved for M8's thread continuity.
         """
 
         async def run(now: datetime) -> Action:
@@ -317,17 +318,6 @@ class ActionService:
 
         await self._write(run)
 
-    async def update(self, public_id: str, expected_revision: int, edit: ActionEdit) -> Action:
-        """Replace the action's own fields with the owner's edit."""
-
-        async def run(now: datetime) -> Action:
-            row = await self._live(public_id, expected_revision)
-            _apply_edit(row, edit)
-            _touch(row, now)
-            return await self._load(row)
-
-        return await self._write(run)
-
     async def save(
         self,
         public_id: str,
@@ -343,37 +333,6 @@ class ActionService:
             _apply_edit(row, edit)
             if steps is not None:
                 await self._apply_steps(row, steps, listed, now)
-            _touch(row, now)
-            return await self._load(row)
-
-        return await self._write(run)
-
-    async def set_steps(
-        self, public_id: str, expected_revision: int, steps: Sequence[StepEdit]
-    ) -> Action:
-        """Replace the plan: update listed steps, add new ones, delete the rest, in order."""
-
-        async def run(now: datetime) -> Action:
-            listed = _check_step_list(steps)
-            row = await self._live(public_id, expected_revision)
-            await self._apply_steps(row, steps, listed, now)
-            _touch(row, now)
-            return await self._load(row)
-
-        return await self._write(run)
-
-    async def set_step_done(
-        self, public_id: str, expected_revision: int, step_id: int, done: bool
-    ) -> Action:
-        """Mark one step done or not; the action's own status never changes here."""
-
-        async def run(now: datetime) -> Action:
-            row = await self._live(public_id, expected_revision)
-            steps = {step.id: step for step in await self._repository.step_rows(row.id)}
-            step = steps.get(step_id)
-            if step is None:
-                raise ActionConflictError("A step does not belong to this action.")
-            _mark(step, done, now)
             _touch(row, now)
             return await self._load(row)
 

@@ -501,7 +501,7 @@ async def test_a_manual_edit_survives_reanalysis_with_different_suggestions(
     seeded = await seed(session)
     accepted = await service.accept(seeded.suggestion_ids[0])
     clock.advance(minutes=5)
-    edited = await service.update(
+    edited = await service.save(
         accepted.public_id,
         1,
         ActionEdit(
@@ -511,11 +511,7 @@ async def test_a_manual_edit_survives_reanalysis_with_different_suggestions(
             target_date=date(2026, 9, 30),
             notes="Ask Sam for the churn slide.",
         ),
-    )
-    edited = await service.set_steps(
-        edited.public_id,
-        2,
-        [StepEdit(step_id=edited.steps[1].step_id, text="Draft the slides", done=True)],
+        [StepEdit(step_id=accepted.steps[1].step_id, text="Draft the slides", done=True)],
     )
     before = await counts(session)
     clock.advance(hours=1)
@@ -529,7 +525,7 @@ async def test_a_manual_edit_survives_reanalysis_with_different_suggestions(
 
     assert await service.get(accepted.public_id) == edited
     assert await counts(session) == before
-    assert edited.revision == 3
+    assert edited.revision == 2
     assert edited.updated_at_utc == START + timedelta(minutes=5)
 
 
@@ -539,9 +535,8 @@ async def test_a_manual_edit_survives_reanalysis_with_different_suggestions(
 @pytest.mark.parametrize(
     "change",
     [
-        "update",
-        "set_steps",
-        "set_step_done",
+        "save",
+        "save_with_plan",
         "complete",
         "delete",
         "unaccept",
@@ -553,7 +548,7 @@ async def test_a_stale_revision_conflicts_and_changes_nothing(
 ) -> None:
     seeded = await seed(session)
     first = await service.accept(seeded.suggestion_ids[0])
-    await service.update(
+    await service.save(
         first.public_id,
         1,
         ActionEdit(
@@ -562,21 +557,16 @@ async def test_a_stale_revision_conflicts_and_changes_nothing(
     )
     other = await seed(session, (suggestion(0, "Other"),), message="msg-2")
     stale = 1
+    lost = ActionEdit(
+        title="Lost", ownership=ActionOwnership.MINE, effort=None, target_date=None, notes=""
+    )
     calls: dict[str, Any] = {
-        "update": lambda: service.update(
+        "save": lambda: service.save(first.public_id, stale, lost),
+        "save_with_plan": lambda: service.save(
             first.public_id,
             stale,
-            ActionEdit(
-                title="Lost",
-                ownership=ActionOwnership.MINE,
-                effort=None,
-                target_date=None,
-                notes="",
-            ),
-        ),
-        "set_steps": lambda: service.set_steps(first.public_id, stale, []),
-        "set_step_done": lambda: service.set_step_done(
-            first.public_id, stale, first.steps[0].step_id, True
+            lost,
+            [StepEdit(step_id=first.steps[0].step_id, text="Collect the figures", done=True)],
         ),
         "complete": lambda: service.complete(first.public_id, stale),
         "delete": lambda: service.delete(first.public_id, stale),
@@ -603,7 +593,7 @@ async def test_reopen_with_a_stale_revision_conflicts(
         await service.reopen(action.public_id, 1)
 
 
-async def test_a_second_update_from_the_same_revision_conflicts_and_keeps_the_first(
+async def test_a_second_save_from_the_same_revision_conflicts_and_keeps_the_first(
     session: AsyncSession, service: ActionService
 ) -> None:
     seeded = await seed(session)
@@ -614,9 +604,9 @@ async def test_a_second_update_from_the_same_revision_conflicts_and_keeps_the_fi
             title=title, ownership=ActionOwnership.MINE, effort=None, target_date=None, notes=notes
         )
 
-    first = await service.update(action.public_id, 1, edit("From one screen", "First"))
+    first = await service.save(action.public_id, 1, edit("From one screen", "First"))
     with pytest.raises(ActionConflictError):
-        await service.update(action.public_id, 1, edit("From another screen", "Second"))
+        await service.save(action.public_id, 1, edit("From another screen", "Second"))
 
     assert await service.get(action.public_id) == first
     assert (first.title, first.notes, first.revision) == ("From one screen", "First", 2)
@@ -642,7 +632,7 @@ async def test_unaccept_is_refused_once_the_action_changed_or_has_two_sources(
 ) -> None:
     seeded = await seed(session)
     edited = await service.accept(seeded.suggestion_ids[0])
-    await service.update(
+    await service.save(
         edited.public_id,
         1,
         ActionEdit(
@@ -720,23 +710,41 @@ async def test_complete_and_reopen_set_and_clear_the_time_and_leave_steps(
 # Steps
 
 
-async def test_set_steps_keeps_ids_and_times_adds_new_ones_and_deletes_the_rest(
+def plan(action: Action) -> ActionEdit:
+    """The action's own fields as they are; the steps go to save() separately."""
+    return ActionEdit(
+        title=action.title,
+        ownership=action.ownership,
+        effort=action.effort,
+        target_date=action.target_date,
+        notes=action.notes,
+    )
+
+
+def steps(*items: tuple[int | None, str, bool]) -> list[StepEdit]:
+    return [StepEdit(step_id=step_id, text=text, done=done) for step_id, text, done in items]
+
+
+async def test_save_keeps_step_ids_and_times_adds_new_ones_and_deletes_the_rest(
     session: AsyncSession, service: ActionService, clock: Clock
 ) -> None:
     seeded = await seed(session)
     action = await service.accept(seeded.suggestion_ids[0])
     first, second = action.steps
     clock.advance(minutes=1)
-    done_once = await service.set_step_done(action.public_id, 1, first.step_id, True)
+    done_once = await service.save(
+        action.public_id,
+        1,
+        plan(action),
+        steps((first.step_id, first.text, True), (second.step_id, second.text, False)),
+    )
     clock.advance(minutes=1)
 
-    result = await service.set_steps(
+    result = await service.save(
         action.public_id,
         2,
-        [
-            StepEdit(step_id=None, text="Book a review", done=True),
-            StepEdit(step_id=first.step_id, text="Collect all the figures", done=True),
-        ],
+        plan(action),
+        steps((None, "Book a review", True), (first.step_id, "Collect all the figures", True)),
     )
 
     new, kept = result.steps
@@ -751,32 +759,33 @@ async def test_set_steps_keeps_ids_and_times_adds_new_ones_and_deletes_the_rest(
     assert second.step_id not in {step.step_id for step in result.steps}
     assert await count(session, ActionStepTable) == 2
 
-    undone = await service.set_steps(
-        action.public_id, 3, [StepEdit(step_id=kept.step_id, text=kept.text, done=False)]
+    undone = await service.save(
+        action.public_id, 3, plan(action), steps((kept.step_id, kept.text, False))
     )
     assert [(step.done, step.done_at_utc) for step in undone.steps] == [(False, None)]
 
 
-@pytest.mark.parametrize("problem", ["unknown", "duplicate", "too_many"])
-async def test_set_steps_rejects_bad_step_lists(
+@pytest.mark.parametrize("problem", ["unknown", "another_action", "duplicate", "too_many"])
+async def test_save_rejects_bad_step_lists(
     session: AsyncSession, service: ActionService, problem: str
 ) -> None:
     seeded = await seed(session)
     action = await service.accept(seeded.suggestion_ids[0])
+    theirs = await service.accept(seeded.suggestion_ids[1])
+    theirs = await service.save(theirs.public_id, 1, plan(theirs), steps((None, "Theirs", False)))
     first = action.steps[0].step_id
-    steps = {
-        "unknown": [StepEdit(step_id=999_999, text="Nope", done=False)],
-        "duplicate": [
-            StepEdit(step_id=first, text="A", done=False),
-            StepEdit(step_id=first, text="B", done=False),
-        ],
-        "too_many": [StepEdit(step_id=None, text=f"Step {n}", done=False) for n in range(31)],
+    bad = {
+        "unknown": steps((999_999, "Nope", False)),
+        "another_action": steps((theirs.steps[0].step_id, "Theirs", True)),
+        "duplicate": steps((first, "A", False), (first, "B", False)),
+        "too_many": steps(*((None, f"Step {n}", False) for n in range(31))),
     }[problem]
 
     with pytest.raises(ActionConflictError):
-        await service.set_steps(action.public_id, 1, steps)
+        await service.save(action.public_id, 1, plan(action), bad)
 
     assert await service.get(action.public_id) == action
+    assert await service.get(theirs.public_id) == theirs
 
 
 async def test_step_completion_and_action_completion_are_independent(
@@ -785,30 +794,20 @@ async def test_step_completion_and_action_completion_are_independent(
     seeded = await seed(session)
     action = await service.accept(seeded.suggestion_ids[0])
 
-    for step in action.steps:
-        action = await service.set_step_done(action.public_id, action.revision, step.step_id, True)
+    action = await service.save(
+        action.public_id,
+        1,
+        plan(action),
+        steps(*((step.step_id, step.text, True) for step in action.steps)),
+    )
     assert action.status is ActionStatus.OPEN
 
     other = await service.accept(seeded.suggestion_ids[1])
-    other = await service.set_steps(
-        other.public_id, 1, [StepEdit(step_id=None, text="Email facilities", done=False)]
+    other = await service.save(
+        other.public_id, 1, plan(other), steps((None, "Email facilities", False))
     )
     completed = await service.complete(other.public_id, 2)
     assert [step.done for step in completed.steps] == [False]
-
-
-async def test_set_step_done_rejects_a_step_of_another_action(
-    session: AsyncSession, service: ActionService
-) -> None:
-    seeded = await seed(session)
-    action = await service.accept(seeded.suggestion_ids[0])
-    other = await service.accept(seeded.suggestion_ids[1])
-    other = await service.set_steps(
-        other.public_id, 1, [StepEdit(step_id=None, text="Theirs", done=False)]
-    )
-
-    with pytest.raises(ActionConflictError):
-        await service.set_step_done(action.public_id, 1, other.steps[0].step_id, True)
 
 
 # Deleting and restoring
@@ -886,13 +885,13 @@ async def test_lists_filter_by_view_and_order_by_target_then_due_then_creation(
         fields.update(values)
         return ActionEdit(**fields)
 
-    await service.update(
+    await service.save(
         actions["Target late"].public_id, 1, edit("Target late", target_date=date(2026, 10, 9))
     )
-    await service.update(
+    await service.save(
         actions["Target early"].public_id, 1, edit("Target early", target_date=date(2026, 10, 1))
     )
-    await service.update(
+    await service.save(
         actions["Waiting"].public_id, 1, edit("Waiting", ownership=ActionOwnership.WAITING_FOR)
     )
     await service.complete(actions["Done"].public_id, 1)
