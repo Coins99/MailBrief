@@ -44,12 +44,29 @@ class DraftKind(StrEnum):
 
 
 class DraftVersionOrigin(StrEnum):
-    """Why a version was saved. GENERATED is reserved for AI drafting (M7 stage 2)."""
+    """Why a version was saved; GENERATED marks text written by AI drafting (ADR 0013)."""
 
     CREATED = "created"
     EDITED = "edited"
     RESTORED = "restored"
     GENERATED = "generated"
+
+
+class DraftTone(StrEnum):
+    """The tone the owner asks AI drafting for."""
+
+    NEUTRAL = "neutral"
+    WARM = "warm"
+    FORMAL = "formal"
+    DIRECT = "direct"
+
+
+class DraftLength(StrEnum):
+    """Short: about 80 words at most. Medium: about 80 to 200. Long: about 200 to 400."""
+
+    SHORT = "short"
+    MEDIUM = "medium"
+    LONG = "long"
 
 
 EMAIL_KINDS: Final = frozenset({DraftKind.REPLY, DraftKind.EMAIL})
@@ -200,8 +217,16 @@ class DraftSummary(DomainModel):
         return normalize_utc(value)
 
 
+class DraftGenerationSummary(DomainModel):
+    """How a generated version was made, as the versions list shows it."""
+
+    tone: DraftTone
+    length: DraftLength
+    model: str = Field(min_length=1, max_length=128)
+
+
 class DraftVersionInfo(DomainModel):
-    """One saved version as the versions list shows it."""
+    """One saved version as the versions list shows it; generated ones say how."""
 
     model_config = ConfigDict(hide_input_in_errors=True)
 
@@ -210,6 +235,7 @@ class DraftVersionInfo(DomainModel):
     created_at_utc: datetime
     preview: str = Field(max_length=PREVIEW_MAX_CHARS, repr=False)
     length: int = Field(ge=0)
+    generation: DraftGenerationSummary | None = None
 
     @field_validator("created_at_utc")
     @classmethod
