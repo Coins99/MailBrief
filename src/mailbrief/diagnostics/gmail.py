@@ -1,5 +1,5 @@
-"""Gmail connection checks, daily sync, body review, the consented AI brief, actions and
-local drafts."""
+"""Gmail connection checks, daily sync, body review, the consented AI brief, actions, local
+drafts and consented AI drafting."""
 
 import argparse
 import asyncio
@@ -25,10 +25,25 @@ from mailbrief.domain.actions import (
     SuggestionState,
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
-from mailbrief.domain.bodies import BodyStatus, PreparedBody
+from mailbrief.domain.bodies import BodyStatus, MessageBody, PreparedBody
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncStatus
-from mailbrief.domain.drafts import KIND_NAMES, export_markdown, export_text, still_to_fill
+from mailbrief.domain.drafting import (
+    DraftContextPart,
+    DraftingOptions,
+    DraftingOutcome,
+    DraftingPreview,
+    DraftingStatus,
+)
+from mailbrief.domain.drafts import (
+    KIND_NAMES,
+    DraftLength,
+    DraftTone,
+    export_markdown,
+    export_text,
+    placeholders,
+    still_to_fill,
+)
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.paths import AppPaths
@@ -57,6 +72,13 @@ from mailbrief.services.brief import (
 )
 from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.drafting import (
+    DRAFTING_DISCLOSURE_VERSION,
+    DRAFTING_SCOPE,
+    DraftingContextError,
+    DraftingService,
+)
+from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftNotFoundError, DraftService
 from mailbrief.services.ranking import ShortlistReviewError
 from mailbrief.storage.database import Database
@@ -65,6 +87,7 @@ from mailbrief.storage.repositories import (
     AccountRepository,
     ConsentRepository,
     MessageRepository,
+    OwnerConsentRepository,
     SyncRunRepository,
 )
 from mailbrief.text.prepare import clean_generated_text
@@ -103,7 +126,14 @@ _AI_ERROR_MESSAGES = {
         "Groq couldn't finish some answers within the output limit, so they were left out. "
         "Try again, or raise MAILBRIEF_AI_MAX_OUTPUT_TOKENS."
     ),
+    "AI_INVALID_OUTPUT": "Groq's answer couldn't be used; the draft is unchanged. Try again.",
+    "DRAFT_CHANGED": "The draft changed before Groq's text could be used; nothing was lost.",
     "ANALYSIS_FAILED": "No message could be analyzed.",
+}
+_DRAFTING_PARTS = {
+    "use_email": DraftContextPart.SOURCE_EMAIL,
+    "use_action": DraftContextPart.ACTION,
+    "use_text": DraftContextPart.CURRENT_TEXT,
 }
 
 
@@ -284,8 +314,13 @@ def ai_key(action: str) -> int:
     return 0
 
 
+def _granted(when: datetime | None) -> str:
+    return f"granted {when:%Y-%m-%d %H:%M} UTC" if when is not None else "not granted"
+
+
 async def ai_consent(action: str, *, database_path: Path | None) -> int:
-    """Show or revoke recorded Groq consent for every account; needs no Gmail connection."""
+    """Show or revoke recorded Groq consent: each account's for briefs, and the owner's for
+    AI drafting. Needs no Gmail connection."""
     path = database_path or AppPaths.from_qt().database_path
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
@@ -293,6 +328,7 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
         async with database.session() as session:
             accounts = await AccountRepository(session).list_all()
             consents = ConsentRepository(session)
+            owner = OwnerConsentRepository(session)
             if action == "status":
                 if not accounts:
                     print("No accounts in this database.")
@@ -300,19 +336,24 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
                     active = await consents.get_active(
                         account.id, PROVIDER_NAME, CONSENT_DISCLOSURE_VERSION
                     )
-                    state = (
-                        f"granted {active.granted_at_utc:%Y-%m-%d %H:%M} UTC"
-                        if active is not None
-                        else "not granted"
-                    )
-                    print(f"Account {account.id}: Groq consent {state}")
+                    when = None if active is None else active.granted_at_utc
+                    print(f"Account {account.id}: Groq consent {_granted(when)}")
+                drafting = await owner.get_active(
+                    PROVIDER_NAME, DRAFTING_SCOPE, DRAFTING_DISCLOSURE_VERSION
+                )
+                when = None if drafting is None else drafting.granted_at_utc
+                print(f"AI drafting: Groq consent {_granted(when)}")
                 return 0
             now = datetime.now(UTC)
-            revoked = 0
+            briefs = 0
             for account in accounts:
-                revoked += await consents.revoke_all(account.id, PROVIDER_NAME, now)
+                briefs += await consents.revoke_all(account.id, PROVIDER_NAME, now)
+            drafting_revoked = await owner.revoke_all(PROVIDER_NAME, now)
             await session.commit()
-            print(f"Groq consent revoked: {revoked}")
+            print(
+                f"Groq consent revoked: {briefs + drafting_revoked} "
+                f"(briefs {briefs}, drafting {drafting_revoked})"
+            )
             return 0
     finally:
         await database.dispose()
@@ -364,6 +405,122 @@ class CliConsentGate:
         if self._assume_yes:
             return True
         return (await _ask("Send? [y/N] ")).lower() in {"y", "yes"}
+
+
+class CliDraftingGate:
+    """Terminal approval for AI drafting: the same rules as the brief's consent."""
+
+    def __init__(self, *, assume_yes: bool) -> None:
+        self._assume_yes = assume_yes
+
+    async def request_drafting_consent(self, preview: DraftingPreview) -> bool:
+        for line in drafting_disclosure_lines(preview):
+            print(line)
+        if preview.first_use:
+            if self._assume_yes:
+                print(
+                    "First use needs your interactive consent; run drafts generate without --yes."
+                )
+                return False
+            return await _ask('Type "yes" to consent and send: ') == "yes"
+        if self._assume_yes:
+            return True
+        return (await _ask("Send? [y/N] ")).lower() in {"y", "yes"}
+
+
+class _GmailBodies:
+    """Opens Gmail for one body download, then closes it; only --use-email needs it."""
+
+    def __init__(self, settings: Settings, *, silent_only: bool) -> None:
+        self._settings = settings
+        self._silent_only = silent_only
+
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        async with gmail_provider(self._settings, silent_only=self._silent_only) as provider:
+            return await provider.fetch_message_body(provider_message_id)
+
+
+def _drafting_exit_code(outcome: DraftingOutcome) -> int:
+    """Brief's codes: 0 done, 6 declined, 130 cancelled, 4 failed."""
+    if outcome.status is DraftingStatus.GENERATED:
+        return 0
+    if outcome.status is DraftingStatus.DECLINED:
+        return 6
+    if outcome.status is DraftingStatus.CANCELLED:
+        return 130
+    return 4
+
+
+async def drafts_generate(
+    public_id: str,
+    *,
+    database_path: Path | None,
+    parts: frozenset[DraftContextPart],
+    tone: str,
+    length: str,
+    instructions: str,
+    assume_yes: bool,
+    silent_only: bool,
+) -> int:
+    """Write a new version of a draft with Groq after the owner approves what is sent."""
+    settings = _load_settings()
+    path = database_path or AppPaths.from_qt().database_path
+    await asyncio.to_thread(upgrade_database, path)
+    database = Database.from_path(path)
+    bodies = (
+        BodyService(
+            _GmailBodies(settings, silent_only=silent_only),
+            limit=settings.ai_body_character_limit,
+        )
+        if DraftContextPart.SOURCE_EMAIL in parts
+        else None
+    )
+    try:
+        async with groq_provider(settings) as ai, database.session() as session:
+            service = DraftingService(session, ai, bodies, zone=resolve_timezone(None))
+            options = DraftingOptions(
+                parts=parts,
+                tone=DraftTone(tone),
+                length=DraftLength(length),
+                instructions=instructions,
+            )
+            plan = await service.prepare(public_id, options)
+            outcome = await service.generate(plan, CliDraftingGate(assume_yes=assume_yes))
+    finally:
+        await database.dispose()
+    if outcome.status is DraftingStatus.GENERATED:
+        assert outcome.draft is not None
+        previous = (
+            f"; your previous text is version v{outcome.previous_version}"
+            if outcome.previous_version is not None
+            else ""
+        )
+        print(f"New version v{outcome.version_number} from Groq{previous}.")
+        found = placeholders(
+            "\n".join(
+                (
+                    outcome.draft.to_text,
+                    outcome.draft.cc_text,
+                    outcome.draft.title,
+                    outcome.draft.body,
+                )
+            )
+        )
+        print("Placeholders: " + (", ".join(found) if found else "none"))
+        for item in outcome.missing_context:
+            print(f"Missing context: {item}")
+        print(f"See the text with: mailbrief-gmail-diagnostic drafts export {public_id}")
+    elif outcome.status is DraftingStatus.DECLINED:
+        print("Nothing was sent. The draft is unchanged.")
+    elif outcome.status is DraftingStatus.CANCELLED:
+        print("Cancelled. The draft is unchanged.")
+    else:
+        code = outcome.error_code or "AI_PROVIDER_ERROR"
+        print(_AI_ERROR_MESSAGES.get(code, "Groq couldn't write the draft."))
+        if outcome.provider_detail:
+            print(f"{provider_display_name(PROVIDER_NAME)} detail: {outcome.provider_detail}")
+        print("The draft is unchanged.")
+    return _drafting_exit_code(outcome)
 
 
 def _count(value: int | None) -> str:
@@ -784,7 +941,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
     drafts_parser = commands.add_parser(
-        "drafts", help="List local drafts and notes, or export one. Nothing is sent."
+        "drafts",
+        help="List or export local drafts and notes, or write one with Groq after approval.",
     )
     draft_commands = drafts_parser.add_subparsers(dest="action", required=True)
     drafts_list = draft_commands.add_parser("list", help="List drafts, newest first.")
@@ -798,7 +956,44 @@ def main(arguments: Sequence[str] | None = None) -> int:
     drafts_export.add_argument(
         "--out", type=Path, help="Write to this new file; an existing file is never replaced."
     )
-    for subcommand in (drafts_list, drafts_export):
+    drafts_generate_parser = draft_commands.add_parser(
+        "generate",
+        help="Write a new version with Groq from the parts you choose, after you approve them.",
+    )
+    drafts_generate_parser.add_argument("public_id", help="The draft ID shown by drafts list.")
+    drafts_generate_parser.add_argument(
+        "--use-email",
+        action="store_true",
+        help="Send the email being replied to (downloaded from Gmail now, never saved).",
+    )
+    drafts_generate_parser.add_argument(
+        "--use-action", action="store_true", help="Send the linked action."
+    )
+    drafts_generate_parser.add_argument(
+        "--use-text", action="store_true", help="Send the draft's current title and body."
+    )
+    drafts_generate_parser.add_argument(
+        "--tone", choices=[tone.value for tone in DraftTone], default=DraftTone.NEUTRAL.value
+    )
+    drafts_generate_parser.add_argument(
+        "--length",
+        choices=[length.value for length in DraftLength],
+        default=DraftLength.MEDIUM.value,
+    )
+    drafts_generate_parser.add_argument(
+        "--instructions", default="", help="What you want written (at most 1,000 characters)."
+    )
+    drafts_generate_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Send without asking when consent is already recorded; first use still asks.",
+    )
+    drafts_generate_parser.add_argument(
+        "--silent-only",
+        action="store_true",
+        help="With --use-email: never open a browser to sign in to Gmail.",
+    )
+    for subcommand in (drafts_list, drafts_export, drafts_generate_parser):
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
@@ -829,6 +1024,21 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     view=getattr(args, "view", ActionFilter.OPEN.value),
                     timezone=getattr(args, "timezone", None),
                     suggestion_id=getattr(args, "suggestion_id", None),
+                )
+            )
+        if args.command == "drafts" and args.action == "generate":
+            return asyncio.run(
+                drafts_generate(
+                    args.public_id,
+                    database_path=args.database,
+                    parts=frozenset(
+                        part for flag, part in _DRAFTING_PARTS.items() if getattr(args, flag)
+                    ),
+                    tone=args.tone,
+                    length=args.length,
+                    instructions=args.instructions,
+                    assume_yes=args.yes,
+                    silent_only=args.silent_only,
                 )
             )
         if args.command == "drafts":
@@ -891,6 +1101,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 4
     except DraftNotFoundError:
         print(_DRAFT_NOT_FOUND)
+        return 3
+    except DraftingContextError as exc:
+        print(str(exc))  # Static messages that name no mail content.
         return 3
     except FileExistsError:
         print(_FILE_EXISTS)
