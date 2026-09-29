@@ -363,6 +363,24 @@ async def test_first_use_asks_records_consent_before_sending_and_later_runs_do_n
     assert await count(session, OwnerConsentTable) == 1
 
 
+async def test_consent_to_an_older_disclosure_is_asked_for_again(
+    session: AsyncSession, bodies: FakeBodies
+) -> None:
+    await OwnerConsentRepository(session).grant("groq", DRAFTING_SCOPE, "1", START)
+    await session.commit()
+    provider = FakeDraftingProvider([answer()])
+    _, drafting, plan = await prepared(session, provider, bodies)
+    gate = Gate()
+
+    assert DRAFTING_DISCLOSURE_VERSION == "2"
+    assert await drafting.consent_active() is False
+    assert plan.preview.first_use is True
+    await drafting.generate(plan, gate)
+
+    assert gate.previews[0].first_use is True
+    assert await drafting.consent_active() is True
+
+
 async def test_consent_is_recorded_before_the_call(
     session: AsyncSession, database: Database, bodies: FakeBodies
 ) -> None:
@@ -816,7 +834,11 @@ def test_disclosure_lines() -> None:
     lines = disclosure_lines(preview)
     assert lines[0] == "MailBrief will send these parts to Groq (m) to write this draft:"
     assert "- Your current text: title and body: 1,234 characters" in lines
-    assert any("never sends email addresses or recipients" in line for line in lines)
+    assert (
+        "It never sends the sender's address, To or Cc, other emails, attachments, your other "
+        "drafts or actions, Gmail or MailBrief IDs, or credentials. The parts listed above are "
+        "sent as written, so any addresses, links or numbers inside them are sent too."
+    ) in lines
     assert "Enable Zero Data Retention." in lines
     assert "revoke" in lines[-1]
     assert "revoke" not in disclosure_lines(preview.model_copy(update={"first_use": False}))[-1]

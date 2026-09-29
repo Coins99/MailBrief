@@ -71,14 +71,16 @@ what AI drafting may send and keep is [ADR 0013](adr/0013-ai-drafting.md).
    character count, the model and Groq's privacy notice. From here until the end, the text
    is frozen, so the preview is what is sent.
 3. **Send to Groq.** The first time, tick "I agree" to the disclosure first; that consent is
-   recorded for you (not per account) before anything is sent. **Cancel** is always there.
+   recorded for you (not per account) before anything is sent, and asked for again when the
+   disclosure changes (it is now version 2). **Cancel** is always there.
 4. While Groq writes, **Cancel** stops it, and so does quitting. Nothing is written after a
    cancel.
 
 **What is always sent:** the draft's kind, the tone, the length, your instructions and
-today's date. **What is never sent:** any email address or recipient (not even the
-sender's address: only their name), other emails, attachments, other drafts or actions,
-links, IDs or credentials.
+today's date. **What is never sent:** the sender's address (only their name), To or Cc,
+other emails, attachments, your other drafts or actions, Gmail or MailBrief IDs, or
+credentials. The parts you tick are sent as written, so any addresses, links or numbers
+inside them (in the email's body, your text or the action's notes) are sent too.
 
 **The result** becomes a new version: the status says "New version vN from Groq; your
 previous text is version vM." Your own text is saved as a version before anything is sent,

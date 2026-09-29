@@ -68,7 +68,7 @@ from mailbrief.text.prepare import (
 logger = logging.getLogger(__name__)
 
 DRAFTING_SCOPE: Final = "drafting"
-DRAFTING_DISCLOSURE_VERSION: Final = "1"
+DRAFTING_DISCLOSURE_VERSION: Final = "2"
 OUTPUT_INCOMPLETE: Final = "AI_OUTPUT_INCOMPLETE"
 INVALID_OUTPUT: Final = "AI_INVALID_OUTPUT"
 DRAFT_CHANGED: Final = "DRAFT_CHANGED"
@@ -113,8 +113,9 @@ def disclosure_lines(preview: DraftingPreview) -> tuple[str, ...]:
     lines = [
         f"MailBrief will send these parts to {provider} ({preview.model}) to write this draft:",
         *(f"- {line.label}: {line.characters:,} characters" for line in preview.lines),
-        "It never sends email addresses or recipients, other emails, attachments, other "
-        "drafts or actions, links, IDs or credentials.",
+        "It never sends the sender's address, To or Cc, other emails, attachments, your other "
+        "drafts or actions, Gmail or MailBrief IDs, or credentials. The parts listed above are "
+        "sent as written, so any addresses, links or numbers inside them are sent too.",
         "An email's body is downloaded from Gmail for this draft only and is never saved.",
         "Your own text is saved as a version first; the result becomes a new version.",
         preview.privacy_notice,

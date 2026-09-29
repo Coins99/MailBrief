@@ -23,12 +23,15 @@ may invent recipients, facts or quotes.
   - the draft's current title and body, at most 8,000 characters.
   - Always sent: the draft's kind, the tone, the length, the owner's instructions (at most
     1,000 characters) and today's date.
-- **Never sent:** any email address or recipient, other emails, attachments, other drafts
-  or actions, account or message IDs, links or credentials.
+- **Never sent:** the sender's address, To or Cc, other emails, attachments, the owner's
+  other drafts or actions, Gmail or MailBrief IDs, or credentials. The parts above are sent
+  as written, so any addresses, links or numbers inside them (in an email body, the current
+  text or action notes) are sent too; the disclosure says so.
 - **Approval every time.** Each generation shows a preview of every part with its character
   count and waits for approval. The first use also needs explicit consent to a disclosure.
-  That consent is recorded per provider for the owner (not per account) before anything is
-  sent, and can be revoked with the brief's consent. Declining sends nothing.
+  That consent is recorded per provider for the owner (not per account) and disclosure
+  version before anything is sent, and can be revoked with the brief's consent. Declining
+  sends nothing. Version 2 corrected what the disclosure says is never sent.
 - **Output:** an optional subject, a body and a list of missing context. There are no
   recipients: the schema has no field for them.
   - Python cleans the text (control and format characters removed, blank lines tidied) and
