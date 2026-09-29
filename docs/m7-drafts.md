@@ -1,7 +1,7 @@
 # M7 drafts, notes and messages
 
-M7 is implemented on `feat/m7-drafts` (PR #16) and awaits review: local drafts and notes,
-and AI drafting with Groq. The storage policy is [ADR 0012](adr/0012-drafts-and-notes.md);
+M7 is implemented and awaits live acceptance: local drafts and notes, and AI drafting with
+Groq. The storage policy is [ADR 0012](adr/0012-drafts-and-notes.md);
 what AI drafting may send and keep is [ADR 0013](adr/0013-ai-drafting.md).
 
 ## What it does

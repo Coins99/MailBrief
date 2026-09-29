@@ -7,7 +7,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 ## Product and status
 
 - Personal desktop app for Windows and macOS that turns today's important Gmail into a
-  short brief. Both platforms are supported: run from source now, packaged apps in M5.
+  short brief. Both platforms are supported, from source or as native packages (M5).
 - Gmail is the active provider. Microsoft (Outlook/Graph) code is dormant: keep it
   compiling and its tests passing, but do not extend it unless a task says so.
 - Done: M1 Gmail OAuth and secure restore; M2 Inbox metadata sync, ranking and
@@ -24,10 +24,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   editable plans and target dates, open/waiting/completed lists and undo (desktop, plus
   `brief --show` and `mailbrief-gmail-diagnostic actions`). See `docs/m6-actions.md` and
   ADR 0011.
-- M7 implemented on feat/m7-drafts (PR #16), awaiting review: replies, emails, notes and
-  messages with autosave, versions, copy and export, and AI drafting with Groq from context
-  the owner chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See
-  `docs/m7-drafts.md`, ADR 0012 and ADR 0013.
+- M7 implemented, awaiting live acceptance: replies, emails, notes and messages with
+  autosave, versions, copy and export, and AI drafting with Groq from context the owner
+  chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
+  ADR 0012 and ADR 0013.
 
 ## Layout (ports and adapters)
 
@@ -52,7 +52,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
-  (`drafting_panel.py`); `app.py` owns the qasync loop.
+  (`drafting_panel.py`).
+- `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
 
@@ -102,8 +103,6 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Email content is untrusted input. It can never authorize actions, settings changes,
   mail writes or sending other messages to the AI.
 - Schema changes need a new additive Alembic revision; never edit an existing revision.
-  (Revision 0001 was restored to its originally released content on 2026-09-25 as a
-  one-time repair.)
 - No blocking network or database work on the Qt main thread (M5).
 
 ## AI analysis rules (M4)
@@ -151,6 +150,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 
 - Python 3.13 only, managed with `uv`; direct dependencies in `pyproject.toml`, exact
   versions in `uv.lock`. Update both together.
+- Development environment: keep the checkout and its `.venv` out of folders synced by
+  iCloud Drive (Desktop & Documents), OneDrive or Dropbox. Those tools set the macOS hidden
+  flag on `.venv` files, and then Python 3.13 skips hidden `.pth` files and Qt skips hidden
+  plugins.
 - Do not add: Google API client libraries, the Microsoft Graph SDK, `python-dotenv`,
   generic retry libraries, HTML parsing libraries (use the standard library if
   HTML-to-text is needed), or local-model libraries.

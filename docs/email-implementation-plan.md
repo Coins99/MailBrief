@@ -276,7 +276,7 @@ next day without regeneration changing those decisions.
 
 ## M7 — Local drafts, notes and messages
 
-**Status:** M7 implemented on feat/m7-drafts (PR #16), awaiting review: local drafts and notes, and AI drafting
+**Status:** M7 implemented, awaiting live acceptance: local drafts and notes, and AI drafting
 ([m7-drafts.md](m7-drafts.md), [ADR 0012](adr/0012-drafts-and-notes.md),
 [ADR 0013](adr/0013-ai-drafting.md)).
 
