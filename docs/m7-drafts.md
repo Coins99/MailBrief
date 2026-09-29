@@ -95,7 +95,8 @@ MailBrief checks every answer before using it: control and format characters are
 quoted history is dropped, the body must be 1 to 8,000 characters, and an answer that copies
 200 or more characters of the email word for word is refused. An unusable answer is tried
 once more. If it still fails, or you decline, cancel, or the draft changed meanwhile, your
-text is unchanged and the status says why.
+text is unchanged and the status says why. If Groq declines to write the draft, the status
+says so (`AI_REFUSED`): change the instructions or context and try again.
 
 ## CLI
 

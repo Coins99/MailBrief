@@ -127,6 +127,9 @@ _AI_ERROR_MESSAGES = {
         "Try again, or raise MAILBRIEF_AI_MAX_OUTPUT_TOKENS."
     ),
     "AI_INVALID_OUTPUT": "Groq's answer couldn't be used; the draft is unchanged. Try again.",
+    "AI_REFUSED": (
+        "Groq declined to write this draft. Change the instructions or context and try again."
+    ),
     "DRAFT_CHANGED": "The draft changed before Groq's text could be used; nothing was lost.",
     "ANALYSIS_FAILED": "No message could be analyzed.",
 }

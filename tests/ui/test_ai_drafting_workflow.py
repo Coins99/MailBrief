@@ -157,6 +157,15 @@ async def test_a_declined_or_failed_generation_leaves_the_text(
     assert editor.status.text() == "Groq did not respond in time; retry later."
     assert editor._fields.isEnabled()
 
+    backend.ai_outcome = DraftingOutcome(status=DraftingStatus.FAILED, error_code="AI_REFUSED")
+    await preview(window)
+    editor.ai_panel.send_button.click()
+    await settle(window)
+    assert editor.body.toPlainText() == "My notes"
+    assert editor.status.text() == (
+        "Groq declined to write this draft. Change the instructions or context and try again."
+    )
+
     backend.ai_outcome = DraftingOutcome(status=DraftingStatus.DECLINED)
     await preview(window)
     editor.ai_panel.send_button.click()

@@ -197,6 +197,30 @@ def test_a_groq_failure_leaves_the_draft_and_exits_4(
     ]
 
 
+def test_a_refusal_is_reported_as_one(
+    seeded: tuple[Path, str, respx.Route],
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path, public_id, _ = seeded
+    refused = response_body([output_text(json.dumps(DRAFT))])
+    refused["choices"][0]["finish_reason"] = "content_filter"
+    route = respx_mock.post(CHAT_URL).respond(json=refused)
+    replies(monkeypatch, "yes")
+
+    assert generate(path, public_id, "--use-text") == 4
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2:] == [
+        "Groq declined to write this draft. Change the instructions or context and try again.",
+        "The draft is unchanged.",
+    ]
+    assert len(drafting_calls(route)) == 2  # Tried once more, like any unusable answer.
+    assert gmail.main(["drafts", "export", public_id, "--database", str(path)]) == 0
+    assert "Yes, approved." not in capsys.readouterr().out
+
+
 def test_unavailable_parts_and_unknown_drafts_exit_3(
     seeded: tuple[Path, str, respx.Route], capsys: pytest.CaptureFixture[str]
 ) -> None:

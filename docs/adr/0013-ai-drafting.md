@@ -44,7 +44,8 @@ may invent recipients, facts or quotes.
   a new "generated" version with a record of its provider, model, prompt version, tone,
   length, parts, instructions and missing context. Generated text follows ADR 0012.
 - **Failure:** a failed, declined or cancelled generation leaves the draft's text unchanged.
-  An unusable answer is retried once.
+  An unusable answer is retried once. If the last answer is a refusal, it is reported as
+  `AI_REFUSED`, not as an unusable answer.
 - **`json_validate_failed`:** this Groq HTTP 400 means Groq couldn't finish a valid answer,
   usually because it hit the output limit. It counts as an incomplete answer (retried once,
   like a cut-off answer), not as a rejected request, for briefs and drafting alike.

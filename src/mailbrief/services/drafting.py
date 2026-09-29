@@ -72,6 +72,7 @@ DRAFTING_SCOPE: Final = "drafting"
 DRAFTING_DISCLOSURE_VERSION: Final = "2"
 OUTPUT_INCOMPLETE: Final = "AI_OUTPUT_INCOMPLETE"
 INVALID_OUTPUT: Final = "AI_INVALID_OUTPUT"
+REFUSED: Final = "AI_REFUSED"
 DRAFT_CHANGED: Final = "DRAFT_CHANGED"
 _ATTEMPTS: Final = 2  # An unusable answer is tried once more.
 _SUBJECT_KINDS: Final = frozenset({DraftKind.EMAIL, DraftKind.NOTE})
@@ -81,6 +82,11 @@ _PART_LABELS: Final = {
     DraftContextPart.CURRENT_TEXT: "Your current text: title and body",
 }
 _ALWAYS_LABEL: Final = "Always: kind, tone, length, today's date and your instructions"
+_PROBLEM_CODES: Final = {
+    DraftingProblem.INCOMPLETE: OUTPUT_INCOMPLETE,
+    DraftingProblem.INVALID_OUTPUT: INVALID_OUTPUT,
+    DraftingProblem.REFUSED: REFUSED,
+}
 
 
 class DraftingContextError(LookupError):
@@ -386,7 +392,7 @@ class DraftingService:
         if cancelled():
             return DraftingOutcome(status=DraftingStatus.CANCELLED)
         if generated is None:
-            code = OUTPUT_INCOMPLETE if problem is DraftingProblem.INCOMPLETE else INVALID_OUTPUT
+            code = _PROBLEM_CODES[problem or DraftingProblem.INVALID_OUTPUT]
             logger.info("AI drafting answer unusable: %s", code)
             return DraftingOutcome(status=DraftingStatus.FAILED, error_code=code)
         info = DraftGenerationInfo(
