@@ -1,4 +1,4 @@
-"""Write one draft or note: autosave as you type, saved versions, copy and export.
+"""Write one draft or note: autosave as you type, saved versions, copy, export and AI.
 
 The editor never writes anything itself. It asks the window, which runs every draft write
 through one serialized queue, and answers through the methods below. Source subjects and
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mailbrief.domain.drafting import DraftContextPart, DraftingOptions, DraftingPreview
 from mailbrief.domain.drafts import (
     DRAFT_BODY_MAX_CHARS,
     DRAFT_RECIPIENTS_MAX_CHARS,
@@ -43,6 +44,7 @@ from mailbrief.domain.drafts import (
     recipient_warnings,
     still_to_fill,
 )
+from mailbrief.ui.drafting_panel import DraftingPanel
 
 DEBOUNCE_MS = 1_500
 MAX_WAIT_MS = 10_000
@@ -87,7 +89,11 @@ class DraftEditor(QDialog):
     - ``restore_requested(number)``: restored() or restore_failed();
     - ``save_as_new_requested(edit)``: continue_as();
     - ``export_requested(path, text)``: set_status();
-    - ``close_requested(edit or None)``: finish_closed() or cancel_close().
+    - ``close_requested(edit or None)``: finish_closed() or cancel_close();
+    - ``ai_parts_requested()``: offer_ai(), or ai_failed();
+    - ``ai_prepare_requested(options)``: show_ai_preview(), or ai_failed();
+    - ``ai_generate_requested(agreed)``: ai_generated(), or ai_failed();
+    - ``ai_cancel_requested()``: stops a generation, which then answers ai_failed().
     """
 
     autosave_requested = Signal(object)
@@ -98,6 +104,10 @@ class DraftEditor(QDialog):
     save_as_new_requested = Signal(object)
     export_requested = Signal(str, str)
     close_requested = Signal(object)
+    ai_parts_requested = Signal()
+    ai_prepare_requested = Signal(object)
+    ai_generate_requested = Signal(bool)
+    ai_cancel_requested = Signal()
 
     def __init__(
         self,
@@ -116,7 +126,9 @@ class DraftEditor(QDialog):
         self._dirty = False  # Changed since the last text sent to be saved.
         self._conflict = False
         self._closing = False
-        self._locked = False  # A restore or close is waiting for the window.
+        self._locked = False  # A restore, close or AI generation is waiting for the window.
+        self._ai_ready = False  # A Groq model and key are configured.
+        self._ai_busy = False  # A preview is shown or Groq is writing.
         self._discard_armed = False
         self._versions: tuple[DraftVersionInfo, ...] = ()
         self._picker: QFileDialog | None = None
@@ -155,6 +167,8 @@ class DraftEditor(QDialog):
         form.addRow("", self.counter)
         self.placeholder_line = _plain()
         form.addRow("", self.placeholder_line)
+        self.missing_line = _plain()
+        form.addRow("", self.missing_line)
         layout.addWidget(self._fields, 1)
         buttons = QHBoxLayout()
         self.copy_text_button = QPushButton("Copy te&xt")
@@ -162,6 +176,7 @@ class DraftEditor(QDialog):
         self.export_button = QPushButton("&Export…")
         self.versions_button = QPushButton("&Versions…")
         self.checkpoint_button = QPushButton("Save versio&n")
+        self.ai_button = QPushButton("Write with A&I…")
         self.close_button = QPushButton("C&lose")
         for button in (
             self.copy_text_button,
@@ -169,6 +184,7 @@ class DraftEditor(QDialog):
             self.export_button,
             self.versions_button,
             self.checkpoint_button,
+            self.ai_button,
             self.close_button,
         ):
             buttons.addWidget(button)
@@ -202,6 +218,9 @@ class DraftEditor(QDialog):
         self.confirm_panel.hide()
         self.versions_panel.hide()
         layout.addWidget(self.versions_panel, 1)
+        self.ai_panel = DraftingPanel()
+        self.ai_panel.hide()
+        layout.addWidget(self.ai_panel)
         self.status = _plain()
         layout.addWidget(self.status)
         self._debounce = self._timer(debounce_ms)
@@ -221,6 +240,10 @@ class DraftEditor(QDialog):
         self.restore_button.clicked.connect(self._ask_restore)
         self.confirm_button.clicked.connect(self._confirm_restore)
         self.keep_button.clicked.connect(self.confirm_panel.hide)
+        self.ai_button.clicked.connect(self._toggle_ai)
+        self.ai_panel.prepare_requested.connect(self._prepare_ai)
+        self.ai_panel.send_requested.connect(self._send_ai)
+        self.ai_panel.cancel_requested.connect(self._cancel_ai)
 
     def _timer(self, interval_ms: int) -> QTimer:
         timer = QTimer(self)
@@ -285,6 +308,10 @@ class DraftEditor(QDialog):
         self.save_as_new_button.hide()
         self.versions_panel.hide()
         self.confirm_panel.hide()
+        self._ai_busy = False
+        self.ai_panel.reset()
+        self.ai_panel.hide()
+        self.missing_line.clear()
         self._update_buttons()
         self.status.setText(f"Saved {self._time(draft)}")
         (self.body if draft.title else self.title_edit).setFocus()
@@ -419,6 +446,7 @@ class DraftEditor(QDialog):
         for button in (self.versions_button, self.checkpoint_button, self.restore_button):
             button.setEnabled(live)
         self.confirm_button.setEnabled(live)
+        self.ai_button.setEnabled(live and self._ai_ready)
 
     def _set_locked(self, locked: bool) -> None:
         self._locked = locked
@@ -456,9 +484,13 @@ class DraftEditor(QDialog):
         for info in versions:
             when = info.created_at_utc.astimezone(self._zone).strftime("%Y-%m-%d %H:%M")
             preview = info.preview or "(empty)"
+            made = info.generation
+            how = (
+                "" if made is None else f" by {made.model} ({made.tone.value}, {made.length.value})"
+            )
             self.versions_list.addItem(
                 QListWidgetItem(
-                    f"Version {info.number} · {_ORIGINS[info.origin]} {when} · "
+                    f"Version {info.number} · {_ORIGINS[info.origin]}{how} {when} · "
                     f"{info.length:,} characters · {preview}"
                 )
             )
@@ -521,6 +553,94 @@ class DraftEditor(QDialog):
         self._set_locked(False)
         if not self._conflict:
             self.status.setText(message)
+
+    # Writing with AI (ADR 0013). The text is locked from Continue until the generation ends,
+    # so what the preview shows is exactly what is sent.
+
+    def set_ai_ready(self, ready: bool) -> None:
+        """Whether a Groq model and key are configured; without them the button is off."""
+        self._ai_ready = ready
+        if not ready and not self._ai_busy:
+            self.ai_panel.hide()
+        self._update_buttons()
+
+    def _toggle_ai(self) -> None:
+        if not self.ai_panel.isHidden():
+            self.ai_panel.hide()
+            return
+        self.ai_parts_requested.emit()
+
+    def offer_ai(self, parts: frozenset[DraftContextPart]) -> None:
+        """Show the panel with the parts this draft can send."""
+        if self.draft is None:
+            return
+        self.ai_panel.offer(parts, self.draft.kind)
+        self.ai_panel.show()
+
+    def _prepare_ai(self, options: DraftingOptions) -> None:
+        if self.draft is None or self._conflict or self._locked or self.current_edit() is None:
+            self.ai_panel.reset()
+            if self.current_edit() is None:
+                self.status.setText(_TOO_LONG)
+            return
+        self._autosave_now()  # The preview is built from the saved text.
+        self._ai_busy = True
+        self._set_locked(True)
+        self.status.setText("Preparing what will be sent…")
+        self.ai_prepare_requested.emit(options)
+
+    def show_ai_preview(self, preview: DraftingPreview, lines: tuple[str, ...]) -> None:
+        self.ai_panel.show_preview(preview, lines)
+        self.status.setText(
+            "Review what will be sent to Groq, then send it or cancel. Nothing has been sent."
+        )
+
+    def _send_ai(self, agreed: bool) -> None:
+        if not self._ai_busy:
+            return
+        self.ai_panel.generating()
+        self.status.setText("Writing with Groq…")
+        self.ai_generate_requested.emit(agreed)
+
+    def _cancel_ai(self) -> None:
+        if not self._ai_busy:
+            self.ai_panel.reset()
+            return
+        self.ai_cancel_requested.emit()
+        self._finish_ai("Cancelled. Your text is unchanged.")
+
+    def _finish_ai(self, message: str) -> None:
+        self._ai_busy = False
+        self._set_locked(False)
+        self.ai_panel.reset()
+        if message and not self._conflict:
+            self.status.setText(message)
+
+    def ai_generated(
+        self, draft: Draft, number: int, previous: int | None, missing: tuple[str, ...]
+    ) -> None:
+        """Show Groq's new version; the owner's text is version ``previous``."""
+        self.draft = draft
+        self._set_text(draft.content())
+        self._dirty = False
+        self.missing_line.setText(
+            "Missing context to check: " + "; ".join(missing) if missing else ""
+        )
+        before = f"; your previous text is version v{previous}" if previous is not None else ""
+        self._finish_ai(f"New version v{number} from Groq{before}.")
+        if not self.versions_panel.isHidden():
+            self.versions_requested.emit()
+
+    def ai_failed(self, message: str) -> None:
+        """The generation didn't happen or didn't finish: the text is untouched."""
+        if self._ai_busy or not self.ai_panel.isHidden():
+            self._finish_ai(message)
+        else:
+            self.status.setText(message)
+
+    def ai_active(self) -> bool:
+        """Whether a preview is shown or Groq is writing (a method: it changes as we wait)."""
+        return self._ai_busy
 
     # Copy, export and Gmail.
 

@@ -26,6 +26,13 @@ from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncStatus
+from mailbrief.domain.drafting import (
+    DraftContextPart,
+    DraftingOptions,
+    DraftingOutcome,
+    DraftingPreview,
+    DraftingStatus,
+)
 from mailbrief.domain.drafts import (
     KIND_NAMES,
     Draft,
@@ -49,6 +56,12 @@ from mailbrief.services.actions import (
 )
 from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
 from mailbrief.services.calendar import resolve_timezone
+from mailbrief.services.drafting import (
+    DraftingContextError,
+    DraftingGate,
+    DraftingPlan,
+)
+from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftConflictError, DraftNotFoundError, SourceNotFoundError
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.ui.action_editor import ActionEditor
@@ -117,6 +130,12 @@ class DesktopBackend(Protocol):
     async def save_draft_as_new(self, public_id: str, edit: DraftEdit) -> Draft: ...
     async def delete_draft(self, public_id: str, revision: int) -> None: ...
     async def restore_draft(self, public_id: str) -> Draft: ...
+    async def drafting_ready(self) -> bool: ...
+    async def available_drafting_parts(self, public_id: str) -> frozenset[DraftContextPart]: ...
+    async def prepare_drafting(self, public_id: str, options: DraftingOptions) -> DraftingPlan: ...
+    async def generate_draft(
+        self, plan: DraftingPlan, gate: DraftingGate, cancel: asyncio.Event
+    ) -> DraftingOutcome: ...
 
 
 # Raised when the brief, an action or a draft changed since it was shown; the window reloads.
@@ -140,6 +159,19 @@ _EDITOR_FAILED = "Couldn't save. Your edits are still here; try again."
 _NO_SOURCE = "That email is no longer in local mail."
 _DRAFT_CLOSE_FAILED = "Couldn't save. Your text is still here; try again."
 _DRAFT_EXPORT_FAILED = "Couldn't export. Check the folder and try again."
+_AI_CANCELLED = "Cancelled. Your text is unchanged."
+_AI_DECLINED = "Nothing was sent: AI drafting needs your consent first."
+_AI_FAILED = "Couldn't write with Groq. Your text is unchanged."
+
+
+class _ApprovedGate:
+    """The editor's preview already asked; first use also needs the ticked consent box."""
+
+    def __init__(self, agreed: bool) -> None:
+        self._agreed = agreed
+
+    async def request_drafting_consent(self, preview: DraftingPreview) -> bool:
+        return self._agreed or not preview.first_use
 
 
 def plain_label(text: str) -> QLabel:
@@ -241,6 +273,10 @@ class MainWindow(QMainWindow):
         self.action_editor = ActionEditor(self)
         self.action_editor.save_requested.connect(self._request_save_action)
         self.draft_writes = DraftWrites()
+        # The generation in progress: its plan, its cancel flag and its task.
+        self._drafting_plan: DraftingPlan | None = None
+        self._drafting_cancel: asyncio.Event | None = None
+        self._drafting_task: asyncio.Task[DraftingOutcome] | None = None
         self.draft_editor = DraftEditor(self)
         self._connect_draft_editor(self.draft_editor)
         self.cached_dialog = CachedMailDialog(self)
@@ -615,6 +651,128 @@ class MainWindow(QMainWindow):
         self.draft_editor.load(draft, self.zone)
         self.draft_editor.open()
 
+    # Writing with AI. Every step runs in draft_writes after pending autosaves; the
+    # generation itself is a task of its own, so Cancel and quitting can stop it.
+
+    async def _offer_drafting(self) -> None:
+        editor = self.draft_editor
+        draft = editor.draft
+        if draft is None:
+            return
+        try:
+            parts = await self.backend.available_drafting_parts(draft.public_id)
+        except ConfigurationError as exc:
+            log_failure(exc)
+            editor.ai_failed(configuration_guidance(exc))
+            return
+        except Exception as exc:
+            log_failure(exc)
+            editor.ai_failed(_AI_FAILED)
+            return
+        editor.offer_ai(parts)
+
+    async def _prepare_drafting(self, options: DraftingOptions) -> None:
+        editor = self.draft_editor
+        draft = editor.draft
+        if draft is None or not editor.ai_active():
+            return
+        try:
+            plan = await self.backend.prepare_drafting(draft.public_id, options)
+        except DraftingContextError as exc:
+            log_failure(exc)
+            editor.ai_failed(str(exc))  # Static messages that name no mail content.
+            return
+        except _DRAFT_STALE as exc:
+            log_failure(exc)
+            editor.show_conflict()
+            editor.ai_failed("")
+            return
+        except AuthenticationRequiredError as exc:
+            log_failure(exc)
+            editor.ai_failed("Connect Gmail to download the email, then try again.")
+            return
+        except ConfigurationError as exc:
+            log_failure(exc)
+            editor.ai_failed(configuration_guidance(exc))
+            return
+        except ProviderError as exc:
+            log_failure(exc)
+            editor.ai_failed("Gmail is offline or unavailable, so the email couldn't be read.")
+            return
+        except Exception as exc:
+            log_failure(exc)
+            editor.ai_failed(_AI_FAILED)
+            return
+        if not editor.ai_active():
+            return  # Cancelled while preparing.
+        self._drafting_plan = plan
+        editor.show_ai_preview(plan.preview, drafting_disclosure_lines(plan.preview))
+
+    async def _generate_draft(self, agreed: bool) -> None:
+        editor = self.draft_editor
+        plan, self._drafting_plan = self._drafting_plan, None
+        if plan is None or not editor.ai_active():
+            return
+        cancel = asyncio.Event()
+        task = asyncio.create_task(self.backend.generate_draft(plan, _ApprovedGate(agreed), cancel))
+        self._drafting_cancel, self._drafting_task = cancel, task
+        try:
+            outcome = await task
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise  # This queue task itself was cancelled.
+            await self._after_cancelled_generation(plan)
+            return
+        except Exception as exc:
+            log_failure(exc)
+            editor.ai_failed(_AI_FAILED)
+            return
+        finally:
+            self._drafting_cancel = self._drafting_task = None
+        if outcome.status is DraftingStatus.GENERATED:
+            assert outcome.draft is not None and outcome.version_number is not None
+            editor.ai_generated(
+                outcome.draft,
+                outcome.version_number,
+                outcome.previous_version,
+                outcome.missing_context,
+            )
+            await self._refresh_drafts()
+        elif outcome.status is DraftingStatus.DECLINED:
+            editor.ai_failed(_AI_DECLINED)
+        elif outcome.status is DraftingStatus.CANCELLED:
+            editor.ai_failed(_AI_CANCELLED)
+        else:
+            editor.ai_failed(error_guidance(outcome.error_code or "AI_PROVIDER_ERROR"))
+
+    async def _after_cancelled_generation(self, plan: DraftingPlan) -> None:
+        """Cancel can arrive just as Groq's text is saved; show whatever was stored."""
+        editor = self.draft_editor
+        try:
+            stored = await self.backend.get_draft(plan.public_id)
+        except Exception as exc:
+            log_failure(exc)
+            return
+        current = editor.draft
+        if (
+            current is not None
+            and current.public_id == stored.public_id
+            and stored.revision != current.revision
+            and not self._closing
+        ):
+            editor.restored(stored, 0)
+            editor.set_status(
+                "Groq finished before Cancel took effect; Versions has your earlier text."
+            )
+
+    def _cancel_drafting(self) -> None:
+        """Drop a previewed plan and stop a generation; nothing is written after this."""
+        self._drafting_plan = None
+        if self._drafting_cancel is not None:
+            self._drafting_cancel.set()
+        if self._drafting_task is not None and not self._drafting_task.done():
+            self._drafting_task.cancel()
+
     async def _delete_draft(self, summary: DraftSummary) -> None:
         try:
             await self.backend.delete_draft(summary.public_id, summary.revision)
@@ -648,6 +806,14 @@ class MainWindow(QMainWindow):
             lambda path, text: writes.run(lambda: self._export_draft(Path(path), text))
         )
         editor.close_requested.connect(lambda edit: writes.run(lambda: self._close_draft(edit)))
+        editor.ai_parts_requested.connect(lambda: writes.run(self._offer_drafting))
+        editor.ai_prepare_requested.connect(
+            lambda options: writes.run(lambda: self._prepare_drafting(options))
+        )
+        editor.ai_generate_requested.connect(
+            lambda agreed: writes.run(lambda: self._generate_draft(agreed))
+        )
+        editor.ai_cancel_requested.connect(self._cancel_drafting)
 
     def _queue_autosave(self, edit: DraftEdit) -> None:
         draft = self.draft_editor.draft
@@ -893,14 +1059,19 @@ class MainWindow(QMainWindow):
 
     async def _revoke_consent(self) -> None:
         count = await self.backend.revoke_consent()
-        self.status.setText(f"AI consent revoked for {count} local Gmail consent records.")
+        self.status.setText(
+            f"AI consent revoked for briefs and drafting ({count} consent records). "
+            "MailBrief asks again before sending anything."
+        )
 
     async def _refresh_ai_status(self) -> None:
         try:
             self.ai.setText(await self.backend.ai_status())
+            self.draft_editor.set_ai_ready(await self.backend.drafting_ready())
         except Exception as exc:
             log_failure(exc)
             self.ai.setText("AI: configuration or secure key store unavailable.")
+            self.draft_editor.set_ai_ready(False)
 
     async def initialize(self) -> None:
         try:
@@ -1085,6 +1256,7 @@ class MainWindow(QMainWindow):
         self.settings_dialog.reject()
         self.cached_dialog.reject()
         self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
+        self._cancel_drafting()
         final = self.draft_editor.final_edit() if self.draft_editor.isVisible() else None
         if final is not None:
             self._queue_autosave(final)  # shutdown() drains it before closing the database.

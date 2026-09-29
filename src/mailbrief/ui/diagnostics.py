@@ -27,6 +27,10 @@ ERROR_MESSAGES = {
     "AI_NETWORK_ERROR": "Could not reach Groq. Check your connection and retry.",
     "AI_PROVIDER_ERROR": "Groq request failed. Check the model in Settings.",
     "AI_OUTPUT_INCOMPLETE": "Groq couldn't finish some answers within its output limit. Try again.",
+    "AI_INVALID_OUTPUT": "Groq's answer couldn't be used. Your text is unchanged; try again.",
+    "DRAFT_CHANGED": (
+        "The draft changed before Groq's text could be used. Nothing was lost; try again."
+    ),
     "ANALYSIS_FAILED": "No message could be analyzed. Review your selection and AI settings.",
 }
 

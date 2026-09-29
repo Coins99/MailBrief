@@ -5,6 +5,17 @@ from datetime import UTC, datetime, timedelta
 
 from pydantic import HttpUrl
 
+from mailbrief.domain.drafting import (
+    CurrentText,
+    DraftContextPart,
+    DraftGenerationSummary,
+    DraftingOptions,
+    DraftingOutcome,
+    DraftingPreview,
+    DraftingRequest,
+    DraftingStatus,
+    PreviewLine,
+)
 from mailbrief.domain.drafts import (
     MAX_DRAFT_VERSIONS,
     Draft,
@@ -18,6 +29,7 @@ from mailbrief.domain.drafts import (
     first_line,
 )
 from mailbrief.services.actions import ActionNotFoundError
+from mailbrief.services.drafting import DraftingGate, DraftingPlan
 from mailbrief.services.drafts import (
     DraftConflictError,
     DraftNotFoundError,
@@ -58,6 +70,15 @@ class FakeDrafts:
         }
         self.action_titles: dict[str, str] = {}
         self._ticks = 0
+        # AI drafting: what the fake offers, and how its next generation ends.
+        self.ai_ready = True
+        self.ai_parts = frozenset({DraftContextPart.CURRENT_TEXT})
+        self.ai_consent = False
+        self.ai_calls: list[tuple[object, ...]] = []
+        self.ai_fail: Exception | None = None
+        self.ai_outcome: DraftingOutcome | None = None  # None: generate "Generated text".
+        self.ai_gate: asyncio.Event | None = None  # Holds a generation until set.
+        self.ai_store_before_gate = False  # Store the result, then wait at the gate.
 
     def _now(self) -> datetime:
         self._ticks += 1
@@ -97,10 +118,16 @@ class FakeDrafts:
         return draft
 
     def _version(
-        self, public_id: str, origin: DraftVersionOrigin, content: DraftEdit
+        self,
+        public_id: str,
+        origin: DraftVersionOrigin,
+        content: DraftEdit,
+        *,
+        always: bool = False,
     ) -> DraftVersionInfo | None:
+        """Keep ``content`` as a version unless it matches the latest (generated always is)."""
         kept = self.versions[public_id]
-        if kept and kept[-1].content() == content:
+        if kept and kept[-1].content() == content and not always:
             return None
         number = kept[-1].number + 1 if kept else 1
         version = DraftVersion(
@@ -112,12 +139,16 @@ class FakeDrafts:
 
     @staticmethod
     def _info(version: DraftVersion) -> DraftVersionInfo:
+        generated = version.origin is DraftVersionOrigin.GENERATED
         return DraftVersionInfo(
             number=version.number,
             origin=version.origin,
             created_at_utc=version.created_at_utc,
             preview=first_line(version.body) or first_line(version.title),
             length=len(version.body),
+            generation=DraftGenerationSummary(tone="warm", length="short", model="fake-model")
+            if generated
+            else None,
         )
 
     def _update(self, draft: Draft, content: DraftEdit) -> Draft:
@@ -245,3 +276,77 @@ class FakeDrafts:
         """Another window saved this draft, so the editor's revision is stale."""
         draft = self.drafts[public_id]
         self._update(draft, draft.content().model_copy(update={"body": body}))
+
+    async def drafting_ready(self) -> bool:
+        return self.ai_ready
+
+    async def available_drafting_parts(self, public_id: str) -> frozenset[DraftContextPart]:
+        self.ai_calls.append(("available_drafting_parts", public_id))
+        if self.ai_fail is not None:
+            failure, self.ai_fail = self.ai_fail, None
+            raise failure
+        return self.ai_parts
+
+    async def prepare_drafting(self, public_id: str, options: DraftingOptions) -> DraftingPlan:
+        self.ai_calls.append(("prepare_drafting", public_id, options))
+        if self.ai_fail is not None:
+            failure, self.ai_fail = self.ai_fail, None
+            raise failure
+        draft = self._live(public_id)
+        request = DraftingRequest(
+            kind=draft.kind,
+            tone=options.tone,
+            length=options.length,
+            instructions=options.instructions,
+            today=DRAFT_START.date(),
+            current=CurrentText(title=draft.title, body=draft.body)
+            if DraftContextPart.CURRENT_TEXT in options.parts
+            else None,
+        )
+        preview = DraftingPreview(
+            provider="groq",
+            model="fake-model",
+            privacy_notice="Enable Zero Data Retention first.",
+            first_use=not self.ai_consent,
+            lines=(PreviewLine(label="Your current text: title and body", characters=12),),
+        )
+        return DraftingPlan(
+            public_id=public_id,
+            revision=draft.revision,
+            kind=draft.kind,
+            request=request,
+            preview=preview,
+        )
+
+    async def generate_draft(
+        self, plan: DraftingPlan, gate: DraftingGate, cancel: asyncio.Event
+    ) -> DraftingOutcome:
+        self.ai_calls.append(("generate_draft", plan.public_id))
+        preview = plan.preview.model_copy(update={"first_use": not self.ai_consent})
+        if not await gate.request_drafting_consent(preview):
+            return DraftingOutcome(status=DraftingStatus.DECLINED)
+        self.ai_consent = True
+        if self.ai_outcome is not None:
+            return self.ai_outcome
+        draft = self._live(plan.public_id, plan.revision)
+        self._version(plan.public_id, DraftVersionOrigin.EDITED, draft.content())
+        previous = self.versions[plan.public_id][-1].number
+        if self.ai_gate is not None and not self.ai_store_before_gate:
+            await self.ai_gate.wait()
+        if cancel.is_set():
+            return DraftingOutcome(status=DraftingStatus.CANCELLED)
+        generated = self._update(
+            draft, draft.content().model_copy(update={"body": "Generated text"})
+        )
+        self._version(
+            plan.public_id, DraftVersionOrigin.GENERATED, generated.content(), always=True
+        )
+        if self.ai_gate is not None and self.ai_store_before_gate:
+            await self.ai_gate.wait()
+        return DraftingOutcome(
+            status=DraftingStatus.GENERATED,
+            draft=generated,
+            version_number=self.versions[plan.public_id][-1].number,
+            previous_version=previous,
+            missing_context=("the delivery date",),
+        )
