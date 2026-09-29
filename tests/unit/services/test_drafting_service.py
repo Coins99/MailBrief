@@ -154,7 +154,11 @@ async def seed_reply(session: AsyncSession) -> str:
     return draft.public_id
 
 
-async def seed_action_note(session: AsyncSession, notes: str = "Ask Sam first.") -> str:
+async def seed_action_note(
+    session: AsyncSession,
+    notes: str = "Ask Sam first.",
+    steps: tuple[str, ...] = ("Collect the figures",),
+) -> str:
     row = await ActionRepository(session).add_action(
         ActionTable(
             public_id="11111111-1111-4111-8111-111111111111",
@@ -169,7 +173,8 @@ async def seed_action_note(session: AsyncSession, notes: str = "Ask Sam first.")
             revision=1,
         )
     )
-    ActionRepository(session).add_step(row.id, 0, "Collect the figures", None)
+    for position, step in enumerate(steps):
+        ActionRepository(session).add_step(row.id, position, step, None)
     await session.commit()
     await ActionService(session).save(
         row.public_id,
@@ -295,8 +300,33 @@ async def test_prepare_caps_action_notes_and_current_text(
     assert action.target_date is not None
     assert 1_600 <= len(action.notes) <= 2_000
     assert len(current.body) <= 8_000
-    assert plan.preview.lines[-1].label.endswith("(cut to fit)")
+    assert [line.label.endswith("(cut to fit)") for line in plan.preview.lines] == [
+        False,
+        True,  # The notes were cut.
+        True,
+    ]
     assert bodies.fetched == []  # The email wasn't chosen, so nothing was downloaded.
+
+
+@pytest.mark.parametrize(("stored", "sent"), [(4, 4), (30, 4)])
+async def test_prepare_sends_steps_in_order_while_they_fit(
+    session: AsyncSession, bodies: FakeBodies, stored: int, sent: int
+) -> None:
+    steps = tuple(f"{index:02d}" + "s" * 498 for index in range(stored))
+    public_id = await seed_action_note(session, steps=steps)
+    options = DraftingOptions(parts=frozenset({DraftContextPart.ACTION}))
+
+    plan = await service(session, FakeDraftingProvider(), bodies).prepare(public_id, options)
+
+    action = plan.request.action
+    assert action is not None
+    assert action.steps == steps[:sent]
+    assert sum(len(step) for step in action.steps) == 2_000
+    assert action.notes == "Ask Sam first."
+    _, line = plan.preview.lines
+    label = "The linked action: title, whose, target, deadline, steps, notes"
+    assert line.label == (label + " (cut to fit)" if sent < stored else label)
+    assert line.characters == part_sizes(plan.request)[DraftContextPart.ACTION]
 
 
 async def test_prepare_refuses_parts_that_are_not_available(

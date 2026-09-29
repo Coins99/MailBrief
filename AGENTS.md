@@ -127,9 +127,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Send only the parts the owner ticks for that generation: the email being replied to
   (subject, sender name only, received time in the owner's zone, and its body, downloaded
   then, prepared like the brief's and never stored); the linked action (title, ownership,
-  target date, deadline phrase, steps, at most 2,000 characters of notes); the draft's
-  current title and body (at most 8,000 characters). Always: kind, tone, length, the
-  owner's instructions (at most 1,000 characters) and today's date.
+  target date, deadline phrase, steps in order up to 2,000 characters in all, at most 2,000
+  characters of notes); the draft's current title and body (at most 8,000 characters).
+  Always: kind, tone, length, the owner's instructions (at most 1,000 characters) and
+  today's date.
 - Never send the sender's address, To or Cc, other emails, attachments, other drafts or
   actions, Gmail or MailBrief IDs, or credentials. The chosen parts are sent as written, so
   addresses, links or numbers inside them are sent too, and the consent text says so.

@@ -28,6 +28,7 @@ __all__ = ["DraftGenerationSummary", "DraftLength", "DraftTone"]
 
 INSTRUCTIONS_MAX_CHARS: Final = 1_000
 ACTION_NOTES_SENT_CHARS: Final = 2_000
+ACTION_STEPS_SENT_CHARS: Final = 2_000  # All steps sent, together.
 CURRENT_TEXT_SENT_CHARS: Final = 8_000
 GENERATED_BODY_MAX_CHARS: Final = 8_000
 GENERATED_SUBJECT_MAX_CHARS: Final = 200
@@ -105,6 +106,13 @@ class ActionContext(DomainModel):
     deadline_text: str | None = Field(default=None, repr=False)
     steps: tuple[str, ...] = Field(default=(), repr=False)
     notes: str = Field(default="", max_length=ACTION_NOTES_SENT_CHARS, repr=False)
+
+    @field_validator("steps")
+    @classmethod
+    def validate_steps(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if sum(len(step) for step in value) > ACTION_STEPS_SENT_CHARS:
+            raise ValueError("the steps sent are at most 2,000 characters in all")
+        return value
 
 
 class CurrentText(DomainModel):

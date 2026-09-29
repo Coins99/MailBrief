@@ -62,7 +62,8 @@ what AI drafting may send and keep is [ADR 0013](adr/0013-ai-drafting.md).
      downloaded from Gmail now (silent sign-in only), prepared like the brief's (the same
      length limit, quoted history trimmed) and never saved;
    - **the linked action**, while it exists: its title, whose it is, target date, deadline
-     phrase, steps and up to 2,000 characters of notes;
+     phrase, its steps in order up to 2,000 characters in all, and up to 2,000 characters of
+     notes;
    - **your current text**: the title and up to 8,000 characters of the body.
    Pick a tone (neutral, warm, formal or direct), a length (short, about 80 words at most;
    medium, about 80 to 200; long, about 200 to 400) and, optionally, instructions (up to
@@ -80,7 +81,8 @@ what AI drafting may send and keep is [ADR 0013](adr/0013-ai-drafting.md).
 today's date. **What is never sent:** the sender's address (only their name), To or Cc,
 other emails, attachments, your other drafts or actions, Gmail or MailBrief IDs, or
 credentials. The parts you tick are sent as written, so any addresses, links or numbers
-inside them (in the email's body, your text or the action's notes) are sent too.
+inside them (in the email's body, your text or the action's notes) are sent too. A part cut
+to fit its limit says "(cut to fit)" in the preview.
 
 **The result** becomes a new version: the status says "New version vN from Groq; your
 previous text is version vM." Your own text is saved as a version before anything is sent,

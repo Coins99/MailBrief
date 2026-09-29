@@ -18,8 +18,8 @@ may invent recipients, facts or quotes.
     address), the received time in the owner's zone, and its body. The body is downloaded
     when the generation starts, prepared like the brief's (the same length limit, quoted
     history trimmed) and never stored;
-  - the linked action: title, whose it is, target date, deadline phrase, steps, and at most
-    2,000 characters of notes;
+  - the linked action: title, whose it is, target date, deadline phrase, steps in order up
+    to 2,000 characters in all, and at most 2,000 characters of notes;
   - the draft's current title and body, at most 8,000 characters.
   - Always sent: the draft's kind, the tone, the length, the owner's instructions (at most
     1,000 characters) and today's date.

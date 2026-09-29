@@ -90,6 +90,13 @@ def test_sent_text_is_capped(model: Any, field: str, limit: int) -> None:
         model(**base, **{field: "x" * (limit + 1)})
 
 
+def test_the_steps_sent_are_capped_in_all() -> None:
+    steps = ("x" * 500,) * 4
+    assert ActionContext(title="T", ownership=ActionOwnership.MINE, steps=steps).steps == steps
+    with pytest.raises(ValidationError):
+        ActionContext(title="T", ownership=ActionOwnership.MINE, steps=(*steps, "x"))
+
+
 def test_a_request_keeps_text_as_given_and_names_its_parts() -> None:
     made = request(source=SOURCE, current=CurrentText(body=" mine "))
     assert made.source is not None and made.source.body == "  Body with spaces  "

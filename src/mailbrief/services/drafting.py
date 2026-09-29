@@ -20,6 +20,7 @@ from mailbrief.domain.bodies import BodyStatus
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.drafting import (
     ACTION_NOTES_SENT_CHARS,
+    ACTION_STEPS_SENT_CHARS,
     COPIED_RUN_LIMIT,
     CURRENT_TEXT_SENT_CHARS,
     GENERATED_BODY_MAX_CHARS,
@@ -210,7 +211,9 @@ class DraftingService:
         source = (
             await self._source(draft) if DraftContextPart.SOURCE_EMAIL in options.parts else None
         )
-        action = await self._action(draft) if DraftContextPart.ACTION in options.parts else None
+        action, action_cut = (
+            await self._action(draft) if DraftContextPart.ACTION in options.parts else (None, False)
+        )
         current = (
             CurrentText(title=draft.title, body=_bounded(draft.body, CURRENT_TEXT_SENT_CHARS))
             if DraftContextPart.CURRENT_TEXT in options.parts
@@ -229,6 +232,7 @@ class DraftingService:
         sizes = part_sizes(request)
         cut = {
             DraftContextPart.SOURCE_EMAIL: source is not None and source.body_truncated,
+            DraftContextPart.ACTION: action_cut,
             DraftContextPart.CURRENT_TEXT: current is not None
             and len(current.body) < len(draft.body),
         }
@@ -289,18 +293,31 @@ class DraftingService:
             body_truncated=prepared.truncated,
         )
 
-    async def _action(self, draft: Draft) -> ActionContext:
-        """The linked action, which available_parts() has checked is live."""
+    async def _action(self, draft: Draft) -> tuple[ActionContext, bool]:
+        """The linked action, which available_parts() has checked is live; True if cut to fit.
+
+        Steps are sent in order while they fit in ACTION_STEPS_SENT_CHARS, and notes are cut
+        at ACTION_NOTES_SENT_CHARS.
+        """
         assert draft.action_public_id is not None
         action = await ActionService(self._session).get(draft.action_public_id)
-        return ActionContext(
+        steps: list[str] = []
+        total = 0
+        for step in action.steps:
+            if total + len(step.text) > ACTION_STEPS_SENT_CHARS:
+                break
+            steps.append(step.text)
+            total += len(step.text)
+        notes, notes_cut = truncate_at_boundary(action.notes, ACTION_NOTES_SENT_CHARS)
+        context = ActionContext(
             title=action.title,
             ownership=action.ownership,
             target_date=action.target_date,
             deadline_text=action.deadline_text,
-            steps=tuple(step.text for step in action.steps),
-            notes=_bounded(action.notes, ACTION_NOTES_SENT_CHARS),
+            steps=tuple(steps),
+            notes=notes,
         )
+        return context, notes_cut or len(steps) < len(action.steps)
 
     async def generate(
         self,
