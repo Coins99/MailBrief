@@ -25,7 +25,8 @@ later use after Microsoft Entra access is resolved.
 - Implemented, awaiting live acceptance: M6 action suggestions on the brief, accepted
   actions with editable plans and target dates, open/waiting/completed lists and undo.
   See [M6 actions](docs/m6-actions.md).
-- M7 in progress on feat/m7-drafts: local drafts and notes implemented; AI drafting next.
+- M7 implemented on feat/m7-drafts (PR #16), awaiting review: local drafts and notes,
+  and AI drafting with Groq from context you choose.
   See [M7 drafts, notes and messages](docs/m7-drafts.md).
 
 ## Start here
