@@ -14,7 +14,7 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | 3. Brief history and bounded catch-up | Browse saved briefs; brief one missed day (within the last 7) per explicit run | None | Done |
 | 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Done |
 | 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None | Done |
-| 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7, ADR 0016 | Planned |
+| 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7, ADR 0016 | Done |
 | 7. Follow-up proposals in the desktop; earlier tracked replies offered in review | Reviewing and applying proposals | None expected | Planned |
 | 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, ADR 0017 | Planned |
 | 9. Closeout | Acceptance, documentation and cleanup | None expected | Planned |
@@ -382,3 +382,101 @@ Part 5 is implemented and awaits live acceptance. It needs no migration. The pol
   they can be read. `DigestView.accept_into_requested(suggestion_id, public_id, revision)`
   comes from internal `mailbrief:into/<n>` links; `thread_check_text()` builds the status
   sentence; `ActionsPanel.seen_button` emits `SEEN`.
+
+## Follow-up proposals (Part 6)
+
+Part 6 is implemented and awaits live acceptance. It adds migration `20260930_0011` and
+analysis schema version 7. The policy is [ADR 0016](adr/0016-follow-up-proposals.md); the
+desktop shows proposals from Part 7.
+
+### What it does
+
+- **A signal from each analyzed email.** Groq also says whether the email moves a deadline
+  (`new_deadline`), cancels a request (`cancelled`) or delivers what was asked (`delivered`),
+  judged from that email alone and with a quote from it. MailBrief checks the quote like
+  other evidence ([ai-analysis.md](ai-analysis.md#follow-up-signal-m8)); a signal it can't
+  check is dropped, never the email.
+- **Proposals.** After a brief is saved, each signal becomes a pending proposal for the open
+  actions (yours and those you wait for) whose thread the email continues in the same
+  account, when the action's latest email in that thread is older and the email isn't
+  already one of its sources. At most 3 actions per email, most urgent first. A new
+  deadline equal to the action's current one proposes nothing.
+- **One proposal per action, email and kind.** Running the brief again doesn't repeat it. A
+  newer analysis replaces a still-pending proposal of another kind for the same action and
+  email; applied and dismissed ones stay, and a dismissed proposal never comes back.
+- **Replies rank higher.** A message in a tracked thread that is newer than the thread's
+  sources and not sent by you gets +20, "reply in a thread you track", so it is usually in
+  the shortlist.
+- Nothing about your actions is sent to Groq, and the consent disclosure is unchanged. The
+  first brief after upgrading sends today's shortlist again once, under your existing
+  consent.
+
+### Applying and undoing
+
+- **Applying is your choice** and makes one revision:
+  - a new deadline sets the deadline and the suggested target date, and moves the target
+    date only if you never changed it (it still equals the old suggested target);
+  - a cancellation or delivery completes the action; a reply is never proof, so nothing
+    completes it without you;
+  - the email becomes one of the action's sources, from local mail or else from the
+    proposal's snapshot;
+  - the title, notes, steps and ownership never change.
+- **Undo** (in the desktop from Part 7) restores the previous deadline, targets and status
+  while the action is unchanged since the apply, and removes the source the apply added
+  unless it is the last one. The proposal is pending again.
+- **Dismiss** and restore change no action.
+
+### CLI
+
+- `brief` prints "Proposed N updates to your actions." when it made any. With `--show`, and
+  in `briefs show`, each item lists "Proposes: <kind> for <title> (P<id>)".
+- `actions proposals [--timezone ZONE] [--database PATH]` lists pending proposals of open
+  actions, newest first: `P<id> · <action ID> <title> · <kind> · "<quote>" · <sender>,
+  <date>, <subject>`. The kind reads "new deadline <date or time>", "cancelled" or
+  "delivered".
+- `actions apply-proposal ID [--timezone ZONE]` applies one and prints what changed;
+  `actions dismiss-proposal ID` dismisses it. The ID is `P3` or `3`. An unknown proposal, one
+  already applied or dismissed, or an action that is no longer open or has changed exits 3.
+- `actions list` adds "; N proposals" to an action with pending ones.
+- `sync --show-metadata` prints each message's rank reasons, such as "reply in a thread you
+  track".
+
+### Limits
+
+- A signal becomes a proposal only for an action whose thread the email continues. An
+  update sent in a new thread proposes nothing; accept its suggestion into the action
+  instead (`actions accept N --into`).
+- Proposals are made when a brief is saved, from the brief's shortlist; a reply that isn't
+  analyzed proposes nothing.
+- Undo is the desktop's (Part 7); the CLI has no undo for an applied proposal.
+
+### Live acceptance
+
+1. Accept an action with a deadline. From another account, reply in the thread "Can we
+   move this to next Monday?", then run `brief`: it prints "Proposed 1 update", and
+   `actions proposals` shows the proposal with its quote.
+2. `actions apply-proposal`: the deadline and the suggested target change, but a target
+   date you set yourself doesn't.
+3. Reply "No longer needed, thanks": a cancelled proposal appears, and applying it
+   completes the action.
+4. Dismiss a proposal and run `brief` again: it doesn't come back.
+5. The reply was ranked in with "reply in a thread you track" (`sync --show-metadata`).
+
+### For developers
+
+- `domain/analysis.py`: `FollowUpKind`, `FOLLOW_UP_EVIDENCE_CHARS`, schema version 7; the
+  signal is on `AnalysisCandidate` and `MessageAnalysis`. `domain/actions.py`:
+  `ProposalState`, `ActionProposal`, and `Action.proposals` (pending ones).
+- `services/analysis.py` `_follow_up()` checks the signal after the email's own evidence and
+  before `_suggestions`, which get the budget it leaves. `services/deadlines.py`
+  `suggest_target_for()` works from a received time and zone.
+- `services/proposals.py` `ProposalService`: `derive`, `get`, `pending`,
+  `pending_for_messages`, `apply`, `undo_apply`, `dismiss` and `restore`.
+  `storage/proposals.py` holds the queries; `ActionRepository.load()` fills pending
+  proposals with one more query. `BriefService` derives after the save and logs a failure
+  by type only.
+- `services/ranking.py`: `rank_messages(..., tracked=...)` and `reason_text()`;
+  `ThreadService.tracked(limit=None)` gives ranking every tracked thread.
+- Migration 0011 rebuilds `analyses` (`follow_up_kind`, default `none`, and
+  `follow_up_evidence`) and adds `action_proposals`, whose snapshot also keeps the email's
+  thread.

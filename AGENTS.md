@@ -38,7 +38,11 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   the threads of open actions are checked after today's sync (`actions list`,
   `actions seen`). See ADR 0015. Thread activity in the desktop and "Add to" an existing
   action (Part 5) implemented, awaiting live acceptance: continuations and Add to in the
-  brief, Mark seen in the actions pane, and `actions accept N --into`.
+  brief, Mark seen in the actions pane, and `actions accept N --into`. Follow-up proposals
+  backend (Part 6) implemented, awaiting live acceptance: analysis schema 7's follow-up
+  signal, proposals the owner applies or dismisses (`actions proposals`,
+  `apply-proposal`, `dismiss-proposal`) and a ranking bonus for replies in tracked threads.
+  See ADR 0016.
 
 ## Layout (ports and adapters)
 
@@ -59,10 +63,13 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   rule (`check_brief_date`) and each brief's `coverage_line`.
 - `src/mailbrief/services/threads.py`: checks the threads of open actions and caches their
   later messages' metadata (ADR 0015).
+- `src/mailbrief/services/proposals.py`: derives follow-up proposals from a saved brief's
+  analyses, and applies, undoes, dismisses and restores them (ADR 0016).
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
-  `actions.py` for suggestions, decisions and accepted actions, `drafts.py` for drafts,
-  their versions and source snapshots, and `preferences.py` for the preferences row.
-  Alembic revisions live in `migrations/versions/`.
+  `actions.py` for suggestions, decisions and accepted actions, `proposals.py` for
+  follow-up proposals, `drafts.py` for drafts, their versions and source snapshots, and
+  `preferences.py` for the preferences row. Alembic revisions live in
+  `migrations/versions/`.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
 - `src/mailbrief/infra/`: HTTP retry classification, `vault.py`, the explicit OS
@@ -90,9 +97,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Derived content is bounded: a summary is at most 240 characters, an action at most
   1,000, and evidence at most 300 and strictly under 80% of the body. An email has at most
   five suggestions, each with a title of at most 120 characters, at most five steps of at
-  most 120, and evidence of at most 160. All stored evidence for one email totals at most
-  600 characters and stays under 80% of its body. A summary of a very short email may
-  restate it.
+  most 120, and evidence of at most 160, and one follow-up signal with a quote of at most
+  160. All stored evidence for one email totals at most 600 characters and stays under 80%
+  of its body. A summary of a very short email may restate it.
 - Text the AI writes itself (summary, action text, suggestion titles and steps) and
   deadline phrases are stripped of control and format characters before they are stored.
   Mail and AI text reaches the UI only through plain-text widgets or escaped HTML, and only
@@ -137,6 +144,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   Drafts, trash and spam are ignored, and no folder or label (the Sent folder included) is
   ever listed. A reply never changes an action: activity is derived, and only the owner's
   `mark_thread_seen` moves the watermark. A failed or stopped check never fails the sync.
+- Follow-up proposals are the only AI-derived path to change an action, and only the owner
+  applies them; applying never touches title, notes, steps or ownership, and never moves a
+  target date the owner changed. Deriving proposals never changes an action, applying and
+  undoing make one revision each, and a dismissed proposal is never proposed again.
 - Only the owner adds an email to an existing action (`accept_into`), and only to a live,
   open one; the brief offers it only for actions with a source in the email's thread in the
   same account, it makes one revision, and its undo works only while the action is
@@ -167,6 +178,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Each result may carry up to five action suggestions (schema version 6). A suggestion
   whose evidence does not quote the email is dropped; a deadline phrase that does not quote
   it drops only that suggestion's deadline. Target dates come from Python, never the model.
+- Each result also carries a follow-up signal (schema version 7, ADR 0016), judged from the
+  email alone: nothing about the owner's actions is ever sent. Its quote is checked before
+  the suggestions and counts toward the evidence total; a signal that doesn't check out
+  becomes none and never fails the message.
 
 ## AI drafting rules (M7, ADR 0013)
 
@@ -212,7 +227,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts, drafting, preferences, history and threads services.
+  drafts, drafting, preferences, history, threads and proposals services.
 
 ## Dormant Microsoft notes
 
