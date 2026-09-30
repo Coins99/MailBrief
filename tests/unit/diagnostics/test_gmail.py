@@ -233,6 +233,7 @@ def _proposal(**overrides: Any) -> ActionProposal:
         "id": 4,
         "action_public_id": "0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44",
         "action_title": "Send the deck",
+        "action_revision": 1,
         "kind": FollowUpKind.CANCELLED,
         "state": ProposalState.PENDING,
         "evidence": "No longer\nneeded, thanks",

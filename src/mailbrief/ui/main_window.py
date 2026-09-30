@@ -23,7 +23,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit, ThreadLink
+from mailbrief.domain.actions import (
+    Action,
+    ActionEdit,
+    ActionFilter,
+    ActionProposal,
+    StepEdit,
+    ThreadLink,
+)
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import (
@@ -79,12 +86,21 @@ from mailbrief.services.preferences import (
     PreferencesUnavailableError,
     owner_zone,
 )
+from mailbrief.services.proposals import ProposalNotFoundError
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE, OUTSIDE_REPLY_TEXT, reason_text
 from mailbrief.ui.action_editor import ActionEditor
-from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, SEEN, ActionsPanel
+from mailbrief.ui.actions_view import (
+    COMPLETE,
+    DELETE,
+    EDIT,
+    PROPOSALS,
+    REOPEN,
+    SEEN,
+    ActionsPanel,
+)
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
-from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
+from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS, DigestView
 from mailbrief.ui.draft_editor import DraftEditor
 from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
 from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
@@ -93,6 +109,7 @@ from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import region_zones
+from mailbrief.ui.proposals_view import ProposalsDialog
 from mailbrief.ui.settings_view import SettingsDialog
 
 
@@ -130,6 +147,13 @@ class DesktopBackend(Protocol):
     async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]: ...
     async def accept_suggestion(self, suggestion_id: int) -> Action: ...
     async def brief_links(self, digest: DailyDigest) -> dict[str, tuple[ThreadLink, ...]]: ...
+    async def brief_proposals(
+        self, digest: DailyDigest
+    ) -> dict[str, tuple[ActionProposal, ...]]: ...
+    async def apply_proposal(self, proposal_id: int, revision: int) -> Action: ...
+    async def undo_apply_proposal(self, proposal_id: int, revision: int) -> Action: ...
+    async def dismiss_proposal(self, proposal_id: int) -> None: ...
+    async def restore_proposal(self, proposal_id: int) -> None: ...
     async def accept_into(
         self, suggestion_id: int, public_id: str, revision: int
     ) -> AcceptedInto: ...
@@ -178,6 +202,7 @@ _STALE = (
     ActionConflictError,
     ActionNotFoundError,
     SuggestionNotFoundError,
+    ProposalNotFoundError,
     DraftConflictError,
     DraftNotFoundError,
 )
@@ -354,6 +379,11 @@ class MainWindow(QMainWindow):
         self.draft_editor = DraftEditor(self)
         self._connect_draft_editor(self.draft_editor)
         self.cached_dialog = CachedMailDialog(self)
+        self.proposals_dialog = ProposalsDialog(self)
+        self.proposals_dialog.apply_requested.connect(self._request_apply_from_dialog)
+        self.proposals_dialog.dismiss_requested.connect(
+            lambda proposal_id: self._start_from_link(lambda: self._dismiss_proposal(proposal_id))
+        )
         self.history_dialog = BriefHistoryDialog(self)
         self.history_dialog.open_requested.connect(self._request_open_brief)
         self.history_dialog.generate_requested.connect(self._request_brief_day)
@@ -455,6 +485,7 @@ class MainWindow(QMainWindow):
         self.cached_dialog.zone = self.zone
         self.digest.suggestion_requested.connect(self._request_suggestion)
         self.digest.accept_into_requested.connect(self._request_accept_into)
+        self.digest.proposal_requested.connect(self._request_proposal)
         self.digest.setMinimumHeight(180)
         layout.addWidget(self.digest, 1)
         self.actions_panel = ActionsPanel()
@@ -502,6 +533,7 @@ class MainWindow(QMainWindow):
         self.history_dialog.set_busy(busy)
         self.latest_button.setEnabled(not busy)
         self.cached_dialog.set_busy(busy)
+        self.proposals_dialog.set_busy(busy)
         self.undo_button.setEnabled(not busy)
         self.actions_panel.set_busy(busy)
         self.action_editor.set_busy(busy)
@@ -546,15 +578,21 @@ class MainWindow(QMainWindow):
             await self._show_digest(saved)
 
     async def _show_digest(self, digest: DailyDigest) -> None:
-        """Every brief is shown here, with the actions that continue its threads; when those
-        can't be read, the brief is shown without them."""
+        """Every brief is shown here, with the actions that continue its threads and the
+        updates its emails propose; when either can't be read, the brief is shown without it."""
         links: dict[str, tuple[ThreadLink, ...]] | None
         try:
             links = await self.backend.brief_links(digest)
         except Exception as exc:
             log_failure(exc)
             links = None
-        self.digest.show_digest(digest, links)
+        proposals: dict[str, tuple[ActionProposal, ...]] | None
+        try:
+            proposals = await self.backend.brief_proposals(digest)
+        except Exception as exc:
+            log_failure(exc)
+            proposals = None
+        self.digest.show_digest(digest, links, proposals)
 
     async def _refresh_actions(self) -> None:
         now = self.now()
@@ -580,10 +618,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._note_not_refreshed(exc)
 
+    def _refresh_proposals_dialog(self) -> None:
+        """An open Proposals dialog follows the action's latest state."""
+        dialog = self.proposals_dialog
+        public_id = dialog.action_public_id
+        if dialog.isVisible() and public_id is not None:
+            dialog.show_proposals(self.actions_panel.action_with_id(public_id), self.zone)
+
     async def _refresh_views(self) -> None:
         await self._reload_brief()
         await self._refresh_actions()
         await self._refresh_drafts()
+        self._refresh_proposals_dialog()
 
     async def _stale(self, exc: Exception) -> None:
         log_failure(exc)
@@ -638,6 +684,54 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Added to: {action.title}.")
         await self._refresh_views()
 
+    def _request_proposal(self, kind: str, proposal_id: int, revision: int) -> None:
+        if kind == APPLY:
+            self._start_from_link(lambda: self._apply_proposal(proposal_id, revision))
+        elif kind == DISMISS:
+            self._start_from_link(lambda: self._dismiss_proposal(proposal_id))
+
+    def _request_apply_from_dialog(self, proposal_id: int) -> None:
+        proposal = self.proposals_dialog.proposal(proposal_id)
+        if proposal is not None:
+            revision = proposal.action_revision
+            self._start_from_link(lambda: self._apply_proposal(proposal_id, revision))
+
+    async def _apply_proposal(self, proposal_id: int, revision: int) -> None:
+        """Apply a proposal the owner chose, at the action revision they saw, with Undo."""
+        try:
+            action = await self.backend.apply_proposal(proposal_id, revision)
+        except ActionConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static; names no action or mail.
+            await self._refresh_views()
+            return
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        applied_revision = action.revision
+
+        async def undo() -> None:
+            await self.backend.undo_apply_proposal(proposal_id, applied_revision)
+
+        self._offer_undo("Undo apply", undo)
+        self.status.setText(f"Applied to: {action.title}.")
+        await self._refresh_views()
+
+    async def _dismiss_proposal(self, proposal_id: int) -> None:
+        try:
+            await self.backend.dismiss_proposal(proposal_id)
+        except ActionConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))
+            await self._refresh_views()
+            return
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._offer_undo("Undo dismiss", lambda: self.backend.restore_proposal(proposal_id))
+        self.status.setText("Proposal dismissed. It won't be proposed again.")
+        await self._refresh_views()
+
     async def _dismiss_suggestion(self, suggestion_id: int) -> None:
         try:
             await self.backend.dismiss_suggestion(suggestion_id)
@@ -675,6 +769,9 @@ class MainWindow(QMainWindow):
             self.start(lambda: self._delete_action(action), cancellable=False)
         elif kind == SEEN:
             self.start(lambda: self._mark_seen(action), cancellable=False)
+        elif kind == PROPOSALS:
+            self.proposals_dialog.show_proposals(action, self.zone)
+            self.proposals_dialog.open()
 
     def _request_save_action(
         self, action: Action, edit: ActionEdit, steps: Sequence[StepEdit] | None
@@ -1427,6 +1524,10 @@ class MainWindow(QMainWindow):
         threads = "" if result.status is BriefStatus.CANCELLED else thread_check_text(result.sync)
         if threads:
             self.status.setText(f"{self.status.text()} {threads}")
+        if result.proposals_created > 0:
+            count = result.proposals_created
+            noun = "update" if count == 1 else "updates"
+            self.status.setText(f"{self.status.text()} Proposed {count} {noun} to your actions.")
         if result.error_code == "AUTH_REQUIRED" or result.sync.error_code == "AUTH_REQUIRED":
             self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
         for code in dict.fromkeys((result.error_code, result.sync.error_code)):
@@ -1565,6 +1666,7 @@ class MainWindow(QMainWindow):
         self.settings_dialog.reject()
         self.cached_dialog.reject()
         self.history_dialog.reject()
+        self.proposals_dialog.reject()
         self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
         self._cancel_drafting()
         final = self.draft_editor.final_edit() if self.draft_editor.isVisible() else None

@@ -653,7 +653,7 @@ class ActionRepository:
                 sources.get(row.id, ()),
                 _activity(row, snapshots.get(row.id, ()), accounts, cached),
                 [
-                    proposal_from_row(proposal, row.public_id, row.title)
+                    proposal_from_row(proposal, row.public_id, row.title, row.revision)
                     for proposal in proposals.get(row.id, ())
                 ],
             )

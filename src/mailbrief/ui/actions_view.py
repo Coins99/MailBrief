@@ -26,12 +26,14 @@ from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.deadline_text import deadline_text
 from mailbrief.ui.lists import ActivatingList
+from mailbrief.ui.proposals_view import pending_proposals
 
 EDIT = "edit"
 COMPLETE = "complete"
 REOPEN = "reopen"
 DELETE = "delete"
 SEEN = "seen"
+PROPOSALS = "proposals"
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _TAB_NAMES = {
@@ -74,6 +76,8 @@ def describe(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> s
         if thread.owner_replied_at_utc is not None:
             replied = _when(thread.owner_replied_at_utc, today=today, zone=zone, clock=False)
             details.append(f"you replied {replied}")
+    if proposals := len(pending_proposals(action)):
+        details.append(f"{proposals} {'proposal' if proposals == 1 else 'proposals'}")
     return action.title + (" — " + " · ".join(details) if details else "")
 
 
@@ -116,9 +120,9 @@ def gmail_source(action: Action) -> str | None:
 class ActionsPanel(QWidget):
     """Lists actions per view and asks the window to act; it changes nothing itself.
 
-    ``action_requested(kind, action)`` carries EDIT, COMPLETE, REOPEN, DELETE or SEEN and
-    the selected Action, and ``draft_requested(kind, action)`` a DraftKind and the Action.
-    Opening a source needs no backend, so the panel does it directly.
+    ``action_requested(kind, action)`` carries EDIT, COMPLETE, REOPEN, DELETE, SEEN or
+    PROPOSALS and the selected Action, and ``draft_requested(kind, action)`` a DraftKind and
+    the Action. Opening a source needs no backend, so the panel does it directly.
     """
 
     action_requested = Signal(str, object)
@@ -154,6 +158,10 @@ class ActionsPanel(QWidget):
         # K: the window's Sync and review already takes S.
         self.seen_button = QPushButton("Mar&k seen")
         self.seen_button.setToolTip("Clear the new-in-thread and you-replied notes.")
+        # R: the other letters of "Proposals" are taken by Complete, Delete, Open source and
+        # the window's Sync and review.
+        self.proposals_button = QPushButton("P&roposals…")
+        self.proposals_button.setToolTip("Review follow-up replies that propose an update.")
         self.draft_button = QPushButton("Dra&ft…")
         self.draft_menu = QMenu(self.draft_button)
         self.reply_draft = self.draft_menu.addAction("Reply to its email")
@@ -174,6 +182,7 @@ class ActionsPanel(QWidget):
             self.delete_button,
             self.source_button,
             self.seen_button,
+            self.proposals_button,
             self.draft_button,
         ):
             buttons.addWidget(button)
@@ -182,6 +191,7 @@ class ActionsPanel(QWidget):
         self.complete_button.clicked.connect(self._complete_or_reopen)
         self.delete_button.clicked.connect(lambda: self._request(DELETE))
         self.seen_button.clicked.connect(self._mark_seen)
+        self.proposals_button.clicked.connect(self._show_proposals)
         self.source_button.clicked.connect(self._open_source)
         self._busy = False
         self._update_buttons()
@@ -242,6 +252,9 @@ class ActionsPanel(QWidget):
             button.setEnabled(enabled)
         self.source_button.setEnabled(action is not None and gmail_source(action) is not None)
         self.seen_button.setEnabled(enabled and action is not None and has_activity(action))
+        self.proposals_button.setEnabled(
+            enabled and action is not None and bool(pending_proposals(action))
+        )
         self.draft_button.setEnabled(enabled)
         self.reply_draft.setEnabled(action is not None and can_reply(action))
 
@@ -263,6 +276,19 @@ class ActionsPanel(QWidget):
         action = self.selected()
         if action is not None and has_activity(action):
             self._request(SEEN)
+
+    def _show_proposals(self) -> None:
+        action = self.selected()
+        if action is not None and pending_proposals(action):
+            self._request(PROPOSALS)
+
+    def action_with_id(self, public_id: str) -> Action | None:
+        """The action with this ID in any view, as last shown."""
+        for actions in self._actions.values():
+            for action in actions:
+                if action.public_id == public_id:
+                    return action
+        return None
 
     def _open_source(self) -> None:
         action = self.selected()

@@ -29,12 +29,16 @@ def _chunks[T: (int, str)](values: Iterable[T]) -> Iterator[list[T]]:
         yield ordered[start : start + MAX_SQLITE_BATCH_SIZE]
 
 
-def proposal_from_row(row: ActionProposalTable, public_id: str, title: str) -> ActionProposal:
-    """Rebuild a stored proposal for the action with ``public_id`` and ``title``."""
+def proposal_from_row(
+    row: ActionProposalTable, public_id: str, title: str, revision: int
+) -> ActionProposal:
+    """Rebuild a stored proposal for the action with ``public_id``, ``title`` and, as loaded,
+    ``revision``."""
     return ActionProposal(
         id=row.id,
         action_public_id=public_id,
         action_title=title,
+        action_revision=revision,
         kind=FollowUpKind(row.kind),
         state=ProposalState(row.state),
         deadline_text=row.deadline_text,
@@ -192,27 +196,37 @@ class ProposalRepository:
                 found.setdefault(row.action_id, []).append(row)
         return found
 
-    async def pending(self, limit: int) -> list[tuple[ActionProposalTable, str, str]]:
+    async def pending(self, limit: int) -> list[tuple[ActionProposalTable, str, str, int]]:
         """Pending proposals of live, open actions, newest first, with each action's public
-        ID and title."""
+        ID, title and revision."""
         result = await self._session.execute(
-            select(ActionProposalTable, ActionTable.public_id, ActionTable.title)
+            select(
+                ActionProposalTable,
+                ActionTable.public_id,
+                ActionTable.title,
+                ActionTable.revision,
+            )
             .join(ActionTable, ActionProposalTable.action_id == ActionTable.id)
             .where(ActionProposalTable.state == ProposalState.PENDING.value, *_live_open())
             .order_by(ActionProposalTable.created_at_utc.desc(), ActionProposalTable.id.desc())
             .limit(limit)
         )
-        return [(row, public_id, title) for row, public_id, title in result.tuples()]
+        return list(result.tuples())
 
     async def pending_for_messages(
         self, provider: str, account_email: str, provider_message_ids: Iterable[str]
-    ) -> list[tuple[ActionProposalTable, str, str]]:
+    ) -> list[tuple[ActionProposalTable, str, str, int]]:
         """Pending proposals of live, open actions made from these emails of the account,
-        with each action's public ID and title, oldest first."""
-        found: list[tuple[ActionProposalTable, str, str]] = []
+        with each action's public ID, title and revision, oldest first."""
+        found: list[tuple[ActionProposalTable, str, str, int]] = []
         for chunk in _chunks(provider_message_ids):
             result = await self._session.execute(
-                select(ActionProposalTable, ActionTable.public_id, ActionTable.title)
+                select(
+                    ActionProposalTable,
+                    ActionTable.public_id,
+                    ActionTable.title,
+                    ActionTable.revision,
+                )
                 .join(ActionTable, ActionProposalTable.action_id == ActionTable.id)
                 .join(
                     AccountTable,
@@ -230,5 +244,5 @@ class ProposalRepository:
                 )
                 .order_by(ActionProposalTable.id)
             )
-            found.extend((row, public_id, title) for row, public_id, title in result.tuples())
+            found.extend(result.tuples())
         return found

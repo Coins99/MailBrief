@@ -120,3 +120,50 @@ async def test_a_limit_of_one_reads_in_the_singular(window: MainWindow) -> None:
         assert window.status.text() == "Choose at most 1 message before continuing."
     finally:
         await stop(task)
+
+
+OUTSIDE = "reply in a tracked thread, not in today's Inbox"
+
+
+async def test_outside_replies_are_labelled_and_otherwise_like_any_other_row(
+    window: MainWindow,
+) -> None:
+    task = await start_review(window, frozenset(), 10, outside=frozenset({"m2"}))
+    try:
+        labels = [item.text() for item in (window.shortlist.item(row) for row in range(4)) if item]
+        assert labels == [
+            "sender0@example.com — Subject 0",
+            "sender1@example.com — Subject 1",
+            f"sender2@example.com — Subject 2 — {OUTSIDE}",
+            "sender3@example.com — Subject 3",
+        ]
+        outside = window.shortlist.item(2)
+        assert outside is not None
+        # Checkable and not checked until chosen, like the others that aren't suggested.
+        assert outside.flags() & Qt.ItemFlag.ItemIsUserCheckable
+        assert outside.checkState() == Qt.CheckState.Unchecked
+        outside.setCheckState(Qt.CheckState.Checked)
+        window.review_button.click()
+        assert await task == ("m1", "m2")
+    finally:
+        await stop(task)
+
+
+async def test_a_suggested_outside_reply_is_checked_by_default(window: MainWindow) -> None:
+    task = asyncio.create_task(
+        window.review(
+            CANDIDATES,
+            ("m2",),
+            blocked_ids=frozenset(),
+            outside_ids=frozenset({"m2"}),
+            limit=10,
+        )
+    )
+    await asyncio.sleep(0)
+    try:
+        outside = window.shortlist.item(2)
+        assert outside is not None and outside.checkState() == Qt.CheckState.Checked
+        assert outside.text().endswith(OUTSIDE)
+        assert window.review_button.text() == "Co&ntinue with 1 selected message"
+    finally:
+        await stop(task)

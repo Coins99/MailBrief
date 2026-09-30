@@ -3,12 +3,13 @@
 import hashlib
 from datetime import UTC, date, datetime
 
-from mailbrief.domain.actions import Action, ActionStatus
+from mailbrief.domain.actions import Action, ActionProposal, ActionStatus, ProposalState
 from mailbrief.domain.analysis import (
     ActionOwnership,
     ActionSuggestion,
     AnalysisCategory,
     DeadlinePrecision,
+    FollowUpKind,
     MessageAnalysis,
 )
 from mailbrief.domain.digests import DigestItem, DigestSection
@@ -94,6 +95,27 @@ def make_action(**overrides: object) -> Action:
     }
     values.update(overrides)
     return Action.model_validate(values)
+
+
+def make_proposal(**overrides: object) -> ActionProposal:
+    """Build a valid pending "cancelled" proposal for make_action's action by default."""
+    values: dict[str, object] = {
+        "id": 3,
+        "action_public_id": "0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44",
+        "action_title": "Approve the proposal",
+        "action_revision": 1,
+        "kind": FollowUpKind.CANCELLED,
+        "state": ProposalState.PENDING,
+        "evidence": "No longer needed, thanks",
+        "provider_message_id": "reply-1",
+        "subject": "Re: deck",
+        "sender_address": "sam@example.com",
+        "received_at_utc": datetime(2026, 9, 3, 13, 0, tzinfo=UTC),
+        "web_link": "https://mail.google.com/mail/u/0/#inbox/reply-1",
+        "created_at_utc": datetime(2026, 9, 3, 14, 0, tzinfo=UTC),
+    }
+    values.update(overrides)
+    return ActionProposal.model_validate(values)
 
 
 def make_digest_item(**overrides: object) -> DigestItem:

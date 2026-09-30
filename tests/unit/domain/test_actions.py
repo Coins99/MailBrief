@@ -439,6 +439,7 @@ def make_proposal(**overrides: object) -> ActionProposal:
         "id": 3,
         "action_public_id": PUBLIC_ID,
         "action_title": "Send the deck",
+        "action_revision": 4,
         "kind": FollowUpKind.CANCELLED,
         "state": ProposalState.PENDING,
         "evidence": "No longer needed, thanks",
@@ -473,6 +474,7 @@ def test_a_new_deadline_proposal_carries_its_deadline_and_target() -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
+        {"action_revision": 0},
         {"kind": FollowUpKind.NONE},
         {"kind": FollowUpKind.NEW_DEADLINE},  # Without a deadline.
         {"kind": FollowUpKind.CANCELLED, **DATE_DEADLINE},  # Only new deadlines carry one.
@@ -480,7 +482,15 @@ def test_a_new_deadline_proposal_carries_its_deadline_and_target() -> None:
         {"evidence": "x" * 161},
         {"evidence": ""},
     ],
-    ids=["none", "deadline-missing", "deadline-not-allowed", "target-alone", "long", "empty"],
+    ids=[
+        "revision",
+        "none",
+        "deadline-missing",
+        "deadline-not-allowed",
+        "target-alone",
+        "long",
+        "empty",
+    ],
 )
 def test_invalid_proposals_are_refused(overrides: dict[str, object]) -> None:
     with pytest.raises(ValidationError):

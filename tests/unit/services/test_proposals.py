@@ -554,6 +554,7 @@ async def test_applying_a_new_deadline_moves_a_target_the_owner_never_changed(
     applied = await service.apply(proposal_id, 1)
 
     assert (applied.revision, applied.updated_at_utc) == (2, clock.now)
+    assert (await service.get(proposal_id)).action_revision == 2  # Loaded after the change.
     assert (applied.deadline_text, applied.deadline_date) == ("next Monday", date(2026, 10, 5))
     assert (applied.suggested_target_date, applied.target_date) == (
         date(2026, 10, 2),
@@ -766,6 +767,9 @@ async def test_pending_proposals_are_listed_by_message_for_open_actions_only(
 
     assert list(found) == ["reply"]
     assert [proposal.action_public_id for proposal in found["reply"]] == [public_id]
+    # Each carries the action's revision as loaded: what applying it will need.
+    assert [proposal.action_revision for proposal in found["reply"]] == [1]
+    assert [proposal.action_revision for proposal in await service.pending()] == [1]
     assert await service.pending_for_messages("gmail-2@example.com", ["reply"]) == {}
     await ActionService(session).complete(public_id, 1)
     assert await service.pending_for_messages("gmail-1@example.com", ["reply"]) == {}

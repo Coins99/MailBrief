@@ -11,7 +11,14 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit, ThreadLink
+from mailbrief.domain.actions import (
+    Action,
+    ActionEdit,
+    ActionFilter,
+    ActionProposal,
+    StepEdit,
+    ThreadLink,
+)
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
@@ -87,6 +94,12 @@ class FakeBackend(FakeDrafts):
         self.links: dict[str, tuple[ThreadLink, ...]] = {}
         self.links_fail: Exception | None = None
         self.link_calls: list[DailyDigest] = []
+        # The pending proposals of each message's email, for every brief shown;
+        # proposals_fail makes every read fail.
+        self.proposals: dict[str, tuple[ActionProposal, ...]] = {}
+        self.proposals_fail: Exception | None = None
+        self.proposal_calls: list[DailyDigest] = []
+        self.proposals_created = 0  # What a brief run reports having proposed.
         self.source_added = True
         self.sync = SyncResult(
             account_id="owner@example.com",
@@ -127,6 +140,26 @@ class FakeBackend(FakeDrafts):
         if self.links_fail is not None:
             raise self.links_fail
         return self.links
+
+    async def brief_proposals(self, digest: DailyDigest) -> dict[str, tuple[ActionProposal, ...]]:
+        self.proposal_calls.append(digest)
+        if self.proposals_fail is not None:
+            raise self.proposals_fail
+        return self.proposals
+
+    async def apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        await self._act("apply_proposal", proposal_id, revision)
+        return make_action(title="Send the deck", revision=revision + 1)
+
+    async def undo_apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        await self._act("undo_apply_proposal", proposal_id, revision)
+        return make_action(title="Send the deck", revision=revision + 1)
+
+    async def dismiss_proposal(self, proposal_id: int) -> None:
+        await self._act("dismiss_proposal", proposal_id)
+
+    async def restore_proposal(self, proposal_id: int) -> None:
+        await self._act("restore_proposal", proposal_id)
 
     async def accept_into(self, suggestion_id: int, public_id: str, revision: int) -> AcceptedInto:
         await self._act("accept_into", suggestion_id, public_id, revision)
@@ -285,6 +318,7 @@ class FakeBackend(FakeDrafts):
                 status=BriefStatus.SAVED if self.approved else BriefStatus.CONSENT_DECLINED,
                 sync=self.sync,
                 digest=digest if self.approved else None,
+                proposals_created=self.proposals_created,
             )
         finally:
             await asyncio.sleep(0)

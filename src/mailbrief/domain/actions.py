@@ -146,7 +146,8 @@ class ActionProposal(DomainModel):
     A new deadline carries the deadline and suggested target; a cancellation or delivery
     proposes completing the action and carries none. The email is a snapshot, so the
     proposal outlives the cached message. ``action_title`` is the action's current title,
-    for display.
+    for display, and ``action_revision`` the action's revision when the proposal was loaded:
+    applying it needs that revision, so a change in between is caught.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -154,6 +155,7 @@ class ActionProposal(DomainModel):
     id: int = Field(ge=1)
     action_public_id: str = Field(min_length=PUBLIC_ID_CHARS, max_length=PUBLIC_ID_CHARS)
     action_title: str = Field(min_length=1, max_length=ACTION_TITLE_MAX_CHARS, repr=False)
+    action_revision: int = Field(ge=1)
     kind: FollowUpKind
     state: ProposalState
     deadline_text: str | None = Field(

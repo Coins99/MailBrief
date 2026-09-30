@@ -8,7 +8,14 @@ from pathlib import Path
 from pydantic import SecretStr
 
 from mailbrief.config import Settings
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit, ThreadLink
+from mailbrief.domain.actions import (
+    Action,
+    ActionEdit,
+    ActionFilter,
+    ActionProposal,
+    StepEdit,
+    ThreadLink,
+)
 from mailbrief.domain.bodies import MessageBody
 from mailbrief.domain.briefs import BriefRunResult
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
@@ -51,6 +58,7 @@ from mailbrief.services.preferences import (
     effective_settings,
     owner_zone,
 )
+from mailbrief.services.proposals import ProposalService
 from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
@@ -351,6 +359,32 @@ class DesktopRuntime:
             return await ActionService(session).thread_links(
                 digest.account_id, (item.message_key for item in digest.items)
             )
+
+    # Follow-up proposals (ADR 0016): derived after a brief, applied only when the owner asks.
+
+    async def brief_proposals(self, digest: DailyDigest) -> dict[str, tuple[ActionProposal, ...]]:
+        """The pending proposals of live, open actions made from each item's email, by message
+        key; local data only."""
+        async with self._storage().session() as session:
+            return await ProposalService(session).pending_for_messages(
+                digest.account_id, (item.message_key for item in digest.items)
+            )
+
+    async def apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ProposalService(session).apply(proposal_id, revision)
+
+    async def undo_apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ProposalService(session).undo_apply(proposal_id, revision)
+
+    async def dismiss_proposal(self, proposal_id: int) -> None:
+        async with self._storage().session() as session:
+            await ProposalService(session).dismiss(proposal_id)
+
+    async def restore_proposal(self, proposal_id: int) -> None:
+        async with self._storage().session() as session:
+            await ProposalService(session).restore(proposal_id)
 
     async def accept_into(self, suggestion_id: int, public_id: str, revision: int) -> AcceptedInto:
         async with self._storage().session() as session:

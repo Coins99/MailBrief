@@ -297,14 +297,17 @@ class ProposalService:
         """A proposal in any state."""
         row = await self._row(proposal_id)
         action = await self._action(row)
-        return proposal_from_row(row, action.public_id, action.title)
+        return proposal_from_row(row, action.public_id, action.title, action.revision)
 
     async def pending(self, limit: int = PROPOSAL_LIST_LIMIT) -> tuple[ActionProposal, ...]:
         """Pending proposals of live, open actions, newest first."""
         if limit < 1:
             raise ValueError("limit must be at least 1")
         rows = await self._proposals.pending(limit)
-        return tuple(proposal_from_row(row, public_id, title) for row, public_id, title in rows)
+        return tuple(
+            proposal_from_row(row, public_id, title, revision)
+            for row, public_id, title, revision in rows
+        )
 
     async def pending_for_messages(
         self, account_email: str, message_keys: Iterable[str]
@@ -315,9 +318,9 @@ class ProposalService:
             ProviderKind.GMAIL.value, account_email, message_keys
         )
         found: dict[str, list[ActionProposal]] = {}
-        for row, public_id, title in rows:
+        for row, public_id, title, revision in rows:
             found.setdefault(row.provider_message_id, []).append(
-                proposal_from_row(row, public_id, title)
+                proposal_from_row(row, public_id, title, revision)
             )
         return {key: tuple(proposals) for key, proposals in found.items()}
 

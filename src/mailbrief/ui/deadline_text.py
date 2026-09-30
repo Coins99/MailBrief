@@ -1,12 +1,13 @@
-"""A deadline in a few words, for the brief's suggestion lines and the action lists."""
+"""A deadline in a few words, for the brief's suggestion and proposal lines and the action
+lists."""
 
 from zoneinfo import ZoneInfo
 
-from mailbrief.domain.actions import Action
+from mailbrief.domain.actions import Action, ActionProposal
 from mailbrief.domain.analysis import ActionSuggestion, DeadlinePrecision
 
 
-def deadline_text(item: Action | ActionSuggestion, zone: ZoneInfo) -> str | None:
+def deadline_text(item: Action | ActionSuggestion | ActionProposal, zone: ZoneInfo) -> str | None:
     """How a deadline reads in a list, or None when there is none.
 
     - exact: "YYYY-MM-DD HH:MM" in ``zone``, the owner's, like the editor and the CLI;
