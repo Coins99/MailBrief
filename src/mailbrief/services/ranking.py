@@ -12,10 +12,11 @@ from mailbrief.domain.messages import (
     RankedMessage,
     RankReason,
 )
+from mailbrief.domain.preferences import SHORTLIST_LIMIT_MAX
 
 DEFAULT_THRESHOLD: int = 10
 MIN_SHORTLIST_SIZE: int = 3
-MAX_SHORTLIST_SIZE: int = 10
+MAX_SHORTLIST_SIZE: int = SHORTLIST_LIMIT_MAX
 
 
 class ShortlistGate(Protocol):
