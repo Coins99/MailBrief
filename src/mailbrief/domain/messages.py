@@ -89,6 +89,7 @@ class NormalizedMessage(DomainModel):
     received_at_utc: datetime
     is_read: bool
     is_in_inbox: bool = True
+    is_sent: bool = False  # Sent from this account (Gmail's SENT label).
     importance: MessageImportance = MessageImportance.NORMAL
     has_attachments: bool
     body_preview: str = Field(default="", max_length=2_048)

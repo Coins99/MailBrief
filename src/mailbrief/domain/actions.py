@@ -97,6 +97,39 @@ class ActionSource(DomainModel):
         return normalize_utc(value)
 
 
+class ThreadActivity(DomainModel):
+    """Later messages in an action's threads, derived from cached metadata (ADR 0015).
+
+    ``new_messages``, ``latest_at_utc`` and ``latest_sender`` (a display name, else the
+    address) cover other people's messages after the owner's "seen" watermark; the owner's
+    own latest reply is reported separately. None of it ever changes the action.
+    """
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    new_messages: int = Field(default=0, ge=0)
+    latest_at_utc: datetime | None = None
+    latest_sender: str | None = Field(default=None, min_length=1, max_length=320, repr=False)
+    owner_replied_at_utc: datetime | None = None
+
+    @field_validator("latest_at_utc", "owner_replied_at_utc")
+    @classmethod
+    def normalize_timestamps(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else normalize_utc(value)
+
+    @model_validator(mode="after")
+    def validate_latest(self) -> Self:
+        new = self.new_messages > 0
+        if (self.latest_at_utc is not None) != new or (self.latest_sender is not None) != new:
+            raise ValueError("the latest message is set exactly when there are new messages")
+        return self
+
+    @property
+    def unseen(self) -> bool:
+        """Whether anything arrived after the watermark, from others or the owner."""
+        return self.new_messages > 0 or self.owner_replied_at_utc is not None
+
+
 class Action(DomainModel):
     """An action the owner accepted and now owns, with its plan and source messages."""
 
@@ -127,8 +160,16 @@ class Action(DomainModel):
     revision: int = Field(ge=1)
     steps: tuple[ActionStep, ...] = Field(default=(), max_length=MAX_ACTION_STEPS)
     sources: tuple[ActionSource, ...] = ()
+    thread_seen_until_utc: datetime | None = None  # The owner's "seen" watermark.
+    thread: ThreadActivity | None = None  # None when no source has a thread snapshot.
 
-    @field_validator("deadline_at_utc", "created_at_utc", "updated_at_utc", "completed_at_utc")
+    @field_validator(
+        "deadline_at_utc",
+        "created_at_utc",
+        "updated_at_utc",
+        "completed_at_utc",
+        "thread_seen_until_utc",
+    )
     @classmethod
     def normalize_timestamps(cls, value: datetime | None) -> datetime | None:
         return None if value is None else normalize_utc(value)

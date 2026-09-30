@@ -146,6 +146,7 @@ class SyncStage(StrEnum):
 
     CONNECTING = "connecting"
     FETCHING = "fetching"
+    THREADS = "threads"
     RANKING = "ranking"
     ANALYZING = "analyzing"
     ASSEMBLING = "assembling"
@@ -183,6 +184,12 @@ class SyncResult(DomainModel):
     failed_message_count: int = Field(default=0, ge=0)
     shortlisted_message_keys: tuple[str, ...] = ()
     error_code: str | None = Field(default=None, max_length=128)
+    # The threads of open actions checked after today's sync (ADR 0015).
+    threads_tracked: int = Field(default=0, ge=0)
+    threads_checked: int = Field(default=0, ge=0)
+    threads_failed: int = Field(default=0, ge=0)
+    thread_messages: int = Field(default=0, ge=0)
+    threads_stopped_code: str | None = Field(default=None, max_length=128)
 
     @field_validator("range_start_utc", "range_end_utc")
     @classmethod

@@ -1,6 +1,6 @@
 """Tests for accepted actions, their steps and sources, edits and suggestion views."""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -17,6 +17,7 @@ from mailbrief.domain.actions import (
     StepEdit,
     SuggestionState,
     SuggestionView,
+    ThreadActivity,
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, TargetReason
 from tests.factories import make_action, make_suggestion
@@ -399,3 +400,28 @@ def test_reprs_and_errors_leave_out_action_text() -> None:
 
     for text in (repr(action), repr(edit), repr(step_edit), str(caught.value)):
         assert MARKER not in text
+
+
+def test_thread_activity_sets_the_latest_message_exactly_when_something_is_new() -> None:
+    at = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    quiet = ThreadActivity()
+    assert not quiet.unseen
+    replied = ThreadActivity(owner_replied_at_utc=at)
+    assert replied.unseen and replied.new_messages == 0
+    news = ThreadActivity(new_messages=2, latest_at_utc=at, latest_sender="Sam")
+    assert news.unseen
+    for broken in (
+        {"new_messages": 1},
+        {"new_messages": 1, "latest_at_utc": at},
+        {"latest_at_utc": at, "latest_sender": "Sam"},
+        {"new_messages": -1},
+    ):
+        with pytest.raises(ValidationError):
+            ThreadActivity.model_validate(broken)
+
+
+def test_an_action_s_seen_watermark_is_utc() -> None:
+    toronto = timezone(timedelta(hours=-4))
+    action = make_action(thread_seen_until_utc=datetime(2026, 9, 30, 8, tzinfo=toronto))
+    assert action.thread_seen_until_utc == datetime(2026, 9, 30, 12, tzinfo=UTC)
+    assert action.thread is None
