@@ -65,6 +65,18 @@ class ThreadCheck:
     stopped_code: str | None = None
 
 
+def own_addresses(account: AccountTable) -> frozenset[str]:
+    """The account's own addresses, casefolded: the ones that tell the owner's mail apart."""
+    addresses = (*(account.account_addresses or ()), account.email_address)
+    return frozenset(address.strip().casefold() for address in addresses if address.strip())
+
+
+def is_own_message(message: NormalizedMessage, addresses: frozenset[str]) -> bool:
+    """Whether the owner sent it: Gmail's SENT label, or a sender that is one of the
+    account's addresses (an alias the label may not cover)."""
+    return message.is_sent or message.sender.address.strip().casefold() in addresses
+
+
 def _new_messages(
     messages: tuple[NormalizedMessage, ...], since_utc: datetime
 ) -> list[NormalizedMessage]:

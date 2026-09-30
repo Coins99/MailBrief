@@ -370,6 +370,101 @@ async def test_at_most_three_actions_most_urgent_first(
     assert undated not in proposed
 
 
+async def test_the_owner_s_own_messages_propose_nothing(
+    session: AsyncSession, service: ProposalService
+) -> None:
+    owner = await account(session)
+    owner.account_addresses = ["gmail-1@example.com", "Alias@Example.org"]
+    await session.commit()
+    source = email("source", at=SOURCE_AT)
+    await cache(session, owner, source)
+    await action(session, owner, [source])
+    reply = email("reply")
+
+    def from_address(key: str, address: str) -> NormalizedMessage:
+        sender = EmailContact(name="Me", address=address)
+        return reply.model_copy(update={"provider_message_id": key, "sender": sender})
+
+    own = [
+        reply.model_copy(update={"provider_message_id": "sent", "is_sent": True}),
+        from_address("primary", " GMAIL-1@Example.COM "),
+        from_address("alias", "alias@example.org"),
+    ]
+    signals = FollowUpKind.CANCELLED
+
+    assert await service.derive(owner, [planned(m, signal(signals)) for m in own], ZONE) == 0
+    assert await count(session) == 0
+    # A message from anyone else still proposes, so the rule is about the sender only.
+    assert await service.derive(owner, [planned(reply, signal(signals))], ZONE) == 1
+
+
+async def test_the_cap_is_exact_across_apply_dismiss_and_closing(
+    session: AsyncSession, service: ProposalService
+) -> None:
+    owner = await account(session)
+    source = email("source", at=SOURCE_AT)
+    await cache(session, owner, source)
+    # Four open actions in one thread, most urgent first.
+    first, second, third, fourth = [
+        await action(session, owner, [source], target_date=date(2026, 10, day))
+        for day in (1, 2, 3, 4)
+    ]
+    reply = email("reply")
+    row_id = await cache(session, owner, reply)
+    items = [planned(reply, signal(FollowUpKind.NEW_DEADLINE), row_id)]
+
+    assert await service.derive(owner, items, ZONE) == 3
+    by_action = {proposal.action_public_id: proposal.id for proposal in await service.pending()}
+    assert set(by_action) == {first, second, third}
+
+    # A new deadline leaves the action open and makes the email one of its sources, so the
+    # first action stops being a candidate; the fourth must not take its place.
+    await service.apply(by_action[first], 1)
+    assert await service.derive(owner, items, ZONE) == 0
+    # Nor does dismissing one, or completing another, free a slot.
+    await service.dismiss(by_action[second])
+    await ActionService(session).complete(third, 1)
+    assert await service.derive(owner, items, ZONE) == 0
+
+    assert len(await rows(session)) == MAX_PROPOSALS_PER_EMAIL
+    assert fourth not in {proposal.action_public_id for proposal in await service.pending()}
+    # A later email has its own three slots: the open actions it continues, here three (the
+    # third was completed).
+    other = email("other", at=REPLY_AT + timedelta(hours=1))
+    other_id = await cache(session, owner, other)
+    later = signal(
+        FollowUpKind.NEW_DEADLINE, deadline_text="the 12th", deadline_date=date(2026, 10, 12)
+    )
+    assert await service.derive(owner, [planned(other, later, other_id)], ZONE) == 3
+
+
+async def test_a_same_deadline_action_uses_no_slot(
+    session: AsyncSession, service: ProposalService
+) -> None:
+    owner = await account(session)
+    source = email("source", at=SOURCE_AT)
+    await cache(session, owner, source)
+    monday: dict[str, Any] = {
+        "deadline_text": "next Monday",
+        "deadline_precision": "date",
+        "deadline_date": date(2026, 10, 5),
+        "deadline_timezone": ZONE,
+    }
+    await action(session, owner, [source], target_date=date(2026, 10, 1), **monday)
+    others = [
+        await action(session, owner, [source], target_date=date(2026, 10, day)) for day in (2, 3, 4)
+    ]
+    reply = email("reply")
+    row_id = await cache(session, owner, reply)
+
+    created = await service.derive(
+        owner, [planned(reply, signal(FollowUpKind.NEW_DEADLINE), row_id)], ZONE
+    )
+
+    assert created == MAX_PROPOSALS_PER_EMAIL
+    assert {proposal.action_public_id for proposal in await service.pending()} == set(others)
+
+
 async def test_deriving_again_changes_nothing_and_dismissed_proposals_never_return(
     session: AsyncSession, service: ProposalService
 ) -> None:

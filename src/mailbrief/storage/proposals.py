@@ -132,6 +132,26 @@ class ProposalRepository:
                 found.update(result.tuples())
         return found
 
+    async def proposed_actions(
+        self, provider: str, provider_account_id: str, provider_message_ids: Iterable[str]
+    ) -> dict[str, set[int]]:
+        """For each of these emails of the account, the IDs of the actions that have a
+        proposal from it in any state, whether or not the action is still live and open."""
+        found: dict[str, set[int]] = {}
+        for chunk in _chunks(provider_message_ids):
+            result = await self._session.execute(
+                select(
+                    ActionProposalTable.provider_message_id, ActionProposalTable.action_id
+                ).where(
+                    ActionProposalTable.provider == provider,
+                    ActionProposalTable.provider_account_id == provider_account_id,
+                    ActionProposalTable.provider_message_id.in_(chunk),
+                )
+            )
+            for message_id, action_id in result.tuples():
+                found.setdefault(message_id, set()).add(action_id)
+        return found
+
     async def for_actions_and_messages(
         self, action_ids: Iterable[int], provider_message_ids: Iterable[str]
     ) -> dict[tuple[int, str], list[ActionProposalTable]]:

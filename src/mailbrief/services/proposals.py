@@ -26,6 +26,7 @@ from mailbrief.domain.messages import NormalizedMessage, ProviderKind
 from mailbrief.services.actions import ActionConflictError, touch, urgency
 from mailbrief.services.analysis import PlannedMessage
 from mailbrief.services.deadlines import ResolvedDeadline, suggest_target_for
+from mailbrief.services.threads import is_own_message, own_addresses
 from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.proposals import ProposalRepository, proposal_from_row
 from mailbrief.storage.tables import (
@@ -206,18 +207,23 @@ class ProposalService:
 
         A message with a follow-up signal and a thread proposes an update to each live, open
         action of the account with a source in that thread, when the action's latest source
-        there is older than the message and the message isn't already a source: at most
-        MAX_PROPOSALS_PER_EMAIL, most urgent first. A new deadline equal to the action's
-        proposes nothing. A proposal for the same action, email and kind, in any state, is
-        never made again; a pending one of another kind is replaced. Cached analyses count
-        like new ones. Actions are never changed.
+        there is older than the message and the message isn't already a source, most urgent
+        first. An email proposes to at most MAX_PROPOSALS_PER_EMAIL actions ever: the actions
+        that already have a proposal from it, in any state and even if since closed, use up
+        slots, and only the remaining ones are filled. A new deadline equal to the action's
+        proposes nothing and uses no slot. A proposal for the same action, email and kind, in
+        any state, is never made again; a pending one of another kind is replaced. Cached
+        analyses count like new ones. The owner's own messages (sent, or from one of the
+        account's addresses) propose nothing. Actions are never changed.
         """
+        mine = own_addresses(account)
         signals = [
             (item.ranked.message, item.analysis, item.message_row_id)
             for item in planned
             if item.analysis is not None
             and item.analysis.follow_up is not FollowUpKind.NONE
             and item.ranked.message.conversation_id is not None
+            and not is_own_message(item.ranked.message, mine)
         ]
         if not signals:
             return 0
@@ -238,8 +244,11 @@ class ProposalService:
                     by_action[source.action.id] = (source.action, source.received_at_utc)
             action_ids = {source.action.id for source in sources}
             keys = {message.provider_message_id for message, _, _ in signals}
-            own = await self._proposals.sources_among(action_ids, keys)
+            already = await self._proposals.sources_among(action_ids, keys)
             existing = await self._proposals.for_actions_and_messages(action_ids, keys)
+            proposed = await self._proposals.proposed_actions(
+                account.provider, account.provider_account_id, keys
+            )
             created = 0
             for message, analysis, message_row_id in signals:
                 assert analysis is not None and message.conversation_id is not None
@@ -249,19 +258,22 @@ class ProposalService:
                     (
                         action
                         for action, since in latest.get(message.conversation_id, {}).values()
-                        if since < received and (action.id, key) not in own
+                        if since < received and (action.id, key) not in already
                     ),
                     key=lambda action: (
                         *urgency(action.target_date, _due(action), action.created_at_utc),
                         action.id,
                     ),
                 )
-                for action in candidates[:MAX_PROPOSALS_PER_EMAIL]:
+                slots = MAX_PROPOSALS_PER_EMAIL - len(proposed.get(key, ()))
+                for action in candidates:
+                    rows = existing.get((action.id, key), [])
+                    if not rows and slots <= 0:
+                        continue  # This email has proposed to as many actions as it may.
                     if analysis.follow_up is FollowUpKind.NEW_DEADLINE and _same_deadline(
                         action, analysis
                     ):
                         continue
-                    rows = existing.get((action.id, key), [])
                     if any(row.kind == analysis.follow_up.value for row in rows):
                         continue  # Made before; applied or dismissed ones never come back.
                     for row in rows:
@@ -273,6 +285,8 @@ class ProposalService:
                         )
                     )
                     created += 1
+                    if not rows:
+                        slots -= 1
             return created
 
         created = await self._write(run)
