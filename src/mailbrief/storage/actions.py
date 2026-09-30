@@ -6,11 +6,12 @@ repositories.py imports this module, so it must never import repositories.py.
 import logging
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import HttpUrl
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from mailbrief.domain.actions import (
     Action,
@@ -56,6 +57,28 @@ class DecisionKey:
     provider_account_id: str
     provider_message_id: str
     fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadLinkRow:
+    """A cached message and a live, open action with a source in its thread.
+
+    ``is_source`` says the message is already one of the action's sources.
+    """
+
+    message_key: str
+    action_id: int
+    public_id: str
+    title: str
+    revision: int
+    ownership: str
+    target_date: date | None
+    deadline_precision: str
+    deadline_date: date | None
+    deadline_at_utc: datetime | None
+    deadline_timezone: str | None
+    created_at_utc: datetime
+    is_source: bool
 
 
 def suggestion_from_row(row: ActionSuggestionTable) -> ActionSuggestion:
@@ -471,6 +494,17 @@ class ActionRepository:
         )
         return True
 
+    async def remove_source(self, action_id: int, provider_message_id: str) -> None:
+        """Unlink a message from an action; the caller keeps the action's last source."""
+        row = await self._session.scalar(
+            select(ActionSourceTable).where(
+                ActionSourceTable.action_id == action_id,
+                ActionSourceTable.provider_message_id == provider_message_id,
+            )
+        )
+        if row is not None:
+            await self._session.delete(row)
+
     async def source_count(self, action_id: int) -> int:
         count = await self._session.scalar(
             select(func.count())
@@ -478,6 +512,67 @@ class ActionRepository:
             .where(ActionSourceTable.action_id == action_id)
         )
         return count or 0
+
+    async def thread_link_rows(
+        self, provider: str, account_email: str, message_keys: Iterable[str]
+    ) -> list[ThreadLinkRow]:
+        """The account's cached messages among ``message_keys`` (provider message IDs), each
+        paired with every live, open action that has a source in its thread.
+
+        A source matches on its provider, provider account and thread snapshot, so nothing
+        links across accounts, and a message without a thread matches nothing. One query
+        reads up to MAX_SQLITE_BATCH_SIZE keys.
+        """
+        own = aliased(ActionSourceTable)
+        is_source = (
+            select(own.id)
+            .where(
+                own.action_id == ActionTable.id,
+                own.provider_message_id == MessageTable.provider_message_id,
+            )
+            .exists()
+            .label("is_source")
+        )
+        found: list[ThreadLinkRow] = []
+        for chunk in _chunks(message_keys):
+            result = await self._session.execute(
+                select(
+                    MessageTable.provider_message_id,
+                    ActionTable.id,
+                    ActionTable.public_id,
+                    ActionTable.title,
+                    ActionTable.revision,
+                    ActionTable.ownership,
+                    ActionTable.target_date,
+                    ActionTable.deadline_precision,
+                    ActionTable.deadline_date,
+                    ActionTable.deadline_at_utc,
+                    ActionTable.deadline_timezone,
+                    ActionTable.created_at_utc,
+                    is_source,
+                )
+                .select_from(MessageTable)
+                .join(AccountTable, MessageTable.account_id == AccountTable.id)
+                .join(
+                    ActionSourceTable,
+                    and_(
+                        ActionSourceTable.provider == AccountTable.provider,
+                        ActionSourceTable.provider_account_id == AccountTable.provider_account_id,
+                        ActionSourceTable.provider_thread_id == MessageTable.conversation_id,
+                    ),
+                )
+                .join(ActionTable, ActionSourceTable.action_id == ActionTable.id)
+                .where(
+                    AccountTable.provider == provider,
+                    AccountTable.email_address == account_email,
+                    MessageTable.provider_message_id.in_(chunk),
+                    ActionTable.deleted_at_utc.is_(None),
+                    ActionTable.status == ActionStatus.OPEN.value,
+                )
+                .distinct()  # An action with several sources in the thread appears once.
+            )
+            found.extend(ThreadLinkRow(*row) for row in result.tuples())
+        return found
 
     @staticmethod
     def _in_view(view: ActionFilter) -> list[ColumnElement[bool]]:

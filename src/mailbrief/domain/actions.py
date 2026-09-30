@@ -206,6 +206,22 @@ class Action(DomainModel):
         return self.created_at_utc.astimezone(zone).date() < today
 
 
+class ThreadLink(DomainModel):
+    """A live, open action with a source in an email's thread, in the same account.
+
+    The brief shows it as a continuation and offers to add the email to it; ``is_source``
+    says the email is already one of the action's sources.
+    """
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    public_id: str = Field(min_length=PUBLIC_ID_CHARS, max_length=PUBLIC_ID_CHARS)
+    title: str = Field(min_length=1, max_length=ACTION_TITLE_MAX_CHARS, repr=False)
+    revision: int = Field(ge=1)
+    ownership: ActionOwnership
+    is_source: bool
+
+
 class ActionEdit(DomainModel):
     """The owner's full set of edits to an action's own fields."""
 
