@@ -13,7 +13,7 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | 2. Preferences in the desktop | The Settings Preferences tab; the owner's zone and drafting defaults in the window | None | Done |
 | 3. Brief history and bounded catch-up | Browse saved briefs; brief one missed day (within the last 7) per explicit run | None | Done |
 | 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Done |
-| 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None expected | Planned |
+| 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None | Done |
 | 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7 | Planned |
 | 7. Follow-up proposals in the desktop | Reviewing and applying proposals | None expected | Planned |
 | 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, ADR 0016 | Planned |
@@ -261,9 +261,9 @@ Part 4 is implemented and awaits live acceptance. The policy is
 
 - Sources accepted before migration 0010 whose email had already left local mail aren't
   tracked.
-- The desktop display, and adding an email to an existing action, come in Part 5.
+- The desktop display, and adding an email to an existing action, are Part 5 (below).
 - A message that arrives later but carries an earlier received time than your "seen" mark
-  isn't counted as new.
+  isn't counted as new (see Part 5's limits).
 
 ### Live acceptance
 
@@ -291,3 +291,93 @@ Part 4 is implemented and awaits live acceptance. The policy is
   `actions.thread_seen_until_utc`.
 - `ActionRepository.load()` derives `Action.thread` with a fixed number of queries;
   `ActionService.mark_thread_seen()` is the only change thread activity allows.
+
+## Thread activity and adding to an action (Part 5)
+
+Part 5 is implemented and awaits live acceptance. It needs no migration. The policy is
+[ADR 0015](adr/0015-thread-continuity.md#adding-to-an-existing-action).
+
+### What it does
+
+- **Continuations in the brief.** Under an email, "Continues: “<title>” (mine)" or
+  "(waiting for)" names each live, open action with a source in the same Gmail thread of
+  the same account: at most 3, most urgent first. An action the email already belongs to
+  isn't named.
+- **Add to an existing action.** After **Accept** and **Dismiss**, a pending suggestion
+  offers **Add to “<title>”** for each of those actions, including one the email already
+  belongs to. It accepts the suggestion into that action instead of creating another: the
+  email becomes one more source unless it already is one, the suggestion shows as
+  accepted, and the action gets one new revision. Its title, plan, dates and notes don't
+  change.
+- **Thread activity in your actions.** A row adds " · 2 new in thread, latest Tue 14:02 from
+  Sam" and " · you replied Wed", in your time zone. For a day more than a week back, the
+  date replaces the weekday.
+- **Mark seen** clears both. It is enabled only when the selected action
+  has something new, and makes one revision. **Open source** still opens the thread in
+  Gmail.
+- **The status line** after Sync and review, or a brief from Briefs…, adds one sentence when
+  threads were tracked: "Checked 3 tracked threads.", "Checked 3 of 5 tracked threads;
+  2 failed." or "Thread checks stopped early." It never shows an error code, and says
+  nothing when no threads were tracked.
+- Nothing here is automatic or uses AI: only you add an email to an action or mark
+  activity seen.
+
+### Undo
+
+- **Undo add** reverses an addition while the action is exactly as the addition left it.
+  The suggestion is pending again, and the email stops being a source if the addition made
+  it one. An action's last source always stays.
+- Any later change to the action (an edit, completing it, marking it seen, another
+  addition) makes Undo refuse with "Can't undo: it has changed since then." As before,
+  Undo covers only the latest change and is withdrawn by an edit or a new brief.
+- If the action changed or was deleted before **Add to** runs, the window says so and
+  reloads. A suggestion already accepted into another action shows "That suggestion already
+  belongs to another action."
+
+### CLI
+
+- `actions accept N --into PUBLIC_ID [--database PATH]` accepts suggestion N into that
+  action and prints "Added to: <title> (<id>)". An unknown action or suggestion exits 3; a
+  suggestion accepted into another action exits 3 with "That suggestion already belongs to
+  another action." Naming the action is your choice, so the CLI takes any live action; the
+  brief offers only those that continue the email's thread.
+- `brief --show` and `briefs show` print "Continues: <title> (<id>)" under an item for each
+  action it continues, so you can pass that ID to `--into`.
+
+### Limits
+
+- The "seen" mark is a received time. A message cached late whose received time is before
+  the mark isn't counted as new. That takes a missed thread check (a failed check, or a
+  thread with more than 20 later messages), and it only hides the "new" count: the message
+  is still cached and visible in Gmail.
+- At most 3 actions are named, and offered, per email.
+- Continuations are read when a brief is shown, so a past brief names the actions open now.
+- An action's source accepted before migration 0010 whose email had already left local mail
+  has no thread snapshot, so it isn't matched.
+
+### Live acceptance
+
+1. Accept an action from an email, reply to it from another account, then Sync and review:
+   the reply's card says "Continues: …", and the action row shows "1 new in thread".
+2. On the reply's suggestion, click Add to “…”: no new action appears, the action has two
+   sources, and its "new" count clears.
+3. Undo add: the suggestion is pending again, and the action is back to one source.
+4. Reply yourself from Gmail and sync: "you replied …" appears, and Mark seen clears it.
+5. `actions accept N --into <id>` does the same from the CLI.
+
+### For developers
+
+- `ActionService.thread_links(account_email, message_keys)` returns `ThreadLink`s
+  (`public_id`, `title`, `revision`, `ownership`, `is_source`), at most `MAX_THREAD_LINKS`
+  per message, ordered by `urgency()`. `ActionRepository.thread_link_rows()` reads them with
+  one query per 100 keys (a brief has at most 10), matching sources on provider, account and
+  thread snapshot; `is_source` is an `EXISTS` on the action's sources.
+- `ActionService.accept_into()` returns `AcceptedInto(action, source_added)`.
+  `undo_accept_into(suggestion_id, public_id, expected_revision, remove_source)` deletes the
+  decision and, when asked, the source (`ActionRepository.remove_source()`), but never the
+  last one.
+- Desktop: `DesktopBackend` gains `brief_links`, `accept_into`, `undo_accept_into` and
+  `mark_thread_seen`. `MainWindow._show_digest()` shows every brief, with its links when
+  they can be read. `DigestView.accept_into_requested(suggestion_id, public_id, revision)`
+  comes from internal `mailbrief:into/<n>` links; `thread_check_text()` builds the status
+  sentence; `ActionsPanel.seen_button` emits `SEEN`.

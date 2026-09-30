@@ -39,6 +39,21 @@ what MailBrief reads, and without letting a reply change the owner's actions.
   like any Inbox message.
 - **Microsoft** has no thread reader; the dormant adapter is untouched.
 
+## Adding to an existing action
+
+Added with the desktop display (M8 Part 5).
+
+- **Only the owner** adds an email to an existing action, by choosing **Add to** on one of
+  its pending suggestions (or `actions accept N --into`). Nothing does it automatically.
+- **What the brief offers:** only live, open actions with a source in the email's thread in
+  the same account (the same provider, account and thread snapshot), at most three, most
+  urgent first. Nothing is offered across accounts, or for completed or deleted actions.
+- **One revision:** the suggestion is accepted into the action, the email becomes a source
+  unless it already is one, and nothing else about the action changes.
+- **Undo** works while the action is unchanged since the addition: the suggestion is pending
+  again and the source the addition made is removed. It never removes an action's last
+  source.
+
 ## Consequences
 
 - Migration 0010 adds `messages.is_sent`, an index on each account's threads, the source

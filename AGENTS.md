@@ -36,7 +36,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   acceptance: the desktop Briefs… dialog and `brief --date`, `briefs list` and
   `briefs show`. Thread tracking backend (Part 4) implemented, awaiting live acceptance:
   the threads of open actions are checked after today's sync (`actions list`,
-  `actions seen`). See ADR 0015.
+  `actions seen`). See ADR 0015. Thread activity in the desktop and "Add to" an existing
+  action (Part 5) implemented, awaiting live acceptance: continuations and Add to in the
+  brief, Mark seen in the actions pane, and `actions accept N --into`.
 
 ## Layout (ports and adapters)
 
@@ -82,8 +84,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   supplies, which SQLite has kept since M2; for a very short email that snippet can be the
   whole text. The one exception is `mailbrief-gmail-diagnostic bodies --show-text`, which
   prints prepared text to the owner's terminal on explicit request. `brief --show` prints
-  derived brief content (sender, subject, summary, action, deadline, link, and suggestion
-  titles, targets and steps) on explicit request, never evidence or bodies.
+  derived brief content (sender, subject, summary, action, deadline, link, suggestion
+  titles, targets and steps, and the titles and IDs of the actions an email continues) on
+  explicit request, never evidence or bodies.
 - Derived content is bounded: a summary is at most 240 characters, an action at most
   1,000, and evidence at most 300 and strictly under 80% of the body. An email has at most
   five suggestions, each with a title of at most 120 characters, at most five steps of at
@@ -134,6 +137,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   Drafts, trash and spam are ignored, and no folder or label (the Sent folder included) is
   ever listed. A reply never changes an action: activity is derived, and only the owner's
   `mark_thread_seen` moves the watermark. A failed or stopped check never fails the sync.
+- Only the owner adds an email to an existing action (`accept_into`); the brief offers it
+  only for live, open actions with a source in the email's thread in the same account, it
+  makes one revision, and its undo works only while the action is unchanged and never
+  removes an action's last source.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
