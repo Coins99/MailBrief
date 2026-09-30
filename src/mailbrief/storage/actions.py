@@ -20,6 +20,7 @@ from mailbrief.domain.actions import (
     ActionStep,
     SuggestionState,
     SuggestionView,
+    ThreadActivity,
 )
 from mailbrief.domain.analysis import (
     ActionEffort,
@@ -217,8 +218,10 @@ def action_from_rows(
     row: ActionTable,
     steps: Sequence[ActionStepTable],
     sources: Sequence[tuple[ActionSourceTable, bool | None]],
+    thread: ThreadActivity | None = None,
 ) -> Action:
-    """Rebuild an action; each source pairs its snapshot with the cached Inbox state, if any."""
+    """Rebuild an action; each source pairs its snapshot with the cached Inbox state, if any,
+    and ``thread`` is its derived thread activity."""
     return Action(
         public_id=row.public_id,
         title=row.title,
@@ -261,6 +264,57 @@ def action_from_rows(
             )
             for source, in_inbox in sources
         ),
+        thread_seen_until_utc=row.thread_seen_until_utc,
+        thread=thread,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ThreadMessage:
+    provider_message_id: str
+    received_at_utc: datetime
+    is_sent: bool
+    sender: str
+
+
+def _activity(
+    row: ActionTable,
+    sources: Sequence[ActionSourceTable],
+    accounts: Mapping[tuple[str, str], int],
+    cached: Mapping[tuple[int, str], Sequence[_ThreadMessage]],
+) -> ThreadActivity | None:
+    """One action's thread activity (ADR 0015), or None without a thread snapshot.
+
+    In each thread, messages count only when received strictly after both the action's
+    latest own source there and the owner's "seen" watermark, and when they aren't the
+    action's own sources. Others' messages are new; the owner's are reported separately.
+    """
+    own = {source.provider_message_id for source in sources}
+    baselines: dict[tuple[str, str, str], datetime] = {}
+    for source in sources:
+        if source.provider and source.provider_account_id and source.provider_thread_id:
+            key = (source.provider, source.provider_account_id, source.provider_thread_id)
+            baselines[key] = max(baselines.get(key, source.received_at_utc), source.received_at_utc)
+    if not baselines:
+        return None
+    others: list[_ThreadMessage] = []
+    mine: list[_ThreadMessage] = []
+    for (provider, provider_account_id, thread_id), baseline in baselines.items():
+        account_id = accounts.get((provider, provider_account_id))
+        if account_id is None:
+            continue
+        watermark = max(baseline, row.thread_seen_until_utc or baseline)
+        for message in cached.get((account_id, thread_id), ()):
+            if message.received_at_utc > watermark and message.provider_message_id not in own:
+                (mine if message.is_sent else others).append(message)
+    latest = max(
+        others, key=lambda item: (item.received_at_utc, item.provider_message_id), default=None
+    )
+    return ThreadActivity(
+        new_messages=len(others),
+        latest_at_utc=None if latest is None else latest.received_at_utc,
+        latest_sender=None if latest is None else latest.sender,
+        owner_replied_at_utc=max((item.received_at_utc for item in mine), default=None),
     )
 
 
@@ -482,6 +536,60 @@ class ActionRepository:
             )
             for source, in_inbox in source_result.tuples():
                 sources.setdefault(source.action_id, []).append((source, in_inbox))
+        snapshots = {
+            action_id: [source for source, _ in pairs] for action_id, pairs in sources.items()
+        }
+        accounts, cached = await self._thread_messages(snapshots)
         return [
-            action_from_rows(row, steps.get(row.id, ()), sources.get(row.id, ())) for row in rows
+            action_from_rows(
+                row,
+                steps.get(row.id, ()),
+                sources.get(row.id, ()),
+                _activity(row, snapshots.get(row.id, ()), accounts, cached),
+            )
+            for row in rows
         ]
+
+    async def _thread_messages(
+        self, sources: Mapping[int, Sequence[ActionSourceTable]]
+    ) -> tuple[dict[tuple[str, str], int], dict[tuple[int, str], list[_ThreadMessage]]]:
+        """The accounts named by source snapshots, and the cached messages of their threads,
+        read with one chunked query per account."""
+        threads: dict[tuple[str, str], set[str]] = {}
+        for listed in sources.values():
+            for source in listed:
+                if source.provider and source.provider_account_id and source.provider_thread_id:
+                    identity = (source.provider, source.provider_account_id)
+                    threads.setdefault(identity, set()).add(source.provider_thread_id)
+        accounts: dict[tuple[str, str], int] = {}
+        for chunk in _chunks(identity[1] for identity in threads):
+            found = await self._session.execute(
+                select(
+                    AccountTable.id, AccountTable.provider, AccountTable.provider_account_id
+                ).where(AccountTable.provider_account_id.in_(chunk))
+            )
+            for account_id, provider, provider_account_id in found.tuples():
+                if (provider, provider_account_id) in threads:
+                    accounts[(provider, provider_account_id)] = account_id
+        cached: dict[tuple[int, str], list[_ThreadMessage]] = {}
+        for identity, account_id in accounts.items():
+            for chunk in _chunks(threads[identity]):
+                found_messages = await self._session.execute(
+                    select(
+                        MessageTable.conversation_id,
+                        MessageTable.provider_message_id,
+                        MessageTable.received_at_utc,
+                        MessageTable.is_sent,
+                        MessageTable.sender_name,
+                        MessageTable.sender_address,
+                    ).where(
+                        MessageTable.account_id == account_id,
+                        MessageTable.conversation_id.in_(chunk),
+                    )
+                )
+                for thread_id, key, received, sent, name, address in found_messages.tuples():
+                    assert thread_id is not None
+                    cached.setdefault((account_id, thread_id), []).append(
+                        _ThreadMessage(key, received, sent, name or address)
+                    )
+        return accounts, cached

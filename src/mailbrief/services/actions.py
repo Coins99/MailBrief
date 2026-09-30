@@ -400,6 +400,29 @@ class ActionService:
 
         return await self._write(run)
 
+    async def mark_thread_seen(self, public_id: str, expected_revision: int) -> Action:
+        """Move the owner's "seen" watermark past the latest message in the action's threads
+        (ADR 0015), from others or the owner.
+
+        With nothing new, the action is returned unchanged, without a new revision. This is
+        the only thing that changes an action because of its threads.
+        """
+
+        async def run(now: datetime) -> Action:
+            row = await self._live(public_id, expected_revision)
+            action = await self._load(row)
+            thread = action.thread
+            if thread is None or not thread.unseen:
+                return action
+            seen = [
+                at for at in (thread.latest_at_utc, thread.owner_replied_at_utc) if at is not None
+            ]
+            row.thread_seen_until_utc = max(seen)
+            _touch(row, now)
+            return await self._load(row)
+
+        return await self._write(run)
+
     async def get(self, public_id: str) -> Action:
         """A live action; deleted actions are not found."""
         return await self._load(await self._live(public_id, None))

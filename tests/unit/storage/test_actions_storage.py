@@ -426,7 +426,7 @@ async def test_resaving_an_analysis_never_reuses_a_suggestion_id(database: Datab
     assert remaining == 0
 
 
-async def test_loading_many_actions_takes_one_query_for_steps_and_one_for_sources(
+async def test_loading_many_actions_takes_a_fixed_number_of_queries(
     database: Database, selects: list[str]
 ) -> None:
     async with database.session() as session:
@@ -453,7 +453,9 @@ async def test_loading_many_actions_takes_one_query_for_steps_and_one_for_source
 
         loaded = await repository.load([row for row in rows if row is not None])
 
-    assert len(selects) == 2
+    # Steps, sources, the accounts their snapshots name, and those accounts' thread messages:
+    # one query each, however many actions load.
+    assert len(selects) == 4
     assert [len(item.steps) for item in loaded] == [3, 3, 3]
     assert [[source.available for source in item.sources] for item in loaded] == [[True]] * 3
 
