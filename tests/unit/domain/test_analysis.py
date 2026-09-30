@@ -18,6 +18,7 @@ from mailbrief.domain.analysis import (
     AnalysisRequest,
     AnalysisResponse,
     DeadlinePrecision,
+    FollowUpKind,
     MessageAnalysis,
     TargetReason,
     check_deadline_fields,
@@ -89,7 +90,7 @@ def candidate_values(**overrides: object) -> dict[str, object]:
 
 
 def test_schema_version_is_pinned() -> None:
-    assert ANALYSIS_SCHEMA_VERSION == "6"
+    assert ANALYSIS_SCHEMA_VERSION == "7"
 
 
 def test_message_analysis_round_trips_as_json() -> None:
@@ -232,8 +233,12 @@ def test_candidate_accepts_unbounded_provider_text() -> None:
     assert candidate.deadline_time == "17:00"
 
 
-@pytest.mark.parametrize("field", sorted(set(AnalysisCandidate.model_fields) - {"actions"}))
-def test_candidate_fields_other_than_actions_are_all_required(field: str) -> None:
+# The follow-up fields default to none here only, like actions; the wire schema requires them.
+_OPTIONAL = {"actions", "follow_up", "follow_up_evidence"}
+
+
+@pytest.mark.parametrize("field", sorted(set(AnalysisCandidate.model_fields) - _OPTIONAL))
+def test_candidate_fields_other_than_actions_and_follow_up_are_all_required(field: str) -> None:
     values = candidate_values()
     del values[field]
 
@@ -537,3 +542,34 @@ def test_check_deadline_fields_rejects_an_unloadable_zone_without_echoing_it() -
 
     assert MARKER not in str(caught.value)
     check_deadline_fields("Friday", DeadlinePrecision.DATE, FRIDAY, None, "America/Toronto")
+
+
+def test_follow_up_kinds_are_stable() -> None:
+    assert [kind.value for kind in FollowUpKind] == [
+        "none",
+        "new_deadline",
+        "cancelled",
+        "delivered",
+    ]
+
+
+def test_a_follow_up_carries_its_quote_and_round_trips() -> None:
+    analysis = make_analysis(follow_up=FollowUpKind.DELIVERED, follow_up_evidence="Attached")
+
+    assert MessageAnalysis.model_validate_json(analysis.model_dump_json()) == analysis
+    assert "Attached" not in repr(analysis)
+    assert make_analysis().follow_up is FollowUpKind.NONE
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"follow_up": FollowUpKind.CANCELLED},  # Without its quote.
+        {"follow_up_evidence": "Attached"},  # A quote without a signal.
+        {"follow_up": FollowUpKind.DELIVERED, "follow_up_evidence": "x" * 161},
+    ],
+    ids=["no-quote", "no-signal", "long-quote"],
+)
+def test_a_follow_up_needs_exactly_its_quote(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        make_analysis(**overrides)

@@ -37,6 +37,7 @@ class RankReason(StrEnum):
     VERY_RECENT = "very_recent"
     RECENT = "recent"
     AUTOMATED_SENDER = "automated_sender"
+    TRACKED_THREAD_REPLY = "tracked_thread_reply"  # A later message in a thread (ADR 0016).
 
 
 class EmailContact(DomainModel):

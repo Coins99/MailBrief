@@ -11,7 +11,7 @@ from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS
 from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.messages import EmailContact
 
-ANALYSIS_SCHEMA_VERSION: Final = "6"  # Bump when validation changes what may be cached.
+ANALYSIS_SCHEMA_VERSION: Final = "7"  # Bump when validation changes what may be cached.
 
 # Limits shared by the analysis contract, the brief and storage.
 SUMMARY_MAX_CHARS: Final = 240
@@ -28,7 +28,9 @@ SUGGESTION_TITLE_MAX_CHARS: Final = 120
 MAX_SUGGESTION_STEPS: Final = 5
 SUGGESTION_STEP_MAX_CHARS: Final = 120
 SUGGESTION_EVIDENCE_CHARS: Final = 160
-# All evidence stored for one message: its own quote plus its suggestions' quotes.
+FOLLOW_UP_EVIDENCE_CHARS: Final = 160
+# All evidence stored for one message: its own quote, its follow-up quote and its
+# suggestions' quotes.
 EVIDENCE_TOTAL_CHARS: Final = 600
 
 _SuggestionStep = Annotated[str, Field(min_length=1, max_length=SUGGESTION_STEP_MAX_CHARS)]
@@ -81,6 +83,16 @@ class TargetReason(StrEnum):
 
     WORKING_DAY_BEFORE = "working_day_before"
     ON_DEADLINE = "on_deadline"  # No earlier working day was left.
+
+
+class FollowUpKind(StrEnum):
+    """What an email says about work already under way, judged from that email alone
+    (ADR 0016)."""
+
+    NONE = "none"
+    NEW_DEADLINE = "new_deadline"  # It changes or newly sets a deadline.
+    CANCELLED = "cancelled"  # It withdraws or cancels a request, order or meeting.
+    DELIVERED = "delivered"  # It provides what was asked for, or says the work is done.
 
 
 def check_deadline_fields(
@@ -198,6 +210,8 @@ class AnalysisCandidate(DomainModel):
     confidence: float
     evidence: str = Field(repr=False)
     actions: tuple[ActionCandidate, ...] = ()
+    follow_up: FollowUpKind = FollowUpKind.NONE
+    follow_up_evidence: str | None = Field(default=None, repr=False)
 
 
 class AnalysisProblem(StrEnum):
@@ -307,6 +321,10 @@ class MessageAnalysis(DomainModel):
     confidence: float = Field(ge=0, le=1)
     evidence: str = Field(min_length=1, max_length=EVIDENCE_MAX_CHARS, repr=False)
     suggestions: tuple[ActionSuggestion, ...] = ()
+    follow_up: FollowUpKind = FollowUpKind.NONE
+    follow_up_evidence: str | None = Field(
+        default=None, min_length=1, max_length=FOLLOW_UP_EVIDENCE_CHARS, repr=False
+    )
 
     @field_validator("deadline_at_utc")
     @classmethod
@@ -331,6 +349,8 @@ class MessageAnalysis(DomainModel):
             self.deadline_at_utc,
             self.deadline_timezone,
         )
+        if (self.follow_up_evidence is None) != (self.follow_up is FollowUpKind.NONE):
+            raise ValueError("follow_up_evidence must be present exactly when follow_up is set")
         self._validate_suggestions()
         return self
 

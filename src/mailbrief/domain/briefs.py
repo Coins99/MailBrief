@@ -77,6 +77,7 @@ class BriefRunResult(DomainModel):
     ai_calls: int = Field(default=0, ge=0)  # HTTP requests this run, even failed or retried.
     # The HTTP status and sanitized provider code behind error_code, e.g. "HTTP 403".
     provider_detail: str | None = Field(default=None, max_length=100)
+    proposals_created: int = Field(default=0, ge=0)  # Follow-up proposals made (ADR 0016).
 
     @model_validator(mode="after")
     def validate_digest(self) -> Self:

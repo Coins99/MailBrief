@@ -11,15 +11,22 @@ from mailbrief.domain.actions import (
     Action,
     ActionEdit,
     ActionFilter,
+    ActionProposal,
     ActionSource,
     ActionStatus,
     ActionStep,
+    ProposalState,
     StepEdit,
     SuggestionState,
     SuggestionView,
     ThreadActivity,
 )
-from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, TargetReason
+from mailbrief.domain.analysis import (
+    ActionOwnership,
+    DeadlinePrecision,
+    FollowUpKind,
+    TargetReason,
+)
 from tests.factories import make_action, make_suggestion
 
 MARKER = "SYNTHETIC-PRIVATE-MARKER-9b3a"
@@ -425,3 +432,63 @@ def test_an_action_s_seen_watermark_is_utc() -> None:
     action = make_action(thread_seen_until_utc=datetime(2026, 9, 30, 8, tzinfo=toronto))
     assert action.thread_seen_until_utc == datetime(2026, 9, 30, 12, tzinfo=UTC)
     assert action.thread is None
+
+
+def make_proposal(**overrides: object) -> ActionProposal:
+    values: dict[str, object] = {
+        "id": 3,
+        "action_public_id": PUBLIC_ID,
+        "action_title": "Send the deck",
+        "kind": FollowUpKind.CANCELLED,
+        "state": ProposalState.PENDING,
+        "evidence": "No longer needed, thanks",
+        "provider_message_id": "reply-1",
+        "subject": "Re: deck",
+        "sender_address": "sam@example.com",
+        "received_at_utc": datetime(2026, 9, 3, 9, 0, tzinfo=timezone(timedelta(hours=-4))),
+        "web_link": "https://mail.google.com/mail/u/0/#inbox/reply-1",
+        "created_at_utc": datetime(2026, 9, 3, 14, 0, tzinfo=UTC),
+    }
+    values.update(overrides)
+    return ActionProposal.model_validate(values)
+
+
+def test_proposal_states_are_stable() -> None:
+    assert [state.value for state in ProposalState] == ["pending", "applied", "dismissed"]
+
+
+def test_a_new_deadline_proposal_carries_its_deadline_and_target() -> None:
+    proposal = make_proposal(
+        kind=FollowUpKind.NEW_DEADLINE,
+        suggested_target_date=date(2026, 9, 3),
+        target_reason=TargetReason.WORKING_DAY_BEFORE,
+        **DATE_DEADLINE,
+    )
+
+    assert proposal.deadline_date == FRIDAY
+    assert proposal.received_at_utc == datetime(2026, 9, 3, 13, 0, tzinfo=UTC)
+    assert "No longer" not in repr(proposal)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kind": FollowUpKind.NONE},
+        {"kind": FollowUpKind.NEW_DEADLINE},  # Without a deadline.
+        {"kind": FollowUpKind.CANCELLED, **DATE_DEADLINE},  # Only new deadlines carry one.
+        {"suggested_target_date": FRIDAY},  # Without its reason.
+        {"evidence": "x" * 161},
+        {"evidence": ""},
+    ],
+    ids=["none", "deadline-missing", "deadline-not-allowed", "target-alone", "long", "empty"],
+)
+def test_invalid_proposals_are_refused(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        make_proposal(**overrides)
+
+
+def test_an_action_lists_its_pending_proposals() -> None:
+    action = make_action(proposals=(make_proposal(),))
+
+    assert [proposal.id for proposal in action.proposals] == [3]
+    assert make_action().proposals == ()
