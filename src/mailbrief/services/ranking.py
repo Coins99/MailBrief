@@ -1,9 +1,10 @@
 """Deterministic local ranking service for email metadata."""
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
-from typing import Protocol
+from types import MappingProxyType
+from typing import Final, Protocol
 
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.messages import (
@@ -17,6 +18,13 @@ from mailbrief.domain.preferences import SHORTLIST_LIMIT_MAX
 DEFAULT_THRESHOLD: int = 10
 MIN_SHORTLIST_SIZE: int = 3
 MAX_SHORTLIST_SIZE: int = SHORTLIST_LIMIT_MAX
+_UNTRACKED: Final[Mapping[str, datetime]] = MappingProxyType({})
+_REASON_TEXT: Final = {RankReason.TRACKED_THREAD_REPLY: "reply in a thread you track"}
+
+
+def reason_text(reason: RankReason) -> str:
+    """A rank reason in words, for review and ``sync --show-metadata``."""
+    return _REASON_TEXT.get(reason, reason.value.replace("_", " "))
 
 
 class ShortlistGate(Protocol):
@@ -110,10 +118,13 @@ def score_message(
     *,
     user_email: str | Sequence[str] | set[str] | frozenset[str],
     now_utc: datetime,
+    tracked: Mapping[str, datetime] = _UNTRACKED,
 ) -> tuple[int, tuple[RankReason, ...]]:
     """Compute deterministic local score and reason list for one message.
 
-    Applies the 10 scoring rules specified in mvp-plan.md Section 9 in strict declaration order.
+    Applies the 10 scoring rules specified in mvp-plan.md Section 9 in strict declaration
+    order, then M8's: ``tracked`` maps the threads of open actions to the time after which
+    their messages are new (ADR 0016).
     """
     score = 0
     reasons: list[RankReason] = []
@@ -181,6 +192,12 @@ def score_message(
         score -= 12
         reasons.append(RankReason.AUTOMATED_SENDER)
 
+    # 11. A later message in a tracked thread, not sent by the owner (+20)
+    since = None if msg.conversation_id is None else tracked.get(msg.conversation_id)
+    if since is not None and aware_received > normalize_utc(since) and not msg.is_sent:
+        score += 20
+        reasons.append(RankReason.TRACKED_THREAD_REPLY)
+
     return score, tuple(reasons)
 
 
@@ -189,11 +206,15 @@ def rank_messages(
     *,
     user_email: str | Sequence[str] | set[str] | frozenset[str],
     now_utc: datetime,
+    tracked: Mapping[str, datetime] = _UNTRACKED,
 ) -> list[RankedMessage]:
-    """Score a collection of normalized messages with a shared reference timestamp."""
+    """Score a collection of normalized messages with a shared reference timestamp.
+
+    ``tracked`` maps each tracked thread ID to the time after which its messages are new.
+    """
     ranked: list[RankedMessage] = []
     for msg in messages:
-        score, reasons = score_message(msg, user_email=user_email, now_utc=now_utc)
+        score, reasons = score_message(msg, user_email=user_email, now_utc=now_utc, tracked=tracked)
         ranked.append(RankedMessage(message=msg, score=score, reasons=reasons))
     return ranked
 

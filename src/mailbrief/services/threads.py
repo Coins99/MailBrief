@@ -84,9 +84,11 @@ class ThreadService:
         self._reader = reader
         self._messages = MessageRepository(session)
 
-    async def tracked(self, account: AccountTable) -> list[TrackedThread]:
+    async def tracked(
+        self, account: AccountTable, limit: int | None = MAX_TRACKED_THREADS
+    ) -> list[TrackedThread]:
         """The threads to check for this account, most urgent action first, at most
-        MAX_TRACKED_THREADS.
+        ``limit`` (MAX_TRACKED_THREADS by default; None for all of them, as ranking uses).
 
         A thread is tracked when a source of a live, open action has a snapshot of this
         account's provider and provider account ID. Its baseline is the earliest, across
@@ -126,7 +128,7 @@ class ThreadService:
         )
         return [
             TrackedThread(thread_id=thread_id, since_utc=min(baselines[thread_id].values()))
-            for thread_id in threads[:MAX_TRACKED_THREADS]
+            for thread_id in (threads if limit is None else threads[:limit])
         ]
 
     async def check(

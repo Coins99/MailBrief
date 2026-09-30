@@ -216,13 +216,27 @@ class ApplicationService:
             except Exception as exc:
                 logger.warning("Progress callback raised an exception during ranking: %s", exc)
 
-        # 3. Deterministic local ranking
+        # 3. Deterministic local ranking; later messages in the threads of open actions
+        # rank higher (ADR 0016).
         user_addresses = (
             account.account_addresses
             if getattr(account, "account_addresses", None)
             else (account.email_address,)
         )  # noqa: E501
-        ranked = rank_messages(domain_messages, user_email=user_addresses, now_utc=now)  # type: ignore[arg-type]
+        tracked = (
+            {}
+            if self._threads is None
+            else {
+                thread.thread_id: thread.since_utc
+                for thread in await self._threads.tracked(account, limit=None)
+            }
+        )
+        ranked = rank_messages(
+            domain_messages,
+            user_email=user_addresses,  # type: ignore[arg-type]
+            now_utc=now,
+            tracked=tracked,
+        )
 
         # 4. Batch persist computed rankings in SQLite
         rankings_data = [(row.id, r.score, r.reasons) for row, r in zip(rows, ranked, strict=True)]

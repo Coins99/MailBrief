@@ -79,7 +79,7 @@ from mailbrief.services.preferences import (
     PreferencesUnavailableError,
     owner_zone,
 )
-from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
+from mailbrief.services.ranking import MAX_SHORTLIST_SIZE, reason_text
 from mailbrief.ui.action_editor import ActionEditor
 from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, SEEN, ActionsPanel
 from mailbrief.ui.cached_view import CachedMailDialog
@@ -1473,7 +1473,7 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
             item.setToolTip(
                 f"Rank score: {ranked.score}\n"
-                + ", ".join(reason.value.replace("_", " ") for reason in ranked.reasons)
+                + ", ".join(reason_text(reason) for reason in ranked.reasons)
             )
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(

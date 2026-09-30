@@ -3,14 +3,20 @@ fails the sync."""
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.digests import SyncProgress, SyncStage, SyncStatus
+from mailbrief.domain.messages import RankReason
 from mailbrief.services.application import ApplicationService
-from mailbrief.services.threads import ThreadCheck, ThreadService
+from mailbrief.services.threads import (
+    MAX_TRACKED_THREADS,
+    ThreadCheck,
+    ThreadService,
+    TrackedThread,
+)
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
     AccountRepository,
@@ -186,3 +192,44 @@ async def test_a_broken_progress_callback_doesn_t_stop_the_check(
     )
 
     assert threads.checked and result.threads_checked == 1
+
+
+class FixedTracking(RecordingThreads):
+    """Tracks fixed threads and records the limit ranking asks for."""
+
+    def __init__(self, session: AsyncSession, threads: list[TrackedThread]) -> None:
+        super().__init__(session, ThreadCheck())
+        self.threads = threads
+        self.limits: list[int | None] = []
+
+    async def tracked(
+        self, account: AccountTable, limit: int | None = MAX_TRACKED_THREADS
+    ) -> list[TrackedThread]:
+        self.limits.append(limit)
+        return self.threads
+
+
+async def test_a_later_reply_in_a_tracked_thread_ranks_higher(session: AsyncSession) -> None:
+    email = FakeEmailProvider(
+        pages=[
+            [
+                make_message(
+                    provider_message_id="reply", conversation_id="deck", received_at_utc=NOW
+                ),
+                make_message(
+                    provider_message_id="other", conversation_id="misc", received_at_utc=NOW
+                ),
+            ]
+        ]
+    )
+    threads = FixedTracking(session, [TrackedThread("deck", NOW - timedelta(days=1))])
+
+    _, shortlist = await application(session, threads, email).prepare_daily_shortlist(
+        tz_key=ZONE, now_utc=NOW
+    )
+
+    ranked = {item.message.provider_message_id: item for item in shortlist}
+    assert ranked["reply"].score == ranked["other"].score + 20
+    assert RankReason.TRACKED_THREAD_REPLY in ranked["reply"].reasons
+    assert RankReason.TRACKED_THREAD_REPLY not in ranked["other"].reasons
+    assert threads.limits == [None]  # Every tracked thread, not only those checked.

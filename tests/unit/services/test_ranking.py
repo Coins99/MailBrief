@@ -3,6 +3,8 @@
 import random
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from mailbrief.domain.messages import (
     EmailContact,
     MessageImportance,
@@ -12,6 +14,7 @@ from mailbrief.domain.messages import (
 )
 from mailbrief.services.ranking import (
     rank_messages,
+    reason_text,
     score_message,
     select_shortlist,
 )
@@ -277,3 +280,55 @@ def test_is_automated_sender_edge_cases() -> None:
     # Test with invalid / empty address formats
     score, reasons = score_message(msg_empty_addr, user_email=USER_EMAIL, now_utc=NOW)
     assert RankReason.AUTOMATED_SENDER not in reasons
+
+
+SINCE = NOW - timedelta(days=1)
+
+
+def test_a_later_reply_in_a_tracked_thread_ranks_higher() -> None:
+    reply = make_baseline_message(conversation_id="deck")
+
+    score, reasons = score_message(
+        reply, user_email=USER_EMAIL, now_utc=NOW, tracked={"deck": SINCE}
+    )
+
+    assert (score, reasons) == (20, (RankReason.TRACKED_THREAD_REPLY,))
+    assert reason_text(RankReason.TRACKED_THREAD_REPLY) == "reply in a thread you track"
+    assert reason_text(RankReason.VERY_RECENT) == "very recent"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"conversation_id": "other"},  # Another thread.
+        {"conversation_id": None},  # No thread.
+        {"conversation_id": "deck", "received_at_utc": SINCE},  # Not after the sources.
+        {"conversation_id": "deck", "received_at_utc": SINCE - timedelta(hours=1)},
+        {"conversation_id": "deck", "is_sent": True},  # The owner's own message.
+    ],
+    ids=["other-thread", "no-thread", "at-the-source", "before", "sent-by-the-owner"],
+)
+def test_only_later_replies_from_others_in_tracked_threads_get_the_bonus(
+    overrides: dict[str, object],
+) -> None:
+    message = make_baseline_message(**overrides)
+
+    assert score_message(message, user_email=USER_EMAIL, now_utc=NOW, tracked={"deck": SINCE}) == (
+        0,
+        (),
+    )
+
+
+def test_tracking_leaves_every_other_score_unchanged() -> None:
+    messages = [
+        make_baseline_message(provider_message_id="high", importance=MessageImportance.HIGH),
+        make_baseline_message(provider_message_id="unread", is_read=False, conversation_id="x"),
+        make_baseline_message(provider_message_id="reply", conversation_id="deck"),
+    ]
+
+    plain = rank_messages(messages, user_email=USER_EMAIL, now_utc=NOW)
+    tracked = rank_messages(messages, user_email=USER_EMAIL, now_utc=NOW, tracked={"deck": SINCE})
+
+    assert [item.score for item in plain] == [20, 8, 0]
+    assert [item.score for item in tracked] == [20, 8, 20]
+    assert tracked[:2] == plain[:2]

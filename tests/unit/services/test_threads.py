@@ -196,6 +196,11 @@ async def test_threads_are_deduplicated_most_urgent_first_and_capped(
     assert ids[:3] == ["shared", "soon", "later"]
     assert "undated" not in ids  # Undated actions come last and fell past the cap.
     assert tracked[0].since_utc == START  # The earliest baseline among its actions.
+    # Ranking takes every tracked thread, in the same order.
+    everything = await ThreadService(session, FakeReader()).tracked(account, limit=None)
+    assert [thread.thread_id for thread in everything][: len(ids)] == ids
+    assert [thread.thread_id for thread in everything][-1] == "undated"
+    assert len(everything) == MAX_TRACKED_THREADS + 4
 
 
 async def test_a_thread_s_baseline_is_the_action_s_latest_own_source(
