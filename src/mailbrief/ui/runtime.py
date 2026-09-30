@@ -17,7 +17,12 @@ from mailbrief.domain.actions import (
     ThreadLink,
 )
 from mailbrief.domain.bodies import MessageBody
-from mailbrief.domain.briefs import BriefRunResult
+from mailbrief.domain.briefs import (
+    AutoSendPermission,
+    AutoSendStatus,
+    BriefRunResult,
+    TransmissionPreview,
+)
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, SavedBriefSummary, SyncProgress
 from mailbrief.domain.drafting import DraftContextPart, DraftingOptions, DraftingOutcome
@@ -36,12 +41,20 @@ from mailbrief.providers.gmail.factory import gmail_provider
 from mailbrief.providers.gmail.oauth import DesktopClient
 from mailbrief.providers.groq.credentials import GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
+from mailbrief.providers.groq.provider import PRIVACY_NOTICE, PROVIDER_NAME
 from mailbrief.services.actions import AcceptedInto, ActionService
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
-from mailbrief.services.brief import BriefService, ConsentGate, ShortlistGate
+from mailbrief.services.brief import (
+    CONSENT_DISCLOSURE_VERSION,
+    BriefService,
+    ConsentGate,
+    ShortlistGate,
+    permission_preview,
+)
 from mailbrief.services.calendar import day_window, resolve_timezone
+from mailbrief.services.consent import auto_send_permission, set_auto_send
 from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
@@ -71,6 +84,14 @@ from mailbrief.storage.repositories import (
     SyncRunRepository,
 )
 from mailbrief.ui.preferences import DesktopPreferences, PreferencesStore
+
+
+class _NeverAsks:
+    """The consent gate of an automatic run, which has nobody to ask: BriefService never calls
+    it, and if it ever did, nothing would be sent."""
+
+    async def confirm(self, preview: object) -> bool:
+        return False
 
 
 class _GmailBodies:
@@ -174,6 +195,41 @@ class DesktopRuntime:
     ) -> BriefRunResult:
         """Brief today, or ``local_date``: one of the previous seven days, checked before any
         provider is built. BriefService checks it again."""
+        return await self._brief(
+            gate=gate,
+            review=review,
+            cancel=cancel,
+            progress=progress,
+            local_date=local_date,
+            automatic=False,
+        )
+
+    async def generate_automatic(
+        self, cancel: asyncio.Event, progress: Callable[[SyncProgress], None]
+    ) -> BriefRunResult:
+        """One automatic run for today (ADR 0017): no review, no consent question and no past
+        day. It syncs, checks threads and ranks; only the automatic-analysis permission on the
+        active consent lets it send anything, and without one it reports how many messages
+        are ready to review."""
+        return await self._brief(
+            gate=_NeverAsks(),
+            review=None,
+            cancel=cancel,
+            progress=progress,
+            local_date=None,
+            automatic=True,
+        )
+
+    async def _brief(
+        self,
+        *,
+        gate: ConsentGate,
+        review: ShortlistGate | None,
+        cancel: asyncio.Event,
+        progress: Callable[[SyncProgress], None],
+        local_date: date | None,
+        automatic: bool,
+    ) -> BriefRunResult:
         preferences = await self.get_owner_preferences()
         settings = await self._settings(preferences)
         zone = owner_zone(preferences)
@@ -206,7 +262,46 @@ class DesktopRuntime:
                 shortlist_limit=preferences.shortlist_limit,
                 excluded_senders=preferences.excluded_senders,
                 local_date=local_date,
+                automatic=automatic,
             )
+
+    # The automatic-analysis permission (ADR 0017) lives on the active consent. Reading and
+    # changing it needs no Gmail and no AI.
+
+    async def auto_send_status(self) -> AutoSendStatus | None:
+        """The permission and the disclosure it rests on; None when no account has an active
+        consent yet, so there is nothing to allow."""
+        async with self._storage().session() as session:
+            permission = await auto_send_permission(
+                session, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+            )
+        return None if permission is None else await self._auto_send_status(permission)
+
+    async def set_auto_send(self, limit: int) -> AutoSendStatus:
+        """Allow automatic runs to send up to ``limit`` messages without asking; 0 turns it
+        off. Raises ConfigurationError (a static message) without an active consent."""
+        async with self._storage().session() as session:
+            permission = await set_auto_send(
+                session, limit, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+            )
+        return await self._auto_send_status(permission)
+
+    async def _auto_send_status(self, permission: AutoSendPermission) -> AutoSendStatus:
+        """The permission with what one automatic run would send: the chosen model and body
+        limit, from settings that can be read even when the saved preferences can't."""
+        try:
+            settings = await self._settings(await self.get_owner_preferences())
+        except PreferencesUnavailableError:
+            settings = (await self.get_preferences()).settings()
+        model = (settings.groq_model or "").strip() or "the model chosen in Settings"
+        preview: TransmissionPreview = permission_preview(
+            max(permission.limit, 1),
+            provider_name=PROVIDER_NAME,
+            model_name=model,
+            body_character_limit=settings.ai_body_character_limit,
+            privacy_notice=PRIVACY_NOTICE,
+        )
+        return AutoSendStatus(**permission.model_dump(), disclosure=preview)
 
     # Saved briefs by day (M8 Part 3). Reading them needs no Gmail or AI.
 

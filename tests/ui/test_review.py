@@ -176,3 +176,69 @@ async def test_a_suggested_outside_reply_is_checked_by_default(window: MainWindo
         assert window.review_button.text() == "Co&ntinue with 1 selected message"
     finally:
         await stop(task)
+
+
+LEFT_OUT = "you left this out earlier"
+
+
+async def test_declined_messages_start_unchecked_with_a_note_and_can_be_checked_again(
+    window: MainWindow,
+) -> None:
+    # m2 was left out of an earlier review, so the automatic selection (m1) skips it.
+    task = await start_review(window, frozenset(), 10, declined=frozenset({"m2"}))
+    try:
+        labels = [item.text() for item in (window.shortlist.item(row) for row in range(4)) if item]
+        assert labels == [
+            "sender0@example.com — Subject 0",
+            "sender1@example.com — Subject 1",
+            f"sender2@example.com — Subject 2 — {LEFT_OUT}",
+            "sender3@example.com — Subject 3",
+        ]
+        declined = window.shortlist.item(2)
+        assert declined is not None
+        assert declined.flags() & Qt.ItemFlag.ItemIsUserCheckable
+        assert declined.checkState() == Qt.CheckState.Unchecked
+        declined.setCheckState(Qt.CheckState.Checked)  # Selecting it again is the owner's call.
+        window.review_button.click()
+        assert await task == ("m1", "m2")
+    finally:
+        await stop(task)
+
+
+async def test_a_declined_reply_from_outside_the_inbox_carries_both_notes(
+    window: MainWindow,
+) -> None:
+    task = await start_review(
+        window, frozenset(), 10, outside=frozenset({"m3"}), declined=frozenset({"m3"})
+    )
+    try:
+        item = window.shortlist.item(3)
+        assert item is not None
+        assert item.text() == (f"sender3@example.com — Subject 3 — {OUTSIDE} — {LEFT_OUT}")
+        assert item.checkState() == Qt.CheckState.Unchecked
+    finally:
+        await stop(task)
+
+
+async def test_an_excluded_sender_keeps_only_its_exclusion_note(window: MainWindow) -> None:
+    task = await start_review(
+        window, frozenset({"m0"}), 10, declined=frozenset({"m0"}), outside=frozenset({"m0"})
+    )
+    try:
+        item = window.shortlist.item(0)
+        assert item is not None
+        assert item.text() == "sender0@example.com — Subject 0 — excluded in Settings"
+        assert not item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    finally:
+        await stop(task)
+
+
+async def test_a_suggested_message_is_not_marked_declined(window: MainWindow) -> None:
+    task = await start_review(window, frozenset(), 10)
+    try:
+        assert all(
+            LEFT_OUT not in (item.text() if item else "")
+            for item in (window.shortlist.item(row) for row in range(4))
+        )
+    finally:
+        await stop(task)

@@ -20,7 +20,12 @@ from mailbrief.domain.actions import (
     ThreadLink,
 )
 from mailbrief.domain.analysis import DeadlinePrecision
-from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
+from mailbrief.domain.briefs import (
+    AutoSendStatus,
+    BriefRunResult,
+    BriefStatus,
+    TransmissionPreview,
+)
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import (
     DailyDigest,
@@ -32,9 +37,11 @@ from mailbrief.domain.digests import (
 )
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
+from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.actions import AcceptedInto
 from mailbrief.services.brief import ConsentGate, ShortlistGate
+from mailbrief.services.consent import NO_CONSENT
 from mailbrief.services.preferences import PreferencesConflictError
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
@@ -101,6 +108,16 @@ class FakeBackend(FakeDrafts):
         self.proposals_fail: Exception | None = None
         self.proposal_calls: list[DailyDigest] = []
         self.proposals_created = 0  # What a brief run reports having proposed.
+        # Automatic runs: what each returns (or raises), how many ran, and an optional hold.
+        self.automatic_calls = 0
+        self.window: MainWindow | None = None  # Set by a test that watches the window's panels.
+        self.automatic_result: BriefRunResult | Exception | None = None
+        self.automatic_hold: asyncio.Event | None = None
+        self.automatic_panels: list[tuple[bool, bool]] = []
+        # The automatic-analysis permission: None is "no consent yet".
+        self.permission: AutoSendStatus | None = None
+        self.permission_fail: Exception | None = None
+        self.permission_saves: list[int] = []
         self.source_added = True
         self.sync = SyncResult(
             account_id="owner@example.com",
@@ -325,6 +342,39 @@ class FakeBackend(FakeDrafts):
         finally:
             await asyncio.sleep(0)
             self.cleaned = True
+
+    async def generate_automatic(
+        self, cancel: asyncio.Event, progress: Callable[[SyncProgress], None]
+    ) -> BriefRunResult:
+        self.automatic_calls += 1
+        window = self.window
+        if window is not None:  # Whether a review or consent panel is ever showing.
+            self.automatic_panels.append(
+                (window.review_panel.isVisible(), window.consent_panel.isVisible())
+            )
+        if self.automatic_hold is not None:
+            await self.automatic_hold.wait()
+        result = self.automatic_result
+        if isinstance(result, Exception):
+            raise result
+        return result or BriefRunResult(
+            status=BriefStatus.READY_FOR_REVIEW, sync=self.sync, ready=2
+        )
+
+    async def auto_send_status(self) -> AutoSendStatus | None:
+        if self.permission_fail is not None:
+            raise self.permission_fail
+        return self.permission
+
+    async def set_auto_send(self, limit: int) -> AutoSendStatus:
+        self.permission_saves.append(limit)
+        if self.permission is None:
+            raise ConfigurationError(NO_CONSENT)
+        stamp = datetime(2026, 9, 30, 14, tzinfo=UTC) if limit else None
+        self.permission = self.permission.model_copy(
+            update={"limit": limit, "granted_at_utc": stamp}
+        )
+        return self.permission
 
     async def list_briefs(self) -> tuple[SavedBriefSummary, ...]:
         everything = {(self.saved.account_id, self.saved.local_date): self.saved, **self.briefs}

@@ -1,8 +1,17 @@
 """Desktop diagnostics never persist exception payloads or unrecognized codes."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
-from mailbrief.ui.diagnostics import configure_logging, error_guidance, log_failure, logger
+from mailbrief.domain.briefs import BriefRunResult, BriefStatus
+from mailbrief.domain.digests import DigestCoverage, SyncResult, SyncStatus
+from mailbrief.ui.diagnostics import (
+    configure_logging,
+    error_guidance,
+    log_automatic_run,
+    log_failure,
+    logger,
+)
 
 
 def test_rotating_log_contains_only_types_and_known_codes(tmp_path: Path) -> None:
@@ -23,3 +32,46 @@ def test_rotating_log_contains_only_types_and_known_codes(tmp_path: Path) -> Non
     finally:
         logger.removeHandler(handler)
         handler.close()
+
+
+def result(**fields: object) -> BriefRunResult:
+    sync = SyncResult(
+        account_id="owner@example.com",
+        range_start_utc=datetime(2026, 9, 30, tzinfo=UTC),
+        range_end_utc=datetime(2026, 10, 1, tzinfo=UTC),
+        status=SyncStatus.COMPLETE,
+        page_count=1,
+        message_count=1,
+    )
+    return BriefRunResult(sync=sync, **fields)
+
+
+def test_an_automatic_run_is_logged_as_counts_only(tmp_path: Path) -> None:
+    handler = configure_logging(tmp_path)
+    try:
+        log_automatic_run(result(status=BriefStatus.READY_FOR_REVIEW, ready=4))
+        coverage = DigestCoverage(
+            sync_complete=True, shortlisted=5, analyzed=2, reused=1, failed=0, skipped=0, deferred=2
+        )
+        log_automatic_run(
+            result(
+                status=BriefStatus.ANALYSIS_FAILED,
+                coverage=coverage,
+                deferred=2,
+                ai_calls=3,
+                error_code="AI_RATE_LIMITED",
+            )
+        )
+        handler.flush()
+        lines = (tmp_path / "desktop.log").read_text().splitlines()
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+    assert lines[0].endswith(
+        "automatic run: status=ready_for_review ready=4 analyzed=0 deferred=0 ai_requests=0"
+    )
+    assert lines[1].endswith(
+        "automatic run: status=analysis_failed ready=0 analyzed=2 deferred=2 ai_requests=3"
+    )
+    assert "AI_RATE_LIMITED" not in "".join(lines)  # Codes go through error_guidance, once.

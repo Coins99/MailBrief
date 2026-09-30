@@ -175,9 +175,11 @@ class DigestView(QTextBrowser):
         ]
         coverage = digest.coverage
         if coverage is not None:
+            # Messages an automatic run left for your next review (ADR 0017), only when any.
+            deferred = f"{coverage.deferred} deferred · " if coverage.deferred else ""
             parts.append(
                 f"<p>{coverage.analyzed} analyzed · {coverage.reused} reused · "
-                f"{coverage.failed} failed · {coverage.skipped} skipped · "
+                f"{coverage.failed} failed · {coverage.skipped} skipped · {deferred}"
                 f"Inbox sync {'complete' if coverage.sync_complete else 'incomplete'}</p>"
             )
         if not digest.items:

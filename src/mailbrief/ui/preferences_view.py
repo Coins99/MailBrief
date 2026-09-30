@@ -1,15 +1,18 @@
 """The Preferences tab: the owner's time zone, messages per brief, sender exclusions,
-drafting defaults and AI limits (ADR 0014).
+drafting defaults, AI limits (ADR 0014), and when MailBrief refreshes on its own (ADR 0017).
 
 The panel only validates and emits; the window saves through the backend. Sender rules
-are the owner's own text, shown back only here, in plain-text widgets.
+are the owner's own text, shown back only here, in plain-text widgets. The automatic-analysis
+permission is not part of the form: it is set in its own dialog, and the panel only shows it.
 """
 
 import functools
 import zoneinfo
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QHBoxLayout,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.config import Settings
 from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
+from mailbrief.domain.briefs import AutoSendStatus
 from mailbrief.domain.preferences import (
     AI_BODY_CHARS_MAX,
     AI_OUTPUT_TOKENS_MAX,
@@ -37,6 +41,7 @@ from mailbrief.domain.preferences import (
     is_region_zone,
     normalize_exclusion,
 )
+from mailbrief.services.consent import NO_CONSENT
 from mailbrief.ui.drafting_panel import LENGTH_CHOICES, TONE_CHOICES
 
 # Each AI limit's field, label and range; the spin box's minimum is one below the range
@@ -48,6 +53,20 @@ _AI_FIELDS = (
     ("ai_batch_size", "Messages per AI request", 1, MAX_ANALYSIS_BATCH, ""),
     ("ai_timeout_seconds", "Timeout", AI_TIMEOUT_MIN, AI_TIMEOUT_MAX, " s"),
 )
+# How often MailBrief may refresh on its own while it is open: the label and the minutes.
+REFRESH_CHOICES: tuple[tuple[str, int | None], ...] = (
+    ("Off", None),
+    ("Every hour", 60),
+    ("Every 2 hours", 120),
+    ("Every 4 hours", 240),
+)
+_REFRESH_NOTE = (
+    "A refresh checks Gmail and follows the threads of your open actions, then tells you how "
+    "many messages are ready to review. It runs only while MailBrief is open, only for "
+    "today, and sends nothing to Groq unless you allow automatic analysis."
+)
+_AUTO_OFF = "Off — every run asks you first"
+_AUTO_UNREADABLE = "The automatic-analysis setting couldn't be read just now."
 _ENVIRONMENT_NOTE = "When set, a MAILBRIEF_AI_* environment variable takes precedence."
 _UNAVAILABLE = (
     "Saved preferences could not be read, so briefs and AI drafting are paused. "
@@ -79,11 +98,13 @@ def _default_text(name: str) -> str:
 
 class PreferencesPanel(QWidget):
     """``save_requested(edit, revision)`` carries a valid PreferencesEdit and the revision
-    it was loaded at; ``reset_requested()`` asks for the defaults. Problems with the form
-    go to ``status_changed(text)``."""
+    it was loaded at; ``reset_requested()`` asks for the defaults; ``auto_send_requested()``
+    asks to change the automatic-analysis permission. Problems with the form go to
+    ``status_changed(text)``."""
 
     save_requested = Signal(object, int)
     reset_requested = Signal()
+    auto_send_requested = Signal()
     status_changed = Signal(str)
 
     def __init__(self) -> None:
@@ -125,6 +146,22 @@ class PreferencesPanel(QWidget):
             self.length.addItem(name)
         self.length.setAccessibleName("Default drafting length")
         form.addRow("Drafting len&gth", self.length)
+        self.refresh_on_launch = QCheckBox("&Refresh when MailBrief starts")
+        form.addRow(self.refresh_on_launch)
+        self.refresh_interval = QComboBox()
+        for name, _minutes in REFRESH_CHOICES:
+            self.refresh_interval.addItem(name)
+        self.refresh_interval.setAccessibleName("Refresh while MailBrief is running")
+        form.addRow("Refresh &while running", self.refresh_interval)
+        self.auto_line = _plain(_AUTO_OFF)
+        self.auto_line.setAccessibleName("Automatic analysis")
+        self.auto_button = QPushButton("C&hange…")
+        self.auto_button.setAccessibleName("Change automatic analysis")
+        automatic = QHBoxLayout()
+        automatic.addWidget(self.auto_line, 1)
+        automatic.addWidget(self.auto_button)
+        form.addRow("Automatic analysis", automatic)
+        form.addRow("", _plain(_REFRESH_NOTE))
         self.ai_limits: dict[str, QSpinBox] = {}
         for name, label, low, high, suffix in _AI_FIELDS:
             box = QSpinBox()
@@ -144,6 +181,8 @@ class PreferencesPanel(QWidget):
         layout.addLayout(buttons)
         self.save_button.clicked.connect(self._save)
         self.reset_button.clicked.connect(self.reset_requested.emit)
+        self.auto_button.clicked.connect(self.auto_send_requested.emit)
+        self.set_auto_send(None, ZoneInfo("UTC"))
         self.set_zones("unknown", ())
 
     def set_zones(self, system_zone: str, zones: tuple[str, ...]) -> None:
@@ -175,7 +214,34 @@ class PreferencesPanel(QWidget):
         for name, box in self.ai_limits.items():
             value = getattr(preferences, name)
             box.setValue(box.minimum() if value is None else round(value))
+        self.refresh_on_launch.setChecked(preferences.refresh_on_launch)
+        self.refresh_interval.setCurrentIndex(
+            [minutes for _name, minutes in REFRESH_CHOICES].index(
+                preferences.refresh_interval_minutes
+            )
+        )
         self.save_button.setEnabled(True)
+
+    def set_auto_send(
+        self, status: AutoSendStatus | None, zone: ZoneInfo, *, unreadable: bool = False
+    ) -> None:
+        """Show the automatic-analysis permission, in ``zone`` for the date it was given.
+
+        Without an active consent (``status`` None) there is nothing to allow yet, so the
+        button is off and the line says how to get one. ``unreadable`` says it couldn't be read.
+        """
+        if unreadable:
+            text, changeable = _AUTO_UNREADABLE, False
+        elif status is None:
+            text, changeable = NO_CONSENT, False
+        elif status.limit == 0 or status.granted_at_utc is None:
+            text, changeable = _AUTO_OFF, True
+        else:
+            noun = "message" if status.limit == 1 else "messages"
+            since = status.granted_at_utc.astimezone(zone).date().isoformat()
+            text, changeable = f"Up to {status.limit} {noun} per run, since {since}", True
+        self.auto_line.setText(text)
+        self.auto_button.setEnabled(changeable)
 
     def set_unavailable(self) -> None:
         """Show the defaults; only a reset can repair unreadable preferences."""
@@ -211,6 +277,8 @@ class PreferencesPanel(QWidget):
             excluded_senders=tuple(rules),
             draft_tone=TONE_CHOICES[self.tone.currentIndex()][0],
             draft_length=LENGTH_CHOICES[self.length.currentIndex()][0],
+            refresh_on_launch=self.refresh_on_launch.isChecked(),
+            refresh_interval_minutes=REFRESH_CHOICES[self.refresh_interval.currentIndex()][1],
         )
         return PreferencesEdit.model_validate(values)
 

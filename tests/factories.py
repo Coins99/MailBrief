@@ -12,6 +12,7 @@ from mailbrief.domain.analysis import (
     FollowUpKind,
     MessageAnalysis,
 )
+from mailbrief.domain.briefs import AutoSendStatus, TransmissionPreview
 from mailbrief.domain.digests import DigestItem, DigestSection
 from mailbrief.domain.messages import (
     EmailContact,
@@ -116,6 +117,27 @@ def make_proposal(**overrides: object) -> ActionProposal:
     }
     values.update(overrides)
     return ActionProposal.model_validate(values)
+
+
+def make_auto_send(**overrides: object) -> AutoSendStatus:
+    """The automatic-analysis permission of owner@example.com: off, with its disclosure."""
+    values: dict[str, object] = {
+        "account_email": "owner@example.com",
+        "limit": 0,
+        "granted_at_utc": None,
+        "disclosure": TransmissionPreview(
+            provider_name="groq",
+            model_name="test-model",
+            message_count=1,
+            truncated_count=0,
+            reused_count=0,
+            first_use=False,
+            body_character_limit=4_000,
+            privacy_notice="Enable Zero Data Retention.",
+        ),
+    }
+    values.update(overrides)
+    return AutoSendStatus.model_validate(values)
 
 
 def make_digest_item(**overrides: object) -> DigestItem:

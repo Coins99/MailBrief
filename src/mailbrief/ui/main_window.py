@@ -31,7 +31,12 @@ from mailbrief.domain.actions import (
     StepEdit,
     ThreadLink,
 )
-from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
+from mailbrief.domain.briefs import (
+    AutoSendStatus,
+    BriefRunResult,
+    BriefStatus,
+    TransmissionPreview,
+)
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import (
     DailyDigest,
@@ -73,6 +78,7 @@ from mailbrief.services.actions import (
 )
 from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
 from mailbrief.services.calendar import resolve_timezone
+from mailbrief.services.consent import NO_CONSENT
 from mailbrief.services.drafting import (
     DraftingContextError,
     DraftingGate,
@@ -103,8 +109,14 @@ from mailbrief.ui.actions_view import (
     SEEN,
     ActionsPanel,
 )
+from mailbrief.ui.auto_send_view import AutoSendDialog
 from mailbrief.ui.cached_view import CachedMailDialog
-from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
+from mailbrief.ui.diagnostics import (
+    configuration_guidance,
+    error_guidance,
+    log_automatic_run,
+    log_failure,
+)
 from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS, DigestView
 from mailbrief.ui.draft_editor import DraftEditor
 from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
@@ -115,6 +127,7 @@ from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import region_zones
 from mailbrief.ui.proposals_view import ProposalsDialog
+from mailbrief.ui.scheduler import RefreshScheduler
 from mailbrief.ui.settings_view import SettingsDialog
 
 
@@ -145,6 +158,11 @@ class DesktopBackend(Protocol):
         progress: Callable[[SyncProgress], None],
         local_date: date | None = None,
     ) -> BriefRunResult: ...
+    async def generate_automatic(
+        self, cancel: asyncio.Event, progress: Callable[[SyncProgress], None]
+    ) -> BriefRunResult: ...
+    async def auto_send_status(self) -> AutoSendStatus | None: ...
+    async def set_auto_send(self, limit: int) -> AutoSendStatus: ...
     async def list_briefs(self) -> tuple[SavedBriefSummary, ...]: ...
     async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None: ...
     async def missed_days(self, account_email: str) -> tuple[date, ...]: ...
@@ -227,6 +245,8 @@ _DRAFT_EXPORT_FAILED = "Couldn't export. Check the folder and try again."
 _AI_CANCELLED = "Cancelled. Your text is unchanged."
 _AI_DECLINED = "Nothing was sent: AI drafting needs your consent first."
 _AI_FAILED = "Couldn't write with Groq. Your text is unchanged."
+_REFRESH_DISCONNECTED = "Automatic refresh skipped: connect Gmail first."
+_AUTOMATIC = "Automatic refresh: "
 
 
 def _review_hint(limit: int) -> str:
@@ -259,6 +279,19 @@ def thread_check_text(sync: SyncResult) -> str:
     if checked == tracked:
         return f"Checked {checked} tracked {noun}."
     return f"Checked {checked} of {tracked} tracked {noun}; {sync.threads_failed} failed."
+
+
+def _count_messages(count: int) -> str:
+    return f"{count} message" if count == 1 else f"{count} messages"
+
+
+def _ready_text(ready: int) -> str:
+    """How many messages an automatic run without permission found ready to review."""
+    if ready == 0:
+        return "No messages are ready to review."
+    if ready == 1:
+        return "1 message is ready to review."
+    return f"{ready} messages are ready to review."
 
 
 class _ApprovedGate:
@@ -371,6 +404,9 @@ class MainWindow(QMainWindow):
         self._account_email: str | None = None
         # The brief shown: None for the latest, else a past brief's account and date.
         self._shown: tuple[str, date] | None = None
+        # Whether the running operation is an automatic refresh (ADR 0017): its failures are
+        # reported as such, and it never opens a panel or dialog.
+        self._automatic_active = False
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
@@ -394,6 +430,11 @@ class MainWindow(QMainWindow):
         self.history_dialog.generate_requested.connect(self._request_brief_day)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
+        self.auto_send_dialog = AutoSendDialog(self.settings_dialog)
+        self.auto_send_dialog.save_requested.connect(self._request_set_auto_send)
+        # When an automatic run is due, by the owner's schedule; it stops with the window.
+        self.scheduler = RefreshScheduler(self, clock=lambda: self.now())
+        self.scheduler.due.connect(self._refresh_due)
         self.settings_dialog.save_requested.connect(self._request_save_preferences)
         self.settings_dialog.key_requested.connect(self._request_save_key)
         self.settings_dialog.remove_key_requested.connect(
@@ -406,6 +447,9 @@ class MainWindow(QMainWindow):
         preferences_panel.save_requested.connect(self._request_save_owner_preferences)
         preferences_panel.reset_requested.connect(
             lambda: self.start(self._reset_owner_preferences, cancellable=False)
+        )
+        preferences_panel.auto_send_requested.connect(
+            lambda: self.start(self._open_auto_send, cancellable=False)
         )
         self.setWindowTitle("MailBrief")
         self.resize(980, 760)
@@ -1242,9 +1286,12 @@ class MainWindow(QMainWindow):
         return True
 
     async def _run(self, operation: Callable[[], Awaitable[None]]) -> None:
+        failed = True
         try:
             await operation()
+            failed = False
         except asyncio.CancelledError:
+            failed = False
             self.status.setText("Cancelled. The displayed saved brief is unchanged.")
         except AuthenticationRequiredError as exc:
             log_failure(exc)
@@ -1265,6 +1312,10 @@ class MainWindow(QMainWindow):
             # Validation and HTTP exceptions can contain secret or mail-derived values.
             self.status.setText("Operation failed. The displayed saved brief is unchanged.")
         finally:
+            if self._automatic_active:
+                self._automatic_active = False
+                if failed:
+                    self.status.setText(_AUTOMATIC + self.status.text())
             if self.cached_dialog.isVisible() and not self.cached_dialog.has_page:
                 self.cached_dialog.status.setText(self.status.text())
             if self.settings_dialog.isVisible():
@@ -1306,6 +1357,7 @@ class MainWindow(QMainWindow):
         self.settings_dialog.set_preferences(preferences)
         panel = self.settings_dialog.preferences_panel
         panel.set_zones(str(resolve_timezone(None)), await asyncio.to_thread(region_zones))
+        await self._show_auto_send()
         self.status.setText("Edit connection and AI settings, and your preferences.")
         try:
             panel.set_preferences(await self.backend.get_owner_preferences())
@@ -1321,6 +1373,9 @@ class MainWindow(QMainWindow):
         self.zone = owner_zone(preferences)
         self.digest.zone = self.cached_dialog.zone = self.zone
         self.draft_editor.ai_panel.set_defaults(preferences.draft_tone, preferences.draft_length)
+        self.scheduler.configure(
+            preferences.refresh_on_launch, preferences.refresh_interval_minutes
+        )
 
     async def _load_owner_preferences(self) -> None:
         """Views only display local data, so unreadable preferences fall back to the system
@@ -1437,6 +1492,13 @@ class MainWindow(QMainWindow):
         else:
             self._account_email = email
             self.connection.setText(f"Gmail: connected as {email}")
+            self._launch_soon()
+
+    def _launch_soon(self) -> None:
+        """MailBrief has started and Gmail is connected: let the scheduler run the refresh the
+        owner asked for on launch, once this operation has finished, so it isn't turned away
+        as busy."""
+        asyncio.get_running_loop().call_soon(self.scheduler.launched)
 
     async def _connect(self) -> None:
         self.status.setText("Connecting to Gmail. Complete sign-in in your browser.")
@@ -1444,6 +1506,7 @@ class MainWindow(QMainWindow):
         self._account_email = email
         self.connection.setText(f"Gmail: connected as {email}")
         self.status.setText("Connected. Sync to review today's messages.")
+        self._launch_soon()  # Only the first connection of a start counts as the launch.
 
     async def _disconnect(self) -> None:
         await self.backend.disconnect()
@@ -1496,7 +1559,14 @@ class MainWindow(QMainWindow):
         self.start(lambda: self._generate(local_date))
 
     async def _generate(self, local_date: date | None = None) -> None:
-        """Brief today (Sync and review), or a past day chosen in Briefs…."""
+        """Brief today (Sync and review), or a past day chosen in Briefs…. However it ends,
+        the next automatic run is an interval later (ADR 0017)."""
+        try:
+            await self._generate_brief(local_date)
+        finally:
+            self.scheduler.note_run(self.now())
+
+    async def _generate_brief(self, local_date: date | None = None) -> None:
         self._offer_undo()  # A new brief replaces the suggestions that Undo would refer to.
         if local_date is None and self._shown is not None:
             self._set_shown(None)  # Sync and review returns to the latest brief.
@@ -1541,6 +1611,127 @@ class MainWindow(QMainWindow):
                 self.status.setText(self.status.text() + " " + guidance)
                 if code.startswith("AI_"):
                     self.ai.setText("AI: " + guidance)
+
+    # Automatic refresh (ADR 0017): while MailBrief is open, on the owner's schedule. It has
+    # no review, no consent question and no dialog; everything it says goes to the status line.
+
+    def _dialog_open(self) -> bool:
+        """Whether the owner is working in one of the window's dialogs or editors."""
+        return any(
+            widget.isVisible()
+            for widget in (
+                self.settings_dialog,
+                self.auto_send_dialog,
+                self.history_dialog,
+                self.cached_dialog,
+                self.proposals_dialog,
+                self.action_editor,
+                self.draft_editor,
+            )
+        )
+
+    def _refresh_due(self) -> None:
+        """The scheduler says a run is due: start one unless something is in the way.
+
+        Another operation, or a dialog the owner is using, means try again a minute later; a
+        disconnected Gmail means skip this one, and say so. Nothing opens.
+        """
+        if self._closing or not self._ready:
+            return
+        busy = self._dialog_open() or (self.task is not None and not self.task.done())
+        if busy:
+            self.scheduler.retry_soon()
+            return
+        if self._account_email is None:
+            self.status.setText(_REFRESH_DISCONNECTED)
+            return
+        if not self.start(self._automatic_refresh):
+            self.scheduler.retry_soon()
+
+    async def _automatic_refresh(self) -> None:
+        """One automatic run. However it ends, the next is an interval later."""
+        self._automatic_active = True
+        self.status.setText(_AUTOMATIC + "checking Gmail…")
+        try:
+            result = await self.backend.generate_automatic(self._cancel, self._progress)
+            await self._automatic_finished(result)
+        finally:
+            self.scheduler.note_run(self.now())
+
+    async def _automatic_finished(self, result: BriefRunResult) -> None:
+        """Say what the run did, in the status line, and show what it saved."""
+        log_automatic_run(result)
+        stamp = f"{self.now().astimezone(self.zone):%H:%M}"
+        text = ""
+        if result.status is BriefStatus.READY_FOR_REVIEW:
+            text = f"Checked Gmail at {stamp}. {_ready_text(result.ready)}"
+        elif result.digest is not None:
+            analyzed = 0 if result.coverage is None else result.coverage.analyzed
+            text = f"Automatic brief at {stamp}: " + (
+                f"analyzed {_count_messages(analyzed)}" if analyzed else "nothing new to analyze"
+            )
+            if result.deferred:
+                waiting = "waits" if result.deferred == 1 else "wait"
+                text += f"; {result.deferred} {waiting} for your review."
+            else:
+                text += "."
+            if result.proposals_created > 0:
+                count = result.proposals_created
+                noun = "update" if count == 1 else "updates"
+                text += f" Proposed {count} {noun} to your actions."
+            self._offer_undo()  # A new brief replaces the suggestions an Undo would refer to.
+            if self._shown is None:  # Never pull the owner away from a past brief they're reading.
+                await self._show_digest(result.digest)
+        elif result.status is BriefStatus.CANCELLED:
+            text = "Automatic refresh cancelled."
+        if result.status is not BriefStatus.CANCELLED:
+            for code in dict.fromkeys((result.error_code, result.sync.error_code)):
+                if code:
+                    guidance = error_guidance(code)
+                    text = f"{text} {_AUTOMATIC}{guidance}".strip()
+                    if code.startswith("AI_"):
+                        self.ai.setText("AI: " + guidance)
+            if "AUTH_REQUIRED" in (result.error_code, result.sync.error_code):
+                self._account_email = None  # Nothing more runs until the owner signs in again.
+                self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
+        self.status.setText(text)
+        if result.status is not BriefStatus.CANCELLED:
+            await self._refresh_actions()  # Thread activity and proposals may have changed.
+
+    async def _show_auto_send(self) -> None:
+        """The automatic-analysis line in Settings, from the active consent; local data only."""
+        panel = self.settings_dialog.preferences_panel
+        try:
+            status = await self.backend.auto_send_status()
+        except Exception as exc:
+            log_failure(exc)
+            panel.set_auto_send(None, self.zone, unreadable=True)
+            return
+        panel.set_auto_send(status, self.zone)
+
+    async def _open_auto_send(self) -> None:
+        """Open the dialog on the current permission; without a consent there is none to change."""
+        status = await self.backend.auto_send_status()
+        self.settings_dialog.preferences_panel.set_auto_send(status, self.zone)
+        if status is None:
+            self.status.setText(NO_CONSENT)
+            return
+        self.auto_send_dialog.configure(status)
+        self.auto_send_dialog.open()
+
+    def _request_set_auto_send(self, limit: int) -> None:
+        if not self.start(lambda: self._set_auto_send(limit), cancellable=False):
+            self.status.setText(_BUSY)
+
+    async def _set_auto_send(self, limit: int) -> None:
+        status = await self.backend.set_auto_send(limit)
+        self.settings_dialog.preferences_panel.set_auto_send(status, self.zone)
+        if status.limit == 0:
+            self.status.setText("Automatic analysis is off. Every run asks you first.")
+        else:
+            self.status.setText(
+                f"Automatic runs may now send up to {_count_messages(status.limit)} without asking."
+            )
 
     def _progress(self, progress: SyncProgress) -> None:
         self.status.setText(
@@ -1672,6 +1863,8 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self._closing = True
+        self.scheduler.stop()
+        self.auto_send_dialog.reject()
         self.settings_dialog.reject()
         self.cached_dialog.reject()
         self.history_dialog.reject()
@@ -1688,6 +1881,7 @@ class MainWindow(QMainWindow):
     async def shutdown(self) -> None:
         if self._shutdown_complete:
             return
+        self.scheduler.stop()  # No timer outlives the window.
         self.cancel()
         try:
             if self.task is not None:

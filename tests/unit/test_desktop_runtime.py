@@ -23,6 +23,7 @@ from mailbrief.domain.messages import AccountIdentity, ProviderKind
 from mailbrief.domain.preferences import AI_LIMIT_FIELDS, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.providers.groq.credentials import GroqKeyStore
+from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION
 from mailbrief.services.calendar import resolve_timezone
 from mailbrief.services.history import BriefDateError
 from mailbrief.services.preferences import PreferencesConflictError, PreferencesUnavailableError
@@ -397,3 +398,169 @@ async def test_a_past_day_reaches_the_brief_service(
         assert brief.calls[0]["local_date"] == yesterday
     finally:
         await backend.close()
+
+
+async def test_an_automatic_run_takes_no_review_asks_nothing_and_is_marked_automatic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ai_environment: None
+) -> None:
+    monkeypatch.setattr(runtime, "gmail_provider", provider_factory([]))
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
+    brief, bodies, analysis = Recorder(), Recorder(), Recorder()
+    monkeypatch.setattr(runtime, "BriefService", brief)
+    monkeypatch.setattr(runtime, "BodyService", bodies)
+    monkeypatch.setattr(runtime, "AnalysisService", analysis)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        cancel = asyncio.Event()
+
+        result: object = await backend.generate_automatic(cancel, lambda _: None)
+
+        assert result == "result"
+        (call,) = brief.calls
+        assert call["automatic"] is True
+        assert call["local_date"] is None  # Today only.
+        assert call.get("shortlist_gate") is None  # No review.
+        assert call["cancel"] is cancel
+        # The owner's zone, limit and rules apply to an automatic run like any other.
+        assert call["tz_key"] == "Asia/Tokyo" and call["shortlist_limit"] == 3
+        assert call["excluded_senders"] == ("@example.org",)
+        assert bodies.built[0]["limit"] == 2_000 and analysis.built[0]["batch_size"] == 4
+        # Its consent gate can never say yes, so nothing could be sent through it.
+        gate = brief.built[0]["consent_gate"]
+        assert await gate.confirm(object()) is False
+
+        await backend.generate(AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None)
+        assert brief.calls[1]["automatic"] is False  # A manual run is unchanged.
+    finally:
+        await backend.close()
+
+
+async def test_unreadable_preferences_stop_an_automatic_run_before_any_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbidden = AsyncMock(side_effect=AssertionError("no provider may be built"))
+    monkeypatch.setattr(runtime, "gmail_provider", forbidden)
+    monkeypatch.setattr(runtime, "groq_provider", forbidden)
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        database = Database.from_path(path)
+        try:
+            async with database.transaction() as session:
+                await session.execute(
+                    text("UPDATE owner_preferences SET excluded_senders_json = 'not json'")
+                )
+        finally:
+            await database.dispose()
+
+        with pytest.raises(PreferencesUnavailableError):
+            await backend.generate_automatic(asyncio.Event(), lambda _: None)
+    finally:
+        await backend.close()
+
+
+async def seed_consent(path: Path, *, kind: ProviderKind = ProviderKind.GMAIL) -> int:
+    database = Database.from_path(path)
+    try:
+        async with database.transaction() as session:
+            account = await AccountRepository(session).upsert(
+                AccountIdentity(
+                    provider=kind,
+                    provider_account_id="me",
+                    email_address="me@example.com",
+                )
+            )
+            await ConsentRepository(session).grant(
+                account.id, "groq", CONSENT_DISCLOSURE_VERSION, datetime(2026, 9, 29, tzinfo=UTC)
+            )
+            return account.id
+    finally:
+        await database.dispose()
+
+
+async def test_the_permission_is_read_and_changed_on_the_active_consent(tmp_path: Path) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()  # Migrates the new database.
+    try:
+        await backend.save_preferences(DesktopPreferences(groq_model="test-model"))
+        await backend.save_owner_preferences(PreferencesEdit(ai_body_character_limit=2_000), 0)
+        assert await backend.auto_send_status() is None  # No consent: nothing to allow.
+        with pytest.raises(ConfigurationError) as caught:
+            await backend.set_auto_send(3)
+        assert str(caught.value) == "Analyze once with Sync and review to give consent first."
+
+        await seed_consent(path)
+        off = await backend.auto_send_status()
+        assert off is not None and (off.account_email, off.limit) == ("me@example.com", 0)
+        assert off.granted_at_utc is None and off.disclosure.message_count == 1
+        assert (off.disclosure.provider_name, off.disclosure.model_name) == ("groq", "test-model")
+        assert off.disclosure.body_character_limit == 2_000  # A saved AI limit applies.
+        assert "Zero Data Retention" in off.disclosure.privacy_notice
+
+        given = await backend.set_auto_send(3)
+        assert (given.limit, given.disclosure.message_count) == (3, 3)
+        assert given.granted_at_utc is not None
+        again = await backend.auto_send_status()
+        assert again is not None and (again.limit, again.granted_at_utc) == (
+            3,
+            given.granted_at_utc,
+        )
+        with pytest.raises(ValueError, match="0 to 10"):
+            await backend.set_auto_send(11)
+        assert (await backend.set_auto_send(0)).granted_at_utc is None
+
+        await backend.set_auto_send(2)
+        assert await backend.revoke_consent() == 1  # Revoking ends it, at once.
+        assert await backend.auto_send_status() is None
+    finally:
+        await backend.close()
+
+
+async def test_the_permission_reads_when_the_saved_preferences_do_not(tmp_path: Path) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await seed_consent(path)
+        await backend.save_owner_preferences(SAVED, 0)
+        database = Database.from_path(path)
+        try:
+            async with database.transaction() as session:
+                await session.execute(
+                    text("UPDATE owner_preferences SET excluded_senders_json = 'not json'")
+                )
+        finally:
+            await database.dispose()
+
+        status = await backend.auto_send_status()  # Only displays, so it still answers.
+
+        assert status is not None
+        assert status.disclosure.model_name == "the model chosen in Settings"  # None chosen.
+    finally:
+        await backend.close()
+
+
+async def test_only_a_gmail_consent_can_hold_the_permission(tmp_path: Path) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await seed_consent(path, kind=ProviderKind.MICROSOFT)
+
+        assert await backend.auto_send_status() is None
+    finally:
+        await backend.close()
+
+
+async def test_permission_calls_need_initialized_storage(tmp_path: Path) -> None:
+    backend = DesktopRuntime(tmp_path / "unopened.sqlite3")
+
+    with pytest.raises(RuntimeError):
+        await backend.auto_send_status()
+    with pytest.raises(RuntimeError):
+        await backend.set_auto_send(1)
