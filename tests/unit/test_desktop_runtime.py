@@ -5,25 +5,30 @@ import json
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
+import time_machine
 from pydantic import SecretStr
-from sqlalchemy import text
+from sqlalchemy import text, update
 
 from mailbrief.config import Settings
+from mailbrief.domain.digests import DigestStatus
 from mailbrief.domain.drafting import DraftingOptions
 from mailbrief.domain.messages import AccountIdentity, ProviderKind
 from mailbrief.domain.preferences import AI_LIMIT_FIELDS, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.providers.groq.credentials import GroqKeyStore
+from mailbrief.services.calendar import resolve_timezone
+from mailbrief.services.history import BriefDateError
 from mailbrief.services.preferences import PreferencesConflictError, PreferencesUnavailableError
 from mailbrief.storage.database import Database
-from mailbrief.storage.repositories import AccountRepository, ConsentRepository
+from mailbrief.storage.repositories import AccountRepository, ConsentRepository, DigestRepository
+from mailbrief.storage.tables import DigestTable
 from mailbrief.ui import runtime
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.runtime import DesktopRuntime
@@ -299,5 +304,96 @@ async def test_a_stale_save_is_a_conflict(tmp_path: Path) -> None:
         with pytest.raises(PreferencesConflictError):
             await backend.save_owner_preferences(PreferencesEdit(shortlist_limit=6), 0)
         assert (await backend.get_owner_preferences()).shortlist_limit == 5
+    finally:
+        await backend.close()
+
+
+async def seed_briefs(path: Path) -> None:
+    """Today's brief, then a brief for yesterday saved later, as after catching up."""
+    database = Database.from_path(path)
+    try:
+        async with database.transaction() as session:
+            account = await AccountRepository(session).upsert(
+                AccountIdentity(
+                    provider=ProviderKind.GMAIL,
+                    provider_account_id="gmail-1",
+                    email_address="owner@example.com",
+                )
+            )
+            for day, hour in ((date(2026, 9, 29), 13), (date(2026, 9, 28), 16)):
+                digest = await DigestRepository(session).save_digest(
+                    account_id=account.id,
+                    local_date=day,
+                    timezone_name="UTC",
+                    status=DigestStatus.EMPTY,
+                )
+                await session.execute(
+                    update(DigestTable)
+                    .where(DigestTable.id == digest.id)
+                    .values(generated_at_utc=datetime(2026, 9, 29, hour, tzinfo=UTC))
+                )
+    finally:
+        await database.dispose()
+
+
+@time_machine.travel(datetime(2026, 9, 29, 18, tzinfo=UTC), tick=False)
+async def test_startup_shows_today_s_brief_after_catching_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("tzlocal.get_localzone", lambda: ZoneInfo("UTC"))
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await seed_briefs(path)
+
+        latest = await backend.load_saved()
+        listed = await backend.list_briefs()
+        past = await backend.load_brief("owner@example.com", date(2026, 9, 28))
+        missed = await backend.missed_days("owner@example.com")
+
+        assert latest is not None and latest.local_date == date(2026, 9, 29)
+        assert [summary.local_date for summary in listed] == [
+            date(2026, 9, 29),
+            date(2026, 9, 28),
+        ]
+        assert past is not None and past.local_date == date(2026, 9, 28)
+        assert missed == tuple(date(2026, 9, day) for day in (27, 26, 25, 24, 23, 22))
+    finally:
+        await backend.close()
+
+
+async def test_an_out_of_range_day_stops_before_any_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbidden = AsyncMock(side_effect=AssertionError("no provider may be built"))
+    monkeypatch.setattr(runtime, "gmail_provider", forbidden)
+    monkeypatch.setattr(runtime, "groq_provider", forbidden)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        with pytest.raises(BriefDateError):
+            await backend.generate(
+                AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None, local_date=date.min
+            )
+    finally:
+        await backend.close()
+
+
+async def test_a_past_day_reaches_the_brief_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime, "gmail_provider", provider_factory([]))
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
+    brief = Recorder()
+    monkeypatch.setattr(runtime, "BriefService", brief)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        yesterday = datetime.now(UTC).astimezone(resolve_timezone(None)).date() - timedelta(1)
+        await backend.generate(
+            AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None, local_date=yesterday
+        )
+        assert brief.calls[0]["local_date"] == yesterday
     finally:
         await backend.close()

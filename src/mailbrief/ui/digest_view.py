@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QTextBrowser
 from mailbrief.domain.actions import TARGET_REASON_TEXT, SuggestionState, SuggestionView
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.digests import DailyDigest
+from mailbrief.services.history import coverage_line
 from mailbrief.ui.deadline_text import deadline_text
 
 ACCEPT = "accept"
@@ -100,6 +101,7 @@ class DigestView(QTextBrowser):
             f"<h2>{digest.local_date.isoformat()} · {escape(digest.status.value.title())}</h2>",
             f"<p>{escape(digest.account_id)} · {escape(digest.timezone_name)}<br>"
             f"Saved {escape(saved)} ({age_label} ago at load)</p>",
+            f"<p>{escape(coverage_line(digest))}</p>",
         ]
         coverage = digest.coverage
         if coverage is not None:

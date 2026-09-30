@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -25,7 +26,13 @@ from PySide6.QtWidgets import (
 from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
-from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncStatus
+from mailbrief.domain.digests import (
+    DailyDigest,
+    DigestStatus,
+    SavedBriefSummary,
+    SyncProgress,
+    SyncStatus,
+)
 from mailbrief.domain.drafting import (
     DraftContextPart,
     DraftingOptions,
@@ -64,6 +71,7 @@ from mailbrief.services.drafting import (
 )
 from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftConflictError, DraftNotFoundError, SourceNotFoundError
+from mailbrief.services.history import BriefDateError
 from mailbrief.services.preferences import (
     PreferencesConflictError,
     PreferencesUnavailableError,
@@ -80,6 +88,7 @@ from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
 from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
+from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import region_zones
 from mailbrief.ui.settings_view import SettingsDialog
@@ -110,7 +119,11 @@ class DesktopBackend(Protocol):
         review: ShortlistGate,
         cancel: asyncio.Event,
         progress: Callable[[SyncProgress], None],
+        local_date: date | None = None,
     ) -> BriefRunResult: ...
+    async def list_briefs(self) -> tuple[SavedBriefSummary, ...]: ...
+    async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None: ...
+    async def missed_days(self, account_email: str) -> tuple[date, ...]: ...
     async def close(self) -> None: ...
     async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]: ...
     async def accept_suggestion(self, suggestion_id: int) -> Action: ...
@@ -300,6 +313,10 @@ class MainWindow(QMainWindow):
         self._cancellable = True
         # The one change that Undo reverses: its button label and the operation that undoes it.
         self._undo: tuple[str, Callable[[], Awaitable[None]]] | None = None
+        # The connected Gmail account, known once a connection succeeds.
+        self._account_email: str | None = None
+        # The brief shown: None for the latest, else a past brief's account and date.
+        self._shown: tuple[str, date] | None = None
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
@@ -313,6 +330,9 @@ class MainWindow(QMainWindow):
         self.draft_editor = DraftEditor(self)
         self._connect_draft_editor(self.draft_editor)
         self.cached_dialog = CachedMailDialog(self)
+        self.history_dialog = BriefHistoryDialog(self)
+        self.history_dialog.open_requested.connect(self._request_open_brief)
+        self.history_dialog.generate_requested.connect(self._request_brief_day)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
         self.settings_dialog.save_requested.connect(self._request_save_preferences)
@@ -363,9 +383,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(actions)
         self.retry_button = QPushButton("&Retry loading saved data")
         self.retry_button.clicked.connect(lambda: self.start(self.initialize))
-        actions.addWidget(self.retry_button, 2, 0, 1, 3)
+        actions.addWidget(self.retry_button, 3, 0, 1, 3)
         self.cached_button = QPushButton("Browse saved &mail (offline)")
         actions.addWidget(self.cached_button, 1, 2)
+        self.briefs_button = QPushButton("&Briefs…")
+        self.briefs_button.setToolTip("Open saved briefs, or brief a missed day.")
+        actions.addWidget(self.briefs_button, 2, 0)
         self.status = plain_label("Loading saved brief…")
         layout.addWidget(self.status)
         self.undo_button = QPushButton("&Undo")
@@ -394,6 +417,15 @@ class MainWindow(QMainWindow):
         consent_layout.addWidget(self.decline_button)
         layout.addWidget(self.consent_panel)
         self.consent_panel.hide()
+        self.viewing = QWidget()
+        viewing = QHBoxLayout(self.viewing)
+        viewing.setContentsMargins(0, 0, 0, 0)
+        self.viewing_label = plain_label("")
+        self.latest_button = QPushButton("Back to &latest")
+        viewing.addWidget(self.viewing_label, 1)
+        viewing.addWidget(self.latest_button)
+        layout.addWidget(self.viewing)
+        self.viewing.hide()
         self.digest = DigestView()
         self.digest.zone = self.zone
         self.cached_dialog.zone = self.zone
@@ -420,6 +452,10 @@ class MainWindow(QMainWindow):
         )
         self.settings_button.clicked.connect(lambda: self.start(self._open_settings))
         self.cached_button.clicked.connect(lambda: self.start(self._open_cached))
+        self.briefs_button.clicked.connect(lambda: self.start(self._open_history))
+        self.latest_button.clicked.connect(
+            lambda: self.start(self._back_to_latest, cancellable=False)
+        )
         self.generate_button.clicked.connect(lambda: self.start(self._generate))
         self.cancel_button.clicked.connect(self.cancel)
         self.review_button.clicked.connect(self._accept_review)
@@ -437,6 +473,9 @@ class MainWindow(QMainWindow):
         self.settings_button.setEnabled(not busy)
         self.settings_dialog.set_busy(busy)
         self.cached_button.setEnabled(not busy and self._ready)
+        self.briefs_button.setEnabled(not busy and self._ready)
+        self.history_dialog.set_busy(busy)
+        self.latest_button.setEnabled(not busy)
         self.cached_dialog.set_busy(busy)
         self.undo_button.setEnabled(not busy)
         self.actions_panel.set_busy(busy)
@@ -457,11 +496,26 @@ class MainWindow(QMainWindow):
         if _NOT_REFRESHED not in self.status.text():
             self.status.setText(f"{self.status.text()} {_NOT_REFRESHED}".strip())
 
+    def _set_shown(self, shown: tuple[str, date] | None) -> None:
+        """Show the latest brief (None), or say which past brief is shown."""
+        self._shown = shown
+        self.viewing.setVisible(shown is not None)
+        if shown is not None:
+            self.viewing_label.setText(f"Viewing the brief for {shown[1].isoformat()}.")
+
     async def _reload_brief(self) -> None:
+        """Reload the brief shown: the latest, or the past brief being viewed."""
+        shown = self._shown
         try:
-            saved = await self.backend.load_saved()
+            saved = await (
+                self.backend.load_saved() if shown is None else self.backend.load_brief(*shown)
+            )
         except Exception as exc:
             self._note_not_refreshed(exc)
+            return
+        if saved is None and shown is not None:
+            self._set_shown(None)  # That brief is gone; show the latest instead.
+            await self._reload_brief()
             return
         if saved is not None:
             self.digest.show_digest(saved)
@@ -1018,11 +1072,15 @@ class MainWindow(QMainWindow):
             self.status.setText("Cancelled. The displayed saved brief is unchanged.")
         except AuthenticationRequiredError as exc:
             log_failure(exc)
+            self._account_email = None
             self.connection.setText("Gmail: session expired or missing. Connect Gmail to continue.")
             self.status.setText("Sign in to Gmail, then retry. The saved brief is still available.")
         except ConfigurationError as exc:
             log_failure(exc)
             self.status.setText(configuration_guidance(exc))
+        except BriefDateError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static: the dates that can be briefed.
         except ProviderError as exc:
             log_failure(exc)
             self.status.setText("Provider unavailable. Check your connection and retry.")
@@ -1035,6 +1093,8 @@ class MainWindow(QMainWindow):
                 self.cached_dialog.status.setText(self.status.text())
             if self.settings_dialog.isVisible():
                 self.settings_dialog.status.setText(self.status.text())
+            if self.history_dialog.isVisible():
+                self.history_dialog.status.setText(self.status.text())
             self.review_panel.hide()
             self.consent_panel.hide()
             self.shortlist.clear()
@@ -1199,29 +1259,86 @@ class MainWindow(QMainWindow):
             log_failure(exc)
             self.connection.setText("Gmail: offline or unavailable. Saved brief available locally.")
         else:
+            self._account_email = email
             self.connection.setText(f"Gmail: connected as {email}")
 
     async def _connect(self) -> None:
         self.status.setText("Connecting to Gmail. Complete sign-in in your browser.")
         email = await self.backend.connect(silent_only=False)
+        self._account_email = email
         self.connection.setText(f"Gmail: connected as {email}")
         self.status.setText("Connected. Sync to review today's messages.")
 
     async def _disconnect(self) -> None:
         await self.backend.disconnect()
+        self._account_email = None
         self.connection.setText("Gmail: disconnected")
         self.status.setText("Local credentials removed. Saved briefs remain on this device.")
 
-    async def _generate(self) -> None:
+    # Saved briefs by day. Opening one needs no connection; briefing a past day is the
+    # owner's explicit choice, one day at a time, for the connected account.
+
+    async def _open_history(self) -> None:
+        briefs = await self.backend.list_briefs()
+        email = self._account_email
+        missed = await self.backend.missed_days(email) if email is not None else ()
+        today = self.now().astimezone(self.zone).date()
+        self.history_dialog.configure(briefs, missed, email, today)
+        self.status.setText("Open a saved brief, or brief a missed day.")
+        self.history_dialog.open()
+
+    def _request_open_brief(self, account_email: str, local_date: date) -> None:
+        self.start(lambda: self._show_brief(account_email, local_date), cancellable=False)
+
+    async def _show_brief(self, account_email: str, local_date: date) -> None:
+        digest = await self.backend.load_brief(account_email, local_date)
+        if digest is None:
+            self.status.setText("That brief is no longer saved.")
+            return
+        await self._view(digest)
+        self.history_dialog.accept()
+        self.status.setText(f"Showing the brief for {local_date.isoformat()}.")
+
+    async def _view(self, digest: DailyDigest) -> None:
+        """Show a brief; the banner appears unless it is the latest."""
+        latest = await self.backend.load_saved()
+        identity = (digest.account_id, digest.local_date)
+        is_latest = latest is not None and (latest.account_id, latest.local_date) == identity
+        self._set_shown(None if is_latest else identity)
+        self.digest.show_digest(digest)
+
+    async def _back_to_latest(self) -> None:
+        self._set_shown(None)
+        await self._reload_brief()
+        self.status.setText("Showing the latest brief.")
+
+    def _request_brief_day(self, local_date: date) -> None:
+        if self._account_email is None:
+            self.history_dialog.status.setText(NEEDS_CONNECTION)
+            return
+        self.history_dialog.accept()
+        self.start(lambda: self._generate(local_date))
+
+    async def _generate(self, local_date: date | None = None) -> None:
+        """Brief today (Sync and review), or a past day chosen in Briefs…."""
         self._offer_undo()  # A new brief replaces the suggestions that Undo would refer to.
-        self.status.setText("Syncing today's Inbox…")
-        result = await self.backend.generate(self, self, self._cancel, self._progress)
+        if local_date is None and self._shown is not None:
+            self._set_shown(None)  # Sync and review returns to the latest brief.
+            await self._reload_brief()
+        day = "today's Inbox" if local_date is None else f"the Inbox for {local_date.isoformat()}"
+        self.status.setText(f"Syncing {day}…")
+        result = await self.backend.generate(
+            self, self, self._cancel, self._progress, local_date=local_date
+        )
         if result.digest is not None:
-            self.digest.show_digest(result.digest)
+            if local_date is None:
+                self.digest.show_digest(result.digest)
+            else:
+                await self._view(result.digest)
             self.status.setText(f"Brief saved ({result.digest.status.value}).")
             if result.digest.status is DigestStatus.EMPTY:
                 if result.sync.message_count == 0 and result.sync.status is SyncStatus.COMPLETE:
-                    self.status.setText("No messages in today's Inbox. Empty brief saved.")
+                    self.status.setText(f"No messages in {day}. Empty brief saved.")
                 else:
                     self.status.setText(
                         "No analyzed messages in this selection. Empty brief saved."
@@ -1363,6 +1480,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self.settings_dialog.reject()
         self.cached_dialog.reject()
+        self.history_dialog.reject()
         self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
         self._cancel_drafting()
         final = self.draft_editor.final_edit() if self.draft_editor.isVisible() else None

@@ -12,7 +12,7 @@ from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.bodies import MessageBody
 from mailbrief.domain.briefs import BriefRunResult
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
-from mailbrief.domain.digests import DailyDigest, SyncProgress
+from mailbrief.domain.digests import DailyDigest, SavedBriefSummary, SyncProgress
 from mailbrief.domain.drafting import DraftContextPart, DraftingOptions, DraftingOutcome
 from mailbrief.domain.drafts import (
     Draft,
@@ -44,6 +44,7 @@ from mailbrief.services.drafting import (
     DraftingService,
 )
 from mailbrief.services.drafts import DraftService
+from mailbrief.services.history import BriefHistory, check_brief_date
 from mailbrief.services.preferences import (
     PreferencesService,
     PreferencesUnavailableError,
@@ -160,10 +161,15 @@ class DesktopRuntime:
         review: ShortlistGate,
         cancel: asyncio.Event,
         progress: Callable[[SyncProgress], None],
+        local_date: date | None = None,
     ) -> BriefRunResult:
+        """Brief today, or ``local_date``: one of the previous seven days, checked before any
+        provider is built. BriefService checks it again."""
         preferences = await self.get_owner_preferences()
         settings = await self._settings(preferences)
         zone = owner_zone(preferences)
+        if local_date is not None:
+            check_brief_date(local_date, datetime.now(UTC).astimezone(zone).date())
         async with (
             gmail_provider(settings, silent_only=True) as provider,
             groq_provider(settings) as ai,
@@ -189,7 +195,31 @@ class DesktopRuntime:
                 shortlist_gate=review,
                 shortlist_limit=preferences.shortlist_limit,
                 excluded_senders=preferences.excluded_senders,
+                local_date=local_date,
             )
+
+    # Saved briefs by day (M8 Part 3). Reading them needs no Gmail or AI.
+
+    async def list_briefs(self) -> tuple[SavedBriefSummary, ...]:
+        async with self._storage().session() as session:
+            return await BriefHistory(session).list_saved()
+
+    async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None:
+        async with self._storage().session() as session:
+            return await BriefHistory(session).get(account_email, local_date)
+
+    async def missed_days(self, account_email: str) -> tuple[date, ...]:
+        """The previous seven days in the owner's zone without a brief for the account.
+
+        Listing only displays, so unreadable preferences fall back to the system zone.
+        """
+        try:
+            zone = owner_zone(await self.get_owner_preferences())
+        except PreferencesUnavailableError:
+            zone = resolve_timezone(None)
+        today = datetime.now(UTC).astimezone(zone).date()
+        async with self._storage().session() as session:
+            return await BriefHistory(session).missed_days(account_email, today)
 
     async def get_preferences(self) -> DesktopPreferences:
         return await asyncio.to_thread(self._preferences.load)

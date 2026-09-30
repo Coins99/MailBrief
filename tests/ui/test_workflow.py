@@ -15,7 +15,14 @@ from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
-from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncResult, SyncStatus
+from mailbrief.domain.digests import (
+    DailyDigest,
+    DigestStatus,
+    SavedBriefSummary,
+    SyncProgress,
+    SyncResult,
+    SyncStatus,
+)
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
@@ -67,6 +74,10 @@ class FakeBackend(FakeDrafts):
         self.owner_preferences = OwnerPreferences.defaults()
         self.owner_fail: Exception | None = None
         self.owner_saves: list[tuple[PreferencesEdit, int]] = []
+        # Saved briefs by account and day, the missed days offered, and each generate's day.
+        self.briefs: dict[tuple[str, date], DailyDigest] = {}
+        self.missed: tuple[date, ...] = ()
+        self.generated_days: list[date | None] = []
         self.key_value: SecretStr | None = None
         self.revoked = False
         self.sync = SyncResult(
@@ -205,8 +216,10 @@ class FakeBackend(FakeDrafts):
         review: ShortlistGate,
         cancel: asyncio.Event,
         progress: Callable[[SyncProgress], None],
+        local_date: date | None = None,
     ) -> BriefRunResult:
         self.calls += 1
+        self.generated_days.append(local_date)
         self.started.set()
         try:
             if self.fail:
@@ -234,14 +247,40 @@ class FakeBackend(FakeDrafts):
                     privacy_notice="Enable Zero Data Retention.",
                 )
             )
+            digest = self.saved
+            if local_date is not None:
+                digest = self.saved.model_copy(update={"local_date": local_date})
+                self.briefs[(digest.account_id, local_date)] = digest
             return BriefRunResult(
                 status=BriefStatus.SAVED if self.approved else BriefStatus.CONSENT_DECLINED,
                 sync=self.sync,
-                digest=self.saved if self.approved else None,
+                digest=digest if self.approved else None,
             )
         finally:
             await asyncio.sleep(0)
             self.cleaned = True
+
+    async def list_briefs(self) -> tuple[SavedBriefSummary, ...]:
+        everything = {(self.saved.account_id, self.saved.local_date): self.saved, **self.briefs}
+        return tuple(
+            SavedBriefSummary(
+                account_email=digest.account_id,
+                local_date=digest.local_date,
+                timezone_name=digest.timezone_name,
+                status=digest.status,
+                generated_at_utc=digest.generated_at_utc,
+                item_count=len(digest.items),
+            )
+            for _, digest in sorted(everything.items(), key=lambda item: item[0][1], reverse=True)
+        )
+
+    async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None:
+        if (account_email, local_date) == (self.saved.account_id, self.saved.local_date):
+            return self.saved
+        return self.briefs.get((account_email, local_date))
+
+    async def missed_days(self, account_email: str) -> tuple[date, ...]:
+        return self.missed
 
     async def close(self) -> None:
         self.closed = True
