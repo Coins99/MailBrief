@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Self
+from typing import Final, Self
 
 from pydantic import ConfigDict, Field, HttpUrl, field_validator, model_validator
 
@@ -19,12 +19,27 @@ from mailbrief.domain.messages import EmailContact
 
 
 class DigestSection(StrEnum):
-    """Visible sections in a daily brief."""
+    """Visible sections in a daily brief.
+
+    FOLLOW_UPS holds replies in tracked threads that weren't in today's Inbox, whatever
+    their category (ADR 0016).
+    """
 
     HIGHLIGHTS = "highlights"
     ACTIONS = "actions"
     DEADLINES = "deadlines"
     DECISIONS = "decisions"
+    FOLLOW_UPS = "follow_ups"
+
+
+# How each section is titled wherever a brief is shown; the CLI prints the raw value.
+SECTION_TITLES: Final = {
+    DigestSection.ACTIONS: "Actions",
+    DigestSection.DEADLINES: "Deadlines",
+    DigestSection.DECISIONS: "Decisions",
+    DigestSection.HIGHLIGHTS: "Highlights",
+    DigestSection.FOLLOW_UPS: "Replies in threads you track",
+}
 
 
 class DigestStatus(StrEnum):
@@ -134,6 +149,8 @@ class SavedBriefSummary(DomainModel):
     status: DigestStatus
     generated_at_utc: datetime
     item_count: int = Field(ge=0)
+    # How many items are replies from tracked threads that weren't in that day's Inbox.
+    follow_up_count: int = Field(default=0, ge=0)
 
     @field_validator("generated_at_utc")
     @classmethod

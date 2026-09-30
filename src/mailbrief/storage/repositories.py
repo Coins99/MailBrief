@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime
 from typing import cast
 
 from pydantic import HttpUrl
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import case, delete, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -813,6 +813,10 @@ class DigestRepository:
     async def list_summaries(self, limit: int) -> tuple[SavedBriefSummary, ...]:
         """Saved Gmail briefs, newest local day first, with item counts from one query."""
         item_count = func.count(DigestItemTable.message_id)
+        follow_ups = func.coalesce(
+            func.sum(case((DigestItemTable.section == DigestSection.FOLLOW_UPS.value, 1), else_=0)),
+            0,
+        )
         result = await self._session.execute(
             select(
                 AccountTable.email_address,
@@ -821,6 +825,7 @@ class DigestRepository:
                 DigestTable.status,
                 DigestTable.generated_at_utc,
                 item_count,
+                follow_ups,
             )
             .join(AccountTable, DigestTable.account_id == AccountTable.id)
             .outerjoin(DigestItemTable, DigestItemTable.digest_id == DigestTable.id)
@@ -841,8 +846,9 @@ class DigestRepository:
                 status=DigestStatus(status),
                 generated_at_utc=generated_at_utc,
                 item_count=count,
+                follow_up_count=outside,
             )
-            for email, local_date, timezone_name, status, generated_at_utc, count in result
+            for email, local_date, timezone_name, status, generated_at_utc, count, outside in result
         )
 
     async def saved_dates(self, account_email: str, first: date, last: date) -> frozenset[date]:

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.digests import DailyDigest, SavedBriefSummary
+from mailbrief.domain.digests import DailyDigest, DigestSection, SavedBriefSummary
 from mailbrief.storage.repositories import DigestRepository
 
 CATCH_UP_DAYS: Final = 7
@@ -51,20 +51,35 @@ def coverage_line(brief: DailyDigest | SavedBriefSummary) -> str:
     """What a brief covers, in its own stored zone; shared by the CLI and the desktop.
 
     A brief made on its own day covers that day's messages up to when it was made. One made
-    later covers only the messages still in the Inbox then: earlier ones may have left.
+    later covers only the messages still in the Inbox then: earlier ones may have left. A
+    brief with replies from tracked threads that weren't in that Inbox says how many.
     """
     zone = brief.timezone_name
     made = brief.generated_at_utc.astimezone(ZoneInfo(zone))
     day = brief.local_date.isoformat()
     if made.date() <= brief.local_date:
-        return (
+        line = (
             f"Covers messages received on {day} up to {made:%H:%M} ({zone}) "
             "that were in your Inbox then."
         )
-    return (
-        f"Covers messages received on {day} ({zone}) that were still in your Inbox on "
-        f"{made.date().isoformat()} at {made:%H:%M}."
+    else:
+        line = (
+            f"Covers messages received on {day} ({zone}) that were still in your Inbox on "
+            f"{made.date().isoformat()} at {made:%H:%M}."
+        )
+    outside = (
+        brief.follow_up_count
+        if isinstance(brief, SavedBriefSummary)
+        else sum(item.section is DigestSection.FOLLOW_UPS for item in brief.items)
     )
+    if outside == 1:
+        line += " Also includes 1 reply from a thread you track that wasn't in today's Inbox."
+    elif outside:
+        line += (
+            f" Also includes {outside} replies from threads you track that weren't in "
+            "today's Inbox."
+        )
+    return line
 
 
 class BriefHistory:

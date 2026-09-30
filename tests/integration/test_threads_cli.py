@@ -173,6 +173,30 @@ def test_sync_show_metadata_labels_replies_outside_the_inbox(
     assert "not in today's Inbox" not in " ".join(lines[inbox : inbox + 3])
 
 
+def test_brief_show_puts_outside_replies_in_their_own_section(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "section.sqlite3"
+    assert sync(path) == 0
+    track_a1(path)
+    mailbox.reply("r1", "a1", received=MIDDAY + timedelta(hours=1), labels=())
+    groq_answers(respx_mock)
+    replies(monkeypatch, "yes")
+    capsys.readouterr()
+
+    assert run_brief(path, "--show") == 0
+
+    shown = capsys.readouterr().out
+    assert re.search(r"^2\. \[follow_ups\] ", shown, re.MULTILINE)  # After a1, which is first.
+    assert "Also includes 1 reply from a thread you track that wasn't in today's Inbox." in shown
+    assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
+    assert "[follow_ups]" in capsys.readouterr().out
+
+
 def test_a_rate_limited_check_is_reported_and_the_sync_still_succeeds(
     tmp_path: Path,
     mailbox: Mailbox,  # noqa: F811 - the imported fixture

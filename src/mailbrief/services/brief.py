@@ -188,6 +188,7 @@ class BriefService:
             window=window,
             messages=run.messages,
             coverage=coverage,
+            outside_ids=sync.outside_ids,
         )
         if digest is None:
             return BriefRunResult(

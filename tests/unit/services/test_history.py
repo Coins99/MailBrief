@@ -5,10 +5,17 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.digests import DailyDigest, DigestStatus, SavedBriefSummary
-from mailbrief.domain.messages import AccountIdentity, ProviderKind
+from mailbrief.domain.digests import (
+    DailyDigest,
+    DigestItem,
+    DigestSection,
+    DigestStatus,
+    SavedBriefSummary,
+)
+from mailbrief.domain.messages import AccountIdentity, EmailContact, ProviderKind
 from mailbrief.services.history import (
     CATCH_UP_DAYS,
     BriefDateError,
@@ -148,3 +155,59 @@ async def test_saved_briefs_list_newest_day_first_and_load_by_day(
     assert loaded is not None and loaded.account_id == "other@example.com"
     assert await history.get("owner@example.com", date(2026, 9, 28)) is None
     assert await history.accounts_for(date(2026, 9, 28)) == ("other@example.com",)
+
+
+def with_follow_ups(count: int, total: int = 3) -> DailyDigest:
+    """A brief made on its own day with ``count`` replies from tracked threads among
+    ``total`` items."""
+    items = tuple(
+        DigestItem(
+            message_key=f"m{index}",
+            section=(
+                DigestSection.FOLLOW_UPS if index >= total - count else DigestSection.HIGHLIGHTS
+            ),
+            position=index,
+            sender=EmailContact(name=None, address="sam@example.com"),
+            summary="A summary.",
+            source_url=HttpUrl("https://mail.google.com/mail/u/#all/x"),
+        )
+        for index in range(total)
+    )
+    return DailyDigest(
+        account_id="owner@example.com",
+        local_date=TODAY,
+        timezone_name="America/Toronto",
+        generated_at_utc=datetime(2026, 9, 29, 13, 14, tzinfo=UTC),
+        status=DigestStatus.COMPLETE,
+        items=items,
+    )
+
+
+BASE = (
+    "Covers messages received on 2026-09-29 up to 09:14 (America/Toronto) "
+    "that were in your Inbox then."
+)
+
+
+def test_replies_from_tracked_threads_are_counted_on_the_coverage_line() -> None:
+    assert coverage_line(with_follow_ups(0)) == BASE
+    assert coverage_line(with_follow_ups(1)) == (
+        BASE + " Also includes 1 reply from a thread you track that wasn't in today's Inbox."
+    )
+    assert coverage_line(with_follow_ups(3)) == (
+        BASE + " Also includes 3 replies from threads you track that weren't in today's Inbox."
+    )
+
+
+def test_a_saved_brief_summary_says_the_same() -> None:
+    made = summary(TODAY, datetime(2026, 9, 29, 13, 14, tzinfo=UTC))
+    assert coverage_line(made) == BASE
+    two = made.model_copy(update={"follow_up_count": 2})
+    assert coverage_line(two) == coverage_line(with_follow_ups(2))
+    # A brief made on a later day keeps the sentence after its own.
+    later = summary(date(2026, 9, 28), datetime(2026, 9, 29, 14, 2, tzinfo=UTC))
+    line = coverage_line(later.model_copy(update={"follow_up_count": 1}))
+    assert line.startswith("Covers messages received on 2026-09-28")
+    assert line.endswith(
+        "Also includes 1 reply from a thread you track that wasn't in today's Inbox."
+    )

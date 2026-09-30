@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mailbrief.domain.analysis import AIUsage, AnalysisRequest, AnalysisResponse
 from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS, BodySource, MessageBody
 from mailbrief.domain.briefs import SENT_FIELDS, BriefStatus, TransmissionPreview
-from mailbrief.domain.digests import DigestStatus, SyncProgress, SyncStage
+from mailbrief.domain.digests import DigestSection, DigestStatus, SyncProgress, SyncStage
 from mailbrief.domain.messages import (
     AccountIdentity,
     EmailContact,
@@ -30,7 +30,7 @@ from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
 from mailbrief.services.digest import DigestService
-from mailbrief.services.history import BriefDateError
+from mailbrief.services.history import BriefDateError, coverage_line
 from mailbrief.services.proposals import ProposalService
 from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
 from mailbrief.services.threads import ThreadCheck, ThreadService
@@ -1108,6 +1108,47 @@ async def seed_outside_reply(session: AsyncSession) -> None:
     )
     await MessageRepository(session).upsert_messages(account.id, [archived])
     await session.commit()
+
+
+async def test_an_outside_reply_becomes_a_follow_up_item_and_the_coverage_line_says_so(
+    session: AsyncSession,
+) -> None:
+    await seed_outside_reply(session)
+    mailbox = inbox()
+    texts = {**texts_for(mailbox), "archived": f"{BODY} Reference archived."}
+    service = build(
+        session,
+        FakeAIProvider([answer_all()]),
+        RecordingGate(True),
+        messages=mailbox,
+        texts=texts,
+        threads=RecordingThreads(session, ThreadCheck()),
+    )
+
+    result = await service.generate(tz_key=ZONE)
+
+    assert result.status is BriefStatus.SAVED
+    assert result.sync.outside_ids == {"archived"}
+    assert result.coverage is not None and result.coverage.shortlisted == 3
+    digest = result.digest
+    assert digest is not None
+    # Whatever its category, it is in its own section, last.
+    assert [(item.message_key, item.section) for item in digest.items][-1] == (
+        "archived",
+        DigestSection.FOLLOW_UPS,
+    )
+    assert DigestSection.FOLLOW_UPS not in {item.section for item in digest.items[:-1]}
+    assert coverage_line(digest).endswith(
+        " Also includes 1 reply from a thread you track that wasn't in today's Inbox."
+    )
+    # Saved that way.
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    repository = DigestRepository(session)
+    row = await repository.get_by_account_and_date(account.id, TODAY)
+    assert row is not None
+    stored = await repository.get_digest_items(row.id)
+    assert [item.section for item, _, _ in stored][-1] == DigestSection.FOLLOW_UPS.value
 
 
 async def test_an_outside_reply_goes_through_the_same_consent_and_limit(

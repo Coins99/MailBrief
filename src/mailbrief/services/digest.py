@@ -25,6 +25,7 @@ SECTION_ORDER = (
     DigestSection.DEADLINES,
     DigestSection.DECISIONS,
     DigestSection.HIGHLIGHTS,
+    DigestSection.FOLLOW_UPS,
 )
 _IN_BRIEF = (AnalysisOutcome.ANALYZED, AnalysisOutcome.REUSED)
 
@@ -64,12 +65,19 @@ def _entry(item: PlannedMessage) -> _Entry:
     return _Entry(item.ranked, item.analysis, item.message_row_id, item.analysis_row_id)
 
 
-def _order(entry: _Entry) -> tuple[int, int, float, int, float, str]:
+def _section(entry: _Entry, outside_ids: frozenset[str]) -> DigestSection:
+    """Replies from outside today's Inbox go to FOLLOW_UPS, whatever their category."""
+    if entry.ranked.message.provider_message_id in outside_ids:
+        return DigestSection.FOLLOW_UPS
+    return section_for(entry.analysis)
+
+
+def _order(entry: _Entry, outside_ids: frozenset[str]) -> tuple[int, int, float, int, float, str]:
     """Section, then dated deadlines by due instant, then rank, recency and ID."""
     due = _due_at(entry.analysis)
     message = entry.ranked.message
     return (
-        SECTION_ORDER.index(section_for(entry.analysis)),
+        SECTION_ORDER.index(_section(entry, outside_ids)),
         0 if due is not None else 1,
         due.timestamp() if due is not None else 0.0,
         -entry.ranked.score,
@@ -93,14 +101,19 @@ class DigestService:
         window: DayWindow,
         messages: Sequence[PlannedMessage],
         coverage: DigestCoverage,
+        outside_ids: frozenset[str] = frozenset(),
     ) -> DailyDigest | None:
         """Save and return the day's brief.
+
+        The items of ``outside_ids`` (replies in tracked threads that weren't in today's
+        Inbox) go to the FOLLOW_UPS section, last, whatever their category.
 
         Returns None without writing when nothing was usable and something failed, so
         the last good brief for the day stays in place.
         """
         entries = sorted(
-            (_entry(item) for item in messages if item.outcome in _IN_BRIEF), key=_order
+            (_entry(item) for item in messages if item.outcome in _IN_BRIEF),
+            key=lambda entry: _order(entry, outside_ids),
         )
         if entries:
             complete = coverage.failed == 0 and coverage.sync_complete
@@ -110,7 +123,7 @@ class DigestService:
         else:
             return None
         items = [
-            (entry.message_row_id, entry.analysis_row_id, position, section_for(entry.analysis))
+            (entry.message_row_id, entry.analysis_row_id, position, _section(entry, outside_ids))
             for position, entry in enumerate(entries)
         ]
         saved = await self._digests.save_digest(

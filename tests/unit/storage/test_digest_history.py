@@ -49,8 +49,10 @@ async def brief(
     items: int = 0,
     *,
     suggestions: bool = False,
+    follow_ups: int = 0,
 ) -> int:
-    """Save a brief with ``items`` analyzed messages, generated at ``generated``."""
+    """Save a brief with ``items`` analyzed messages, generated at ``generated``; the last
+    ``follow_ups`` of them are replies from tracked threads."""
     messages = await MessageRepository(session).upsert_messages(
         account_id,
         [make_message(provider_message_id=f"{account_id}-{day}-{index}") for index in range(items)],
@@ -73,7 +75,10 @@ async def brief(
             schema_version="s",
             analysis=analysis,
         )
-        rows.append((message.id, saved.id, position, DigestSection.ACTIONS))
+        section = (
+            DigestSection.FOLLOW_UPS if position >= items - follow_ups else DigestSection.ACTIONS
+        )
+        rows.append((message.id, saved.id, position, section))
     digest = await DigestRepository(session).save_digest(
         account_id=account_id,
         local_date=day,
@@ -142,6 +147,22 @@ async def test_summaries_count_items_in_one_query_newest_day_first(
     )
     async with database.session() as session:
         assert len(await DigestRepository(session).list_summaries(2)) == 2
+
+
+async def test_summaries_count_the_replies_from_tracked_threads(database: Database) -> None:
+    async with database.session() as session:
+        owner = await account(session, "owner@example.com", ProviderKind.GMAIL)
+        await brief(session, owner, YESTERDAY, datetime(2026, 9, 28, 13, tzinfo=UTC), 3)
+        await brief(session, owner, TODAY, datetime(2026, 9, 29, 13, tzinfo=UTC), 4, follow_ups=2)
+        await brief(session, owner, date(2026, 9, 27), datetime(2026, 9, 27, 13, tzinfo=UTC))
+
+        summaries = await DigestRepository(session).list_summaries(10)
+
+    assert [(s.local_date, s.item_count, s.follow_up_count) for s in summaries] == [
+        (TODAY, 4, 2),
+        (YESTERDAY, 3, 0),
+        (date(2026, 9, 27), 0, 0),  # A brief without items counts none.
+    ]
 
 
 async def test_one_day_s_brief_with_and_without_suggestions(database: Database) -> None:
