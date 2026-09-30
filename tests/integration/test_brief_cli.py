@@ -67,17 +67,21 @@ class Mailbox:
         )
         self.add("a1")
 
-    def add(self, identifier: str) -> None:
-        received = datetime.now(UTC)
+    def add(
+        self, identifier: str, *, thread: str | None = None, received: datetime | None = None
+    ) -> None:
+        """An Inbox message, in its own thread unless ``thread`` names another's."""
+        received = received or datetime.now(UTC)
         self._identifiers.append(identifier)
         self._router.get(f"{MESSAGES_URL}/{identifier}", params__contains={"format": "full"}).mock(
             side_effect=lambda request: self._full_message(identifier)
         )
         item = metadata(identifier, received=received)
+        item["threadId"] = thread or f"thread_{identifier}"
         self._metadata[identifier] = self._router.get(f"{MESSAGES_URL}/{identifier}").respond(
             json=item
         )
-        self.threads.setdefault(f"thread_{identifier}", []).append(item)
+        self.threads.setdefault(str(item["threadId"]), []).append(item)
 
     def reply(
         self, identifier: str, to: str, *, received: datetime, labels: tuple[str, ...]

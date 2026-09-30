@@ -22,13 +22,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mailbrief.config import Settings
 from mailbrief.domain.actions import (
     TARGET_REASON_TEXT,
+    Action,
     ActionFilter,
+    ActionProposal,
     ActionStatus,
+    ProposalState,
     SuggestionState,
     ThreadActivity,
     ThreadLink,
 )
-from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
+from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, FollowUpKind
 from mailbrief.domain.bodies import BodyStatus, MessageBody, PreparedBody
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncResult, SyncStatus
@@ -48,7 +51,7 @@ from mailbrief.domain.drafts import (
     placeholders,
     still_to_fill,
 )
-from mailbrief.domain.messages import ProviderKind
+from mailbrief.domain.messages import ProviderKind, RankReason
 from mailbrief.domain.preferences import OwnerPreferences, sender_excluded
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
@@ -105,7 +108,8 @@ from mailbrief.services.preferences import (
     effective_settings,
     owner_zone,
 )
-from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
+from mailbrief.services.proposals import ProposalNotFoundError, ProposalService
+from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError, reason_text
 from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
@@ -132,6 +136,10 @@ _LIMIT_LABELS = {
     "ai_timeout_seconds": "Timeout (seconds)",
 }
 _ACTION_REFUSED = "That suggestion or action was not found or cannot change now."
+_PROPOSAL_DECIDED = "That proposal was already applied or dismissed."
+_PROPOSAL_ACTIONS = frozenset({"proposals", "apply-proposal", "dismiss-proposal"})
+# Commands that show local times, in --timezone, else the saved zone, else the system's.
+_ZONED_ACTIONS = frozenset({"list", *_PROPOSAL_ACTIONS})
 _DRAFT_NOT_FOUND = "That draft was not found."
 _FILE_EXISTS = "That file already exists; nothing was written. Choose another --out path."
 _SETUP_UNAVAILABLE = (
@@ -325,6 +333,9 @@ async def sync(
                             f"{row.provider_message_id} [{marker}] score={row.rank_score} "
                             f"{row.sender_address}: {row.subject}"
                         )
+                        reasons = ", ".join(_reason_words(value) for value in row.rank_reasons_json)
+                        if reasons:
+                            print(f"  reasons: {reasons}")
                         print(f"  {row.web_link}")
                 return 0 if result.status is SyncStatus.COMPLETE else 4
         finally:
@@ -761,12 +772,15 @@ def _print_suggestions(item: DigestItem, zone: ZoneInfo) -> None:
 
 
 def _print_items(
-    digest: DailyDigest, links: Mapping[str, tuple[ThreadLink, ...]] | None = None
+    digest: DailyDigest,
+    links: Mapping[str, tuple[ThreadLink, ...]] | None = None,
+    proposals: Mapping[str, tuple[ActionProposal, ...]] | None = None,
 ) -> None:
     """Derived brief content, shown only on request; never evidence or bodies.
 
     ``links`` names the open actions that continue each item's thread; an action the email
-    is already a source of isn't repeated.
+    is already a source of isn't repeated. ``proposals`` names each item's pending follow-up
+    proposals, without their quotes.
     """
     zone = ZoneInfo(digest.timezone_name)
     for item in digest.items:
@@ -775,6 +789,9 @@ def _print_items(
         for link in (links or {}).get(item.message_key, ()):
             if not link.is_source:
                 print(f"   Continues: {_terminal_safe(link.title)} ({link.public_id})")
+        for proposal in (proposals or {}).get(item.message_key, ()):
+            title = _terminal_safe(proposal.action_title)
+            print(f"   Proposes: {_proposal_kind(proposal, zone)} for {title} (P{proposal.id})")
         if item.action_text:
             print(f"   Action: {item.action_text}")
         deadline = _deadline(item, zone)
@@ -852,10 +869,10 @@ async def brief(
                     excluded_senders=owner.preferences.excluded_senders,
                     local_date=window.local_date,
                 )
-                links = (
-                    await _brief_links(session, result.digest)
+                links, proposals = (
+                    await _brief_extras(session, result.digest)
                     if show and result.digest is not None
-                    else {}
+                    else ({}, {})
                 )
         finally:
             await database.dispose()
@@ -863,19 +880,24 @@ async def brief(
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
     _print_result(result, model=model)
     _print_threads(result.sync)
+    created = result.proposals_created
+    if created:
+        print(f"Proposed {created} {'update' if created == 1 else 'updates'} to your actions.")
     if show and result.digest is not None:
         print(coverage_line(result.digest))
-        _print_items(result.digest, links)
+        _print_items(result.digest, links, proposals)
     return _brief_exit_code(result)
 
 
-async def _brief_links(
+async def _brief_extras(
     session: AsyncSession, digest: DailyDigest
-) -> dict[str, tuple[ThreadLink, ...]]:
-    """The open actions that continue each item's thread, read from local data."""
-    return await ActionService(session).thread_links(
-        digest.account_id, (item.message_key for item in digest.items)
-    )
+) -> tuple[dict[str, tuple[ThreadLink, ...]], dict[str, tuple[ActionProposal, ...]]]:
+    """The open actions that continue each item's thread, and each item's pending
+    proposals, read from local data."""
+    keys = [item.message_key for item in digest.items]
+    links = await ActionService(session).thread_links(digest.account_id, keys)
+    proposals = await ProposalService(session).pending_for_messages(digest.account_id, keys)
+    return links, proposals
 
 
 async def _open_existing(path: Path) -> Database | None:
@@ -955,7 +977,7 @@ async def briefs_show(date_text: str, *, account: str | None, database_path: Pat
                     return 3
                 account = accounts[0] if accounts else None
             digest = None if account is None else await history.get(account, day)
-            links = {} if digest is None else await _brief_links(session, digest)
+            links, proposals = ({}, {}) if digest is None else await _brief_extras(session, digest)
     finally:
         await database.dispose()
     if digest is None:
@@ -966,7 +988,7 @@ async def briefs_show(date_text: str, *, account: str | None, database_path: Pat
         f"items: {len(digest.items)}"
     )
     print(coverage_line(digest))
-    _print_items(digest, links)
+    _print_items(digest, links, proposals)
     return 0
 
 
@@ -1009,13 +1031,14 @@ async def actions(
     suggestion_id: int | None,
     public_id: str | None = None,
     into: str | None = None,
+    proposal_id: int | None = None,
 ) -> int:
-    """List actions, accept or dismiss a stored suggestion, or mark an action's threads
-    seen; needs no Gmail or AI access.
+    """List actions, accept or dismiss a stored suggestion, mark an action's threads seen,
+    or list, apply or dismiss follow-up proposals; needs no Gmail or AI access.
 
-    ``into`` accepts the suggestion into that existing action instead of creating one. The
-    list shows dates in --timezone, else the saved time zone. Listing only displays local
-    data, so unreadable preferences fall back to the system time zone.
+    ``into`` accepts the suggestion into that existing action instead of creating one. Lists
+    show dates in --timezone, else the saved time zone. They only display local data, so
+    unreadable preferences fall back to the system time zone.
     """
     zone = resolve_timezone(timezone) if timezone and timezone.strip() else None
     path = database_path or AppPaths.from_qt().database_path
@@ -1023,12 +1046,16 @@ async def actions(
     database = Database.from_path(path)
     try:
         async with database.session() as session:
-            if zone is None and action == "list":
+            if zone is None and action in _ZONED_ACTIONS:
                 try:
                     zone = owner_zone(await PreferencesService(session).get())
                 except PreferencesUnavailableError:
                     await session.rollback()
                     print("Saved preferences could not be read; showing the system time zone.")
+            if action in _PROPOSAL_ACTIONS:
+                return await _proposals_command(
+                    session, action, proposal_id, zone or resolve_timezone(None)
+                )
             service = ActionService(session)
             if action == "accept" and into is not None:
                 assert suggestion_id is not None
@@ -1091,9 +1118,108 @@ async def actions(
         if item.status is ActionStatus.OPEN and item.is_overdue(now):
             line += "; overdue"
         line += _thread_text(item.thread, zone)
+        if item.proposals:
+            count = len(item.proposals)
+            line += f"; {count} {'proposal' if count == 1 else 'proposals'}"
         print(line)
     if total > len(listed):
         print(f"Showing the newest {len(listed)} of {total} completed actions.")
+    return 0
+
+
+def _reason_words(value: str) -> str:
+    """A stored rank reason in words; one this version doesn't know is shown as stored."""
+    try:
+        return reason_text(RankReason(value))
+    except ValueError:
+        return value.replace("_", " ")
+
+
+def _proposal_id(text: str) -> int:
+    """A proposal ID as actions proposals shows it (P3), or its number alone."""
+    value = text.strip().removeprefix("P").removeprefix("p")
+    if not value.isdigit():
+        raise argparse.ArgumentTypeError("use the ID shown by actions proposals, such as P3")
+    return int(value)
+
+
+def _proposal_kind(proposal: ActionProposal, zone: ZoneInfo) -> str:
+    """What a proposal would do, in words; a new deadline is shown in ``zone``."""
+    if proposal.kind is not FollowUpKind.NEW_DEADLINE:
+        return proposal.kind.value
+    deadline = _format_deadline(
+        proposal.deadline_precision,
+        proposal.deadline_date,
+        proposal.deadline_at_utc,
+        proposal.deadline_text,
+        zone,
+    )
+    return _terminal_safe(f"new deadline {deadline}")
+
+
+def _proposal_line(proposal: ActionProposal, zone: ZoneInfo) -> str:
+    """One pending proposal on one line: its ID, action, kind, quote and email."""
+    received = proposal.received_at_utc.astimezone(zone).date().isoformat()
+    parts = (
+        f"P{proposal.id}",
+        f"{proposal.action_public_id} {proposal.action_title}",
+        _proposal_kind(proposal, zone),
+        f'"{" ".join(proposal.evidence.split())}"',
+        f"{proposal.sender_address}, {received}, {' '.join(proposal.subject.split())}",
+    )
+    return _terminal_safe(" · ".join(parts))
+
+
+def _applied_line(proposal: ActionProposal, before: Action, after: Action, zone: ZoneInfo) -> str:
+    """What applying a proposal changed."""
+    name = f"{after.title} ({after.public_id})"
+    if proposal.kind is not FollowUpKind.NEW_DEADLINE:
+        line = f"Applied P{proposal.id}: completed {name}; the email says it was {proposal.kind}."
+        return _terminal_safe(line)
+    deadline = _format_deadline(
+        after.deadline_precision,
+        after.deadline_date,
+        after.deadline_at_utc,
+        after.deadline_text,
+        zone,
+    )
+    line = f"Applied P{proposal.id}: {name} now has deadline {deadline}"
+    if before.target_date == before.suggested_target_date:
+        target = "none" if after.target_date is None else after.target_date.isoformat()
+        line += f"; target date {target}."
+    else:
+        line += "; the target date you set is unchanged."
+    return _terminal_safe(line)
+
+
+async def _proposals_command(
+    session: AsyncSession, action: str, proposal_id: int | None, zone: ZoneInfo
+) -> int:
+    """actions proposals, apply-proposal and dismiss-proposal; local data only."""
+    service = ProposalService(session)
+    if action == "proposals":
+        pending = await service.pending()
+        if not pending:
+            print("No pending proposals.")
+        for proposal in pending:
+            print(_proposal_line(proposal, zone))
+        return 0
+    assert proposal_id is not None
+    proposal = await service.get(proposal_id)
+    if proposal.state is not ProposalState.PENDING:
+        print(_PROPOSAL_DECIDED)
+        return 3
+    if action == "dismiss-proposal":
+        await service.dismiss(proposal_id)
+        print(f"Dismissed P{proposal_id}; it won't be proposed again.")
+        return 0
+    before = await ActionService(session).get(proposal.action_public_id)
+    try:
+        after = await service.apply(proposal_id, before.revision)
+    except ActionConflictError as exc:
+        print(str(exc))  # Static, such as an action that is no longer open.
+        return 3
+    print(_applied_line(proposal, before, after, zone))
     return 0
 
 
@@ -1273,7 +1399,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--database", type=Path, help="Optional SQLite path; defaults to app data."
     )
     actions_parser = commands.add_parser(
-        "actions", help="List accepted actions, or accept or dismiss a suggestion."
+        "actions",
+        help=(
+            "List accepted actions, accept or dismiss a suggestion, or decide follow-up proposals."
+        ),
     )
     action_commands = actions_parser.add_subparsers(dest="action", required=True)
     list_parser = action_commands.add_parser(
@@ -1305,7 +1434,33 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "seen", help="Mark the later messages in an action's threads as seen."
     )
     seen_parser.add_argument("public_id", help="The action ID shown by actions list.")
-    for subcommand in (list_parser, accept_parser, dismiss_parser, seen_parser):
+    proposals_parser = action_commands.add_parser(
+        "proposals", help="List pending proposals to update your actions from later emails."
+    )
+    apply_proposal_parser = action_commands.add_parser(
+        "apply-proposal", help="Apply a proposal shown by actions proposals."
+    )
+    dismiss_proposal_parser = action_commands.add_parser(
+        "dismiss-proposal", help="Dismiss a proposal; it won't be proposed again."
+    )
+    for decide in (apply_proposal_parser, dismiss_proposal_parser):
+        decide.add_argument(
+            "proposal_id",
+            type=_proposal_id,
+            metavar="ID",
+            help="The ID shown by actions proposals, such as P3.",
+        )
+    for shown in (proposals_parser, apply_proposal_parser):
+        shown.add_argument("--timezone", help=_TIMEZONE_HELP)
+    for subcommand in (
+        list_parser,
+        accept_parser,
+        dismiss_parser,
+        seen_parser,
+        proposals_parser,
+        apply_proposal_parser,
+        dismiss_proposal_parser,
+    ):
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
@@ -1430,6 +1585,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     suggestion_id=getattr(args, "suggestion_id", None),
                     public_id=getattr(args, "public_id", None),
                     into=getattr(args, "into", None),
+                    proposal_id=getattr(args, "proposal_id", None),
                 )
             )
         if args.command == "drafts" and args.action == "generate":
@@ -1526,6 +1682,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 3
     except FileExistsError:
         print(_FILE_EXISTS)
+        return 3
+    except ProposalNotFoundError as exc:
+        print(str(exc))  # Static.
         return 3
     except (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError):
         # Before ValueError: ActionConflictError is one. Messages stay static.
