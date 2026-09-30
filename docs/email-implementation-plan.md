@@ -304,8 +304,9 @@ modifying Gmail or losing action state.
 
 ## M8 — Thread continuity and daily operation
 
-**Status:** in progress, in stages ([m8-daily-operation.md](m8-daily-operation.md)); M8.1
-owner preferences first ([ADR 0014](adr/0014-owner-preferences.md)).
+**Status:** in progress on draft PR #17, built in nine parts
+([m8-daily-operation.md](m8-daily-operation.md)); preferences first
+([ADR 0014](adr/0014-owner-preferences.md)).
 
 **Work**
 

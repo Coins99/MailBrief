@@ -23,7 +23,7 @@ exceptions. Usage metadata is retained even with ZDR. See
    does not support.
 3. Optional settings. When a variable is unset, your saved preference applies, else the
    default; set them in Settings > Preferences and check them with
-   `mailbrief-gmail-diagnostic preferences show` ([M8.1](m8-daily-operation.md#m81-preferences)).
+   `mailbrief-gmail-diagnostic preferences show` ([M8 preferences](m8-daily-operation.md#preferences-parts-12)).
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |

@@ -32,10 +32,10 @@ and `MAILBRIEF_GROQ_MODEL` when present. Once saved, desktop settings override
 those environment values, including deliberately blank fields. Diagnostic CLIs
 continue to use their own environment settings for these two.
 
-Since M8.1, Settings has a second tab, **Preferences**: your time zone, messages per
+Since M8, Settings has a second tab, **Preferences**: your time zone, messages per
 brief, excluded senders, drafting defaults and AI limits. They are saved in the database,
 shared with the diagnostic CLI, and an explicit `MAILBRIEF_AI_*` variable still wins over
-a saved AI limit. See [M8 daily operation](m8-daily-operation.md#m81-preferences).
+a saved AI limit. See [M8 daily operation](m8-daily-operation.md#preferences-parts-12).
 
 Settings also supports key removal and revocation of Groq consent for all locally
 stored Gmail accounts. Neither operation removes saved briefs or cached analyses.

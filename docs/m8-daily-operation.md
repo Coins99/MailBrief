@@ -4,20 +4,27 @@ M8 turns the daily brief into something to rely on every day: the owner's prefer
 history of saved briefs, follow-up on open actions as their threads continue, and refresh
 while MailBrief runs. The milestone's scope is in
 [email-implementation-plan.md](email-implementation-plan.md#m8--thread-continuity-and-daily-operation).
-It ships in stages, one pull request each.
+M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), branch
+`feat/m8-continuity`), built in nine parts.
 
-| Stage | What it adds | Migration | Status |
+| Part | What it adds | Schema | Status |
 | --- | --- | --- | --- |
-| M8.1 Owner preferences | Time zone, messages per brief, sender exclusions, drafting defaults, AI limits | 0009 | Implemented, awaiting live acceptance |
-| M8.2 Brief history and bounded catch-up | Browse saved days; brief one missed day (within the last 7) per explicit run | None expected | Planned |
-| M8.3 Thread tracking for open actions | Metadata of later messages in their threads, including the owner's replies; "Add to existing action" in the brief | 0010 | Planned |
-| M8.4 Follow-up proposals from later replies | A new deadline, a cancellation or a delivery, applied only by the owner | 0011, analysis schema 7 | Planned |
-| M8.5 Refresh on launch and while running | Automatic analysis only by explicit opt-in; missed runs coalesce | 0012 | Planned |
-| M8.6 Optional Gmail history cursor | Incremental reconciliation of the Inbox | 0013 | Planned |
+| 1. Preferences core | Time zone, messages per brief, sender exclusions, drafting defaults, AI limits in SQLite; CLI | 0009, ADR 0014 | Done |
+| 2. Preferences in the desktop | The Settings Preferences tab; the owner's zone and drafting defaults in the window | None | Done |
+| 3. Brief history and bounded catch-up | Browse saved briefs; brief one missed day (within the last 7) per explicit run | None | In progress |
+| 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Planned |
+| 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None expected | Planned |
+| 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7 | Planned |
+| 7. Follow-up proposals in the desktop | Reviewing and applying proposals | None expected | Planned |
+| 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, ADR 0016 | Planned |
+| 9. Closeout | Acceptance, documentation and cleanup | None expected | Planned |
 
-## M8.1 Preferences
+The optional Gmail history cursor for incremental Inbox reconciliation is not part of this
+pull request.
 
-M8.1 is implemented and awaits live acceptance. The policy is
+## Preferences (Parts 1–2)
+
+Parts 1 and 2 are implemented and await live acceptance. The policy is
 [ADR 0014](adr/0014-owner-preferences.md).
 
 ### What it does

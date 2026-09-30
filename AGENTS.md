@@ -28,10 +28,11 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   autosave, versions, copy and export, and AI drafting with Groq from context the owner
   chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
   ADR 0012 and ADR 0013.
-- M8 in progress, in stages (`docs/m8-daily-operation.md`). M8.1 implemented, awaiting live
-  acceptance: owner preferences (time zone, messages per brief, sender exclusions, drafting
-  defaults, AI limits) in the Settings Preferences tab and `mailbrief-gmail-diagnostic
-  preferences show`. See ADR 0014.
+- M8 in progress on `feat/m8-continuity` (draft PR #17), built in nine parts
+  (`docs/m8-daily-operation.md`); preferences (Parts 1–2) implemented, awaiting live
+  acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
+  limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
+  See ADR 0014.
 
 ## Layout (ports and adapters)
 
