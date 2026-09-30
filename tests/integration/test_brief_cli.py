@@ -14,7 +14,7 @@ import time_machine
 
 from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
-from mailbrief.providers.gmail.client import MESSAGES_URL, GmailClient
+from mailbrief.providers.gmail.client import MESSAGES_URL, THREADS_URL, GmailClient
 from mailbrief.providers.gmail.provider import GmailProvider
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE
 from mailbrief.providers.groq.factory import groq_provider
@@ -50,14 +50,21 @@ def midday() -> Iterator[None]:
 
 
 class Mailbox:
-    """Synthetic Inbox messages over respx; a test can change the body or add a message."""
+    """Synthetic Inbox messages over respx; a test can change the body or add a message.
+
+    Each message starts its own thread, "thread_<ID>"; reply() adds a later message to one.
+    """
 
     def __init__(self, router: respx.MockRouter) -> None:
         self.body = BODY
         self._router = router
         self._identifiers: list[str] = []
         self._metadata: dict[str, respx.Route] = {}
+        self.threads: dict[str, list[dict[str, object]]] = {}
         router.get(MESSAGES_URL).mock(side_effect=self._list)
+        self.thread_route = router.get(url__regex=rf"^{THREADS_URL}/[^/?]+").mock(
+            side_effect=self._thread
+        )
         self.add("a1")
 
     def add(self, identifier: str) -> None:
@@ -66,9 +73,20 @@ class Mailbox:
         self._router.get(f"{MESSAGES_URL}/{identifier}", params__contains={"format": "full"}).mock(
             side_effect=lambda request: self._full_message(identifier)
         )
+        item = metadata(identifier, received=received)
         self._metadata[identifier] = self._router.get(f"{MESSAGES_URL}/{identifier}").respond(
-            json=metadata(identifier, received=received)
+            json=item
         )
+        self.threads.setdefault(f"thread_{identifier}", []).append(item)
+
+    def reply(
+        self, identifier: str, to: str, *, received: datetime, labels: tuple[str, ...]
+    ) -> None:
+        """A later message in ``to``'s thread, served only through threads.get."""
+        item = metadata(identifier, received=received)
+        item["threadId"] = f"thread_{to}"
+        item["labelIds"] = list(labels)
+        self.threads[f"thread_{to}"].append(item)
 
     def empty(self) -> None:
         """Leave today's Inbox with no messages."""
@@ -80,6 +98,12 @@ class Mailbox:
 
     def _list(self, request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"messages": [{"id": id_} for id_ in self._identifiers]})
+
+    def _thread(self, request: httpx.Request) -> httpx.Response:
+        thread = request.url.path.rsplit("/", 1)[-1]
+        if thread not in self.threads:
+            return httpx.Response(404)
+        return httpx.Response(200, json={"id": thread, "messages": self.threads[thread]})
 
     def _full_message(self, identifier: str) -> httpx.Response:
         body = message(part("text/plain", self.body), identifier=identifier)

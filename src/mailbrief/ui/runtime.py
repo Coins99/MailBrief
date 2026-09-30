@@ -51,6 +51,7 @@ from mailbrief.services.preferences import (
     effective_settings,
     owner_zone,
 )
+from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -182,6 +183,7 @@ class DesktopRuntime:
                     MessageRepository(session),
                     SyncRunRepository(session),
                     AccountRepository(session),
+                    threads=ThreadService(session, provider),
                 ),
                 bodies=BodyService(provider, limit=settings.ai_body_character_limit),
                 analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),

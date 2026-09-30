@@ -103,6 +103,7 @@ from mailbrief.services.preferences import (
     owner_zone,
 )
 from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
+from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -268,7 +269,11 @@ async def sync(
                 accounts = AccountRepository(session)
                 messages = MessageRepository(session)
                 application = ApplicationService(
-                    provider, messages, SyncRunRepository(session), accounts
+                    provider,
+                    messages,
+                    SyncRunRepository(session),
+                    accounts,
+                    threads=ThreadService(session, provider),
                 )
                 result, shortlist = await application.prepare_daily_shortlist(
                     tz_key=owner.zone.key,
@@ -818,6 +823,7 @@ async def brief(
                         MessageRepository(session),
                         SyncRunRepository(session),
                         AccountRepository(session),
+                        threads=ThreadService(session, provider),
                     ),
                     bodies=BodyService(provider, limit=settings.ai_body_character_limit),
                     analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),

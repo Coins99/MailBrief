@@ -20,6 +20,7 @@ from mailbrief.services.ranking import (
     review_shortlist,
 )
 from mailbrief.services.sync import SyncService
+from mailbrief.services.threads import ThreadService
 from mailbrief.storage.repositories import (
     AccountRepository,
     MessageRepository,
@@ -51,6 +52,7 @@ class ApplicationService:
         sync_run_repo: SyncRunRepository,
         account_repo: AccountRepository,
         sync_service: SyncService | None = None,
+        threads: ThreadService | None = None,
     ) -> None:
         self._provider = provider
         self._message_repo = message_repo
@@ -62,7 +64,51 @@ class ApplicationService:
             sync_run_repo=sync_run_repo,
             account_repo=account_repo,
         )
+        self._threads = threads
         self._session = getattr(message_repo, "_session", None)
+
+    async def _check_threads(
+        self,
+        account: AccountTable,
+        sync_result: SyncResult,
+        progress: Callable[[SyncProgress], None] | None,
+        cancel: asyncio.Event | None,
+    ) -> SyncResult:
+        """Check the threads of open actions after today's sync (ADR 0015).
+
+        Its counts join the sync result; a failed or stopped check never changes the sync's
+        status.
+        """
+        assert self._threads is not None
+        if progress:
+            try:
+                progress(
+                    SyncProgress(
+                        stage=SyncStage.THREADS,
+                        pages_fetched=sync_result.page_count,
+                        messages_fetched=sync_result.message_count,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Progress callback raised an exception: %s", type(exc).__name__)
+        try:
+            check = await self._threads.check(account, cancel=cancel)
+        except Exception as exc:
+            logger.warning("Thread check failed: %s", type(exc).__name__)
+            if self._session:
+                # A rollback expires loaded rows; the account is used again below.
+                await self._session.rollback()
+                await self._session.refresh(account)
+            return sync_result.model_copy(update={"threads_stopped_code": "THREAD_CHECK_FAILED"})
+        return sync_result.model_copy(
+            update={
+                "threads_tracked": check.tracked,
+                "threads_checked": check.checked + check.gone,
+                "threads_failed": check.failed,
+                "thread_messages": check.stored,
+                "threads_stopped_code": check.stopped_code,
+            }
+        )
 
     async def get_or_restore_account(self) -> AccountTable:
         """Connect or restore an existing account session and persist identity."""
@@ -97,6 +143,9 @@ class ApplicationService:
         ``excluded_senders`` is never selected: including it, here or in review, raises
         ExcludedSenderError before any body is read.
 
+        After a complete or partial sync of today's window, the threads of open actions are
+        checked when a thread service is composed; past days never check threads.
+
         Returns the terminal SyncResult and deterministic shortlisted RankedMessage items.
         """
         now = normalize_utc(now_utc) if now_utc is not None else datetime.now(UTC)
@@ -104,6 +153,7 @@ class ApplicationService:
 
         tz = resolve_timezone(tz_key)
         window = local_day_window(now, tz) if local_date is None else day_window(local_date, tz)
+        today = window.start_utc <= now < window.end_utc
 
         # 1. Sync messages from provider
         sync_result = await self._sync_service.sync_day(
@@ -112,22 +162,23 @@ class ApplicationService:
             window=window,
             progress=progress,
             cancel=cancel,
-            record_last_sync=window.start_utc <= now < window.end_utc,
+            record_last_sync=today,
         )
 
         if sync_result.status in {SyncStatus.CANCELLED, SyncStatus.FAILED}:
             return sync_result, []
 
+        if today and self._threads is not None and not (cancel and cancel.is_set()):
+            sync_result = await self._check_threads(account, sync_result, progress, cancel)
+
         if cancel and cancel.is_set():
             return (
-                SyncResult(
-                    account_id=sync_result.account_id,
-                    range_start_utc=sync_result.range_start_utc,
-                    range_end_utc=sync_result.range_end_utc,
-                    status=SyncStatus.CANCELLED,
-                    page_count=sync_result.page_count,
-                    message_count=sync_result.message_count,
-                    failed_message_count=sync_result.failed_message_count,
+                sync_result.model_copy(
+                    update={
+                        "status": SyncStatus.CANCELLED,
+                        "error_code": None,
+                        "shortlisted_message_keys": (),
+                    }
                 ),
                 [],
             )
@@ -230,16 +281,6 @@ class ApplicationService:
             ]
         shortlist_keys = tuple(m.message.provider_message_id for m in shortlist)
 
-        final_sync_result = SyncResult(
-            account_id=sync_result.account_id,
-            range_start_utc=sync_result.range_start_utc,
-            range_end_utc=sync_result.range_end_utc,
-            status=sync_result.status,
-            page_count=sync_result.page_count,
-            message_count=sync_result.message_count,
-            failed_message_count=sync_result.failed_message_count,
-            shortlisted_message_keys=shortlist_keys,
-            error_code=sync_result.error_code,
-        )
-
-        return final_sync_result, shortlist
+        return sync_result.model_copy(
+            update={"shortlisted_message_keys": shortlist_keys}
+        ), shortlist
