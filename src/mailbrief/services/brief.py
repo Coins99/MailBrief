@@ -29,9 +29,11 @@ from mailbrief.services.bodies import BodyService
 from mailbrief.services.calendar import day_window, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
 from mailbrief.services.history import check_brief_date
+from mailbrief.services.proposals import ProposalService
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.services.ranking import ShortlistGate as ShortlistGate
 from mailbrief.storage.repositories import ConsentRepository
+from mailbrief.storage.tables import AccountTable
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,7 @@ class BriefService:
         digests: DigestService,
         consent_gate: ConsentGate,
         clock: Callable[[], datetime] = _utc_now,
+        proposals: ProposalService | None = None,
     ) -> None:
         self._session = session
         self._application = application
@@ -103,6 +106,7 @@ class BriefService:
         self._consent_gate = consent_gate
         self._clock = clock
         self._consents = ConsentRepository(session)
+        self._proposals = proposals or ProposalService(session, clock=clock)
 
     async def generate(
         self,
@@ -123,7 +127,8 @@ class BriefService:
         previous seven days. Any other date raises BriefDateError before Gmail is contacted
         or anything is written. A past day's brief covers only the messages still in the
         Inbox now. Messages from ``excluded_senders`` are never selected, downloaded or
-        sent.
+        sent. Once the brief is saved, its follow-up signals become proposals for the
+        owner's actions (ADR 0016); a failure there never fails the saved brief.
         """
         now = self._clock()
         zone = resolve_timezone(tz_key)
@@ -201,7 +206,16 @@ class BriefService:
             error_code=run.error_code,
             ai_calls=run.requests_sent,
             provider_detail=run.provider_detail,
+            proposals_created=await self._derive(account, run, window.timezone_name),
         )
+
+    async def _derive(self, account: AccountTable, run: AnalysisRun, timezone_name: str) -> int:
+        """Proposals from the saved brief's analyses; a failure is logged by type only."""
+        try:
+            return await self._proposals.derive(account, run.messages, timezone_name)
+        except Exception as exc:
+            logger.warning("Follow-up proposals failed: %s", type(exc).__name__)
+            return 0
 
     async def _consented(self, account_id: int, plan: AnalysisPlan, now: datetime) -> bool:
         """Ask the gate; record first-use consent before any provider call."""

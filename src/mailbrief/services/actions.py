@@ -84,7 +84,8 @@ def urgency(
     return (target_date or date.max, due_at_utc or _LATEST, created_at_utc)
 
 
-def _touch(row: ActionTable, now: datetime) -> None:
+def touch(row: ActionTable, now: datetime) -> None:
+    """Record a change to an action: one more revision, at ``now``."""
     row.revision += 1
     row.updated_at_utc = now
 
@@ -216,7 +217,7 @@ class ActionService:
                 if existing is not None:
                     if existing.deleted_at_utc is not None:
                         existing.deleted_at_utc = None
-                        _touch(existing, now)
+                        touch(existing, now)
                     return await self._load(existing)
             row = await self._repository.add_action(
                 ActionTable(
@@ -287,7 +288,7 @@ class ActionService:
             await self._repository.save_decision(
                 key, decision=SuggestionState.ACCEPTED, action_id=target.id, decided_at_utc=now
             )
-            _touch(target, now)
+            touch(target, now)
             return AcceptedInto(await self._load(target), source_added=added)
 
         return await self._write(run)
@@ -316,7 +317,7 @@ class ActionService:
             await self._repository.delete_decision(key)
             if remove_source and await self._repository.source_count(row.id) > 1:
                 await self._repository.remove_source(row.id, message.provider_message_id)
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -362,7 +363,7 @@ class ActionService:
                 await self._repository.delete_decision(key)
             elif action.deleted_at_utc is not None:
                 action.deleted_at_utc = None
-                _touch(action, now)
+                touch(action, now)
 
         await self._write(run)
 
@@ -399,7 +400,7 @@ class ActionService:
             _apply_edit(row, edit)
             if steps is not None:
                 await self._apply_steps(row, steps, listed, now)
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -413,7 +414,7 @@ class ActionService:
                 raise ActionConflictError("The action is already completed.")
             row.status = ActionStatus.COMPLETED.value
             row.completed_at_utc = now
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -427,7 +428,7 @@ class ActionService:
                 raise ActionConflictError("The action is already open.")
             row.status = ActionStatus.OPEN.value
             row.completed_at_utc = None
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -438,7 +439,7 @@ class ActionService:
         async def run(now: datetime) -> None:
             row = await self._live(public_id, expected_revision)
             row.deleted_at_utc = now
-            _touch(row, now)
+            touch(row, now)
 
         await self._write(run)
 
@@ -451,7 +452,7 @@ class ActionService:
                 raise ActionNotFoundError(_NOT_FOUND)
             if row.deleted_at_utc is not None:
                 row.deleted_at_utc = None
-                _touch(row, now)
+                touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -474,7 +475,7 @@ class ActionService:
                 at for at in (thread.latest_at_utc, thread.owner_replied_at_utc) if at is not None
             ]
             row.thread_seen_until_utc = max(seen)
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)

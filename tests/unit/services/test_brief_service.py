@@ -30,7 +30,9 @@ from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
 from mailbrief.services.digest import DigestService
 from mailbrief.services.history import BriefDateError
+from mailbrief.services.proposals import ProposalService
 from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
+from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
     AccountRepository,
@@ -40,7 +42,7 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     SyncRunRepository,
 )
-from mailbrief.storage.tables import AccountTable, SyncRunTable
+from mailbrief.storage.tables import AccountTable, ActionTable, SyncRunTable
 from tests.factories import make_message
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all
 from tests.unit.services.test_sync import FakeEmailProvider
@@ -123,6 +125,7 @@ def build(
     email: FakeEmailProvider | None = None,
     batch_size: int = 5,
     body_limit: int = MAX_ANALYSIS_CHARS,
+    proposals: ProposalService | None = None,
 ) -> BriefService:
     mailbox = list(inbox() if messages is None else messages)
     email = email or FakeEmailProvider(pages=[mailbox])
@@ -143,6 +146,7 @@ def build(
         digests=DigestService(session),
         consent_gate=gate,
         clock=lambda: NOW,
+        proposals=proposals,
     )
 
 
@@ -985,3 +989,68 @@ async def test_seven_days_back_is_allowed(session: AsyncSession) -> None:
 
     assert result.digest is not None and result.digest.local_date == date(2026, 8, 28)
     assert result.digest.status is DigestStatus.EMPTY
+
+
+async def link_m0_to_an_action(session: AsyncSession) -> str:
+    """An open action whose source is the cached message m0; m1 follows it in the thread."""
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    message = await MessageRepository(session).get_by_provider_message_id(account.id, "m0")
+    assert message is not None
+    repository = ActionRepository(session)
+    row = await repository.add_action(
+        ActionTable(
+            public_id="00000000-0000-4000-8000-000000000001",
+            title="Approve the budget",
+            ownership="mine",
+            status="open",
+            deadline_precision="none",
+            created_at_utc=NOW,
+            updated_at_utc=NOW,
+            revision=1,
+        )
+    )
+    await repository.add_source(row.id, message, account)
+    await session.commit()
+    return row.public_id
+
+
+async def test_a_saved_brief_turns_follow_up_signals_into_proposals(
+    session: AsyncSession,
+) -> None:
+    signal = answer_all(follow_up="cancelled", follow_up_evidence="waiting on it")
+    first = await build(session, FakeAIProvider([signal]), RecordingGate(answer=True)).generate(
+        tz_key=ZONE
+    )
+    public_id = await link_m0_to_an_action(session)
+
+    # Again, from the cached analyses: m1 continues the action's thread; m0 is its source.
+    second = await build(session, FakeAIProvider(), RecordingGate(answer=True)).generate(
+        tz_key=ZONE
+    )
+
+    assert (first.proposals_created, second.proposals_created) == (0, 1)
+    assert second.status is BriefStatus.SAVED
+    (proposal,) = await ProposalService(session).pending()
+    assert (proposal.action_public_id, proposal.provider_message_id) == (public_id, "m1")
+
+
+class FailingProposals(ProposalService):
+    async def derive(self, *_args: object, **_kwargs: object) -> int:
+        raise RuntimeError("PRIVATE-DETAIL")
+
+
+async def test_a_failure_to_propose_never_fails_the_saved_brief(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = FakeAIProvider([answer_all()])
+    caplog.set_level(logging.WARNING)
+
+    result = await build(
+        session, provider, RecordingGate(answer=True), proposals=FailingProposals(session)
+    ).generate(tz_key=ZONE)
+
+    assert result.status is BriefStatus.SAVED
+    assert result.proposals_created == 0
+    assert "Follow-up proposals failed: RuntimeError" in caplog.text
+    assert "PRIVATE-DETAIL" not in caplog.text
