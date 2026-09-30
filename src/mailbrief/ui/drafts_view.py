@@ -7,11 +7,9 @@ text and never tooltips, which Qt may render as rich text.
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QListWidgetItem,
     QMenu,
     QPushButton,
@@ -20,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from mailbrief.domain.drafts import KIND_NAMES, DraftKind, DraftSummary
+from mailbrief.ui.lists import ActivatingList
 
 NEW = "new"
 OPEN = "open"
@@ -37,17 +36,6 @@ def describe(summary: DraftSummary, zone: ZoneInfo) -> str:
     if summary.action_title:
         parts.append(f"for “{summary.action_title}”")
     return " · ".join(parts)
-
-
-class _DraftList(QListWidget):
-    """Return and Enter open the current row on every platform, as in the actions panel."""
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        item = self.currentItem()
-        if item is not None and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.itemActivated.emit(item)
-            return
-        super().keyPressEvent(event)
 
 
 class DraftsPanel(QWidget):
@@ -71,7 +59,7 @@ class DraftsPanel(QWidget):
         font.setPointSize(font.pointSize() + 3)
         heading.setFont(font)
         layout.addWidget(heading)
-        self.list = _DraftList()
+        self.list = ActivatingList()
         self.list.setAccessibleName("Drafts and notes")
         self.list.currentRowChanged.connect(lambda _row: self._update_buttons())
         self.list.itemActivated.connect(lambda _item: self._request(OPEN))

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.digests import SavedBriefSummary
 from mailbrief.services.history import CATCH_UP_DAYS
+from mailbrief.ui.lists import ActivatingList
 
 NOT_CONNECTED = "Connect Gmail to brief missed days."
 NONE_MISSED = "No missed days in the last 7 days."
@@ -62,7 +63,7 @@ class BriefHistoryDialog(QDialog):
         self._busy = False
         layout = QVBoxLayout(self)
         layout.addWidget(_plain("Saved briefs"))
-        self.saved = QListWidget()
+        self.saved = ActivatingList()
         self.saved.setAccessibleName("Saved briefs")
         layout.addWidget(self.saved, 2)
         layout.addWidget(_plain("Missed days"))

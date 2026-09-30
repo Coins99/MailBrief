@@ -8,7 +8,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -25,6 +25,7 @@ from mailbrief.domain.actions import Action, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.lists import ActivatingList
 
 EDIT = "edit"
 COMPLETE = "complete"
@@ -83,20 +84,6 @@ def gmail_source(action: Action) -> str | None:
     return None
 
 
-class _ActionList(QListWidget):
-    """Return and Enter activate the current row on every platform.
-
-    On macOS, Qt's item views only try to edit an item on Return, so they never activate it.
-    """
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        item = self.currentItem()
-        if item is not None and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.itemActivated.emit(item)
-            return
-        super().keyPressEvent(event)
-
-
 class ActionsPanel(QWidget):
     """Lists actions per view and asks the window to act; it changes nothing itself.
 
@@ -122,7 +109,7 @@ class ActionsPanel(QWidget):
         self.tabs = QTabWidget()
         self.lists: dict[ActionFilter, QListWidget] = {}
         for view in ActionFilter:
-            listing = _ActionList()
+            listing = ActivatingList()
             listing.setAccessibleName(f"{_TAB_NAMES[view]} actions")
             listing.currentRowChanged.connect(lambda _row: self._update_buttons())
             listing.itemActivated.connect(lambda _item: self._request(EDIT))
