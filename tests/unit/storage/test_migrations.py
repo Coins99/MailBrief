@@ -922,3 +922,71 @@ def test_drafting_tables_upgrade_and_downgrade_keep_drafts(tmp_path: Path) -> No
     assert _schema(path) == _schema(fresh)
     command.upgrade(config, "head")
     assert table_names(path) >= _DRAFTING_TABLES
+
+
+def test_owner_preferences_table_upgrades_empty_and_downgrades(tmp_path: Path) -> None:
+    path = tmp_path / "m8.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    _seed_decisions(path)
+    command.upgrade(config, "20260928_0008")
+    kept = ("accounts", "messages", "actions", "suggestion_decisions")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260929_0009")
+
+    assert "owner_preferences" in table_names(path)
+    assert _rows(path, kept) == before
+    assert _schema(path)["owner_preferences"]["constraints"] == {
+        "pk_owner_preferences",
+        "ck_owner_preferences_single_row",
+        "ck_owner_preferences_shortlist_limit_range",
+        "ck_owner_preferences_draft_tone_known",
+        "ck_owner_preferences_draft_length_known",
+        "ck_owner_preferences_ai_batch_size_range",
+        "ck_owner_preferences_ai_body_character_limit_range",
+        "ck_owner_preferences_ai_max_output_tokens_range",
+        "ck_owner_preferences_ai_max_requests_per_run_range",
+        "ck_owner_preferences_ai_timeout_seconds_range",
+        "ck_owner_preferences_revision_positive",
+    }
+    assert _query(path, "SELECT count(*) FROM owner_preferences") == [(0,)]
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO owner_preferences(id,excluded_senders_json,updated_at_utc) "
+            "VALUES(1,'[]','2026-09-29 00:00:00')"
+        )
+        defaults = connection.execute(
+            "SELECT shortlist_limit,draft_tone,draft_length,revision,ai_batch_size "
+            "FROM owner_preferences"
+        ).fetchone()
+        for rejected in (
+            "INSERT INTO owner_preferences(id,excluded_senders_json,updated_at_utc) "
+            "VALUES(2,'[]','2026-09-29 00:00:00')",
+            "UPDATE owner_preferences SET shortlist_limit=0",
+            "UPDATE owner_preferences SET shortlist_limit=11",
+            "UPDATE owner_preferences SET draft_tone='angry'",
+            "UPDATE owner_preferences SET draft_length='epic'",
+            "UPDATE owner_preferences SET ai_batch_size=11",
+            "UPDATE owner_preferences SET ai_body_character_limit=0",
+            "UPDATE owner_preferences SET ai_max_output_tokens=255",
+            "UPDATE owner_preferences SET ai_max_requests_per_run=1001",
+            "UPDATE owner_preferences SET ai_timeout_seconds=9.5",
+            "UPDATE owner_preferences SET revision=0",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(rejected)
+        connection.commit()
+    assert defaults == (10, "neutral", "medium", 1, None)
+
+    command.downgrade(config, "20260928_0008")
+
+    assert "owner_preferences" not in table_names(path)
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0008.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260928_0008")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT count(*) FROM owner_preferences") == [(0,)]

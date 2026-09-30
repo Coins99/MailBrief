@@ -20,6 +20,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
+from mailbrief.domain.preferences import (
+    AI_BODY_CHARS_MAX,
+    AI_OUTPUT_TOKENS_MAX,
+    AI_OUTPUT_TOKENS_MIN,
+    AI_REQUESTS_MAX,
+    AI_TIMEOUT_MAX,
+    AI_TIMEOUT_MIN,
+    SHORTLIST_LIMIT_MAX,
+)
 from mailbrief.storage.types import UTCDateTime
 
 
@@ -42,6 +52,8 @@ _DRAFT_KIND_CHECK = "kind IN ('reply','email','note','message')"
 _DRAFT_ORIGIN_CHECK = "origin IN ('created','edited','restored','generated')"
 _DRAFT_TONE_CHECK = "tone IN ('neutral','warm','formal','direct')"
 _DRAFT_LENGTH_CHECK = "length IN ('short','medium','long')"
+_DEFAULT_TONE_CHECK = "draft_tone IN ('neutral','warm','formal','direct')"
+_DEFAULT_LENGTH_CHECK = "draft_length IN ('short','medium','long')"
 
 
 class Base(DeclarativeBase):
@@ -589,3 +601,54 @@ class DraftGenerationTable(Base):
     instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     missing_context_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+def _range_check(column: str, low: int, high: int) -> CheckConstraint:
+    return CheckConstraint(
+        f"{column} IS NULL OR {column} BETWEEN {low} AND {high}", name=f"{column}_range"
+    )
+
+
+class OwnerPreferencesTable(Base):
+    """The owner's preferences: one revisioned row, shared by the desktop and CLI (ADR 0014).
+
+    No row means the defaults. A NULL AI limit means "use the default".
+    """
+
+    __tablename__ = "owner_preferences"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_row"),
+        CheckConstraint(
+            f"shortlist_limit BETWEEN 1 AND {SHORTLIST_LIMIT_MAX}", name="shortlist_limit_range"
+        ),
+        CheckConstraint(_DEFAULT_TONE_CHECK, name="draft_tone_known"),
+        CheckConstraint(_DEFAULT_LENGTH_CHECK, name="draft_length_known"),
+        _range_check("ai_batch_size", 1, MAX_ANALYSIS_BATCH),
+        _range_check("ai_body_character_limit", 1, AI_BODY_CHARS_MAX),
+        _range_check("ai_max_output_tokens", AI_OUTPUT_TOKENS_MIN, AI_OUTPUT_TOKENS_MAX),
+        _range_check("ai_max_requests_per_run", 1, AI_REQUESTS_MAX),
+        _range_check("ai_timeout_seconds", AI_TIMEOUT_MIN, AI_TIMEOUT_MAX),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    time_zone: Mapped[str | None] = mapped_column(String(64))
+    shortlist_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=SHORTLIST_LIMIT_MAX, server_default=text("10")
+    )
+    excluded_senders_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    draft_tone: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="neutral", server_default="neutral"
+    )
+    draft_length: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="medium", server_default="medium"
+    )
+    ai_batch_size: Mapped[int | None] = mapped_column(Integer)
+    ai_body_character_limit: Mapped[int | None] = mapped_column(Integer)
+    ai_max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    ai_max_requests_per_run: Mapped[int | None] = mapped_column(Integer)
+    ai_timeout_seconds: Mapped[float | None] = mapped_column(Float)
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    updated_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
