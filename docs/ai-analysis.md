@@ -131,6 +131,16 @@ control or format characters. See [M6 actions](m6-actions.md).
 - `ai-consent status` shows each account's consent; `ai-consent revoke` withdraws it, and
   the next brief asks again. Both work without a Gmail connection.
 
+### Automatic analysis (M8 Part 8)
+
+- By default nothing is sent without asking. `brief --automatic` (and the desktop's timed
+  refresh) syncs and ranks, and reports how many messages are ready to review.
+- `ai-consent auto-send N` (1–10) lets automatic runs send up to N messages without asking;
+  it needs a consent, shows the disclosure, and asks for a typed `yes` (`--yes` skips only the
+  question). `auto-send 0` turns it off. Revoking consent clears it.
+- Messages over the cap are deferred, not sent. Messages you left out are never selected.
+  See [M8 daily operation](m8-daily-operation.md#daily-operation-part-8).
+
 ## AI drafting (M7)
 
 Drafts can be written with Groq from context you choose; see [M7 drafts](m7-drafts.md) and

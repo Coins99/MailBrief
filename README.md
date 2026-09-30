@@ -33,7 +33,9 @@ later use after Microsoft Entra access is resolved.
   senders, drafting defaults and AI limits, shared by the desktop and CLI. Brief history
   and catch-up for missed days (Part 3), tracking the threads of open actions (Part 4),
   thread activity and proposed updates to actions in the desktop, with replies outside
-  today's Inbox offered in review (Parts 5–7), implemented, awaiting live acceptance.
+  today's Inbox offered in review (Parts 5–7), and refreshing while MailBrief is open, with
+  automatic analysis only by your explicit permission (Part 8), implemented, awaiting live
+  acceptance.
   See [M8 daily operation](docs/m8-daily-operation.md).
 
 ## Start here

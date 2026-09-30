@@ -45,7 +45,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   See ADR 0016. Follow-up proposals in the desktop and replies outside today's Inbox
   (Part 7) implemented, awaiting live acceptance: proposals in the brief, the actions pane
   and a Proposals dialog with Undo, and up to 3 tracked replies that aren't in today's
-  Inbox joining the review and the brief.
+  Inbox joining the review and the brief. Daily operation (Part 8) implemented, awaiting
+  live acceptance: refresh on launch and every 1, 2 or 4 hours while the desktop is open,
+  automatic analysis only with an explicit permission of 1–10 messages on the consent, and
+  remembered declines. See ADR 0017.
 
 ## Layout (ports and adapters)
 
@@ -85,6 +88,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   Briefs… dialog for saved briefs and missed days (`history_view.py`), the Proposals dialog
   for one action and the wording of a proposal's effect (`proposals_view.py`); `lists.py`
   holds `ActivatingList`, where Return or Enter activates a row once on every platform.
+- `ui/scheduler.py` (`RefreshScheduler`, the minute tick behind timed refresh) and
+  `ui/auto_send_view.py` (the automatic-analysis permission dialog); `services/consent.py`
+  reads and sets that permission.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -166,6 +172,11 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   open one; the brief offers it only for actions with a source in the email's thread in the
   same account, it makes one revision, and its undo works only while the action is
   unchanged and never removes an action's last source.
+- Automatic runs (ADR 0017) send nothing unless the active consent carries an explicit
+  permission (`auto_send_limit`, 1–10, cleared by revoking); with none they only sync, check
+  threads, rank and count. They brief today only, run only while the desktop is open, coalesce,
+  never open panels, never download bodies without permission, and defer messages over the
+  cap. A message the owner left out (an unchecked pick or `--exclude`) is never auto-selected.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.

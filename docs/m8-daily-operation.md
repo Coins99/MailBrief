@@ -16,7 +16,7 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None | Done |
 | 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7, ADR 0016 | Done |
 | 7. Follow-up proposals in the desktop; earlier tracked replies offered in review | Reviewing and applying proposals; up to 3 tracked replies outside today's Inbox join the review | None | Done |
-| 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, [ADR 0017](adr/0017-automatic-runs.md) | In progress |
+| 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, [ADR 0017](adr/0017-automatic-runs.md) | Done |
 | 9. Closeout | Acceptance, documentation and cleanup | None expected | Planned |
 
 The optional Gmail history cursor for incremental Inbox reconciliation is not part of this
@@ -609,3 +609,88 @@ cache, so they can be analyzed and propose updates.
   `ui/actions_view.py` `PROPOSALS` and `action_with_id()`.
 - macOS runs UI tests only with `MACOS_GUI_AVAILABLE` set; `QT_QPA_PLATFORM=offscreen` needs
   no window server.
+
+## Daily operation (Part 8)
+
+Part 8 is implemented and awaits live acceptance. It adds migration `20260930_0012` and
+[ADR 0017](adr/0017-automatic-runs.md). While the desktop is open, MailBrief refreshes on its
+own. Nothing runs when it is closed, and nothing briefs past days.
+
+### When runs happen
+
+- In Settings, Preferences: **Refresh when MailBrief starts**, and **Refresh while running**
+  (off, every hour, every 2 hours, every 4 hours). Both are off by default.
+- A timer checks the wall clock once a minute, so a run that came due while the computer
+  slept starts soon after it wakes, once. Runs coalesce: one at a time, never a pile.
+- A run waits while another operation is running or a dialog is open, and is skipped with a
+  status message when Gmail isn't connected. It never opens a panel or a dialog.
+
+### Without permission (the default)
+
+A run syncs today's Inbox metadata, checks the threads of open actions and ranks, then
+reports how many messages are ready to review. It downloads no bodies, sends nothing to Groq
+and saves no brief. Reviewing and analyzing stay a click away (Sync and review).
+
+### With permission
+
+- Settings, Preferences, **Automatic analysis: Change…** (or
+  `ai-consent auto-send N`) lets automatic runs send up to N messages (1–10) without asking.
+  It is set on your active Groq consent, shows the same disclosure as the first-use consent
+  and says that the runs will not ask again. It needs that consent to exist.
+- Revoking consent clears it, and a new disclosure version starts without it.
+- A run sends at most N messages. The lowest-ranked messages over the cap are **deferred**:
+  never sent, never cached, counted in the brief's coverage line ("· N deferred") and listed
+  again by your next review. A run that selects nothing saves nothing; a saved automatic
+  brief replaces today's earlier one.
+
+### Declines
+
+A message you uncheck in a review, or leave out with `--exclude` when it was selected
+automatically, is remembered and never auto-selected again (automatic runs, reviews and the
+CLI alike), and the next review lists it unchecked with "you left this out earlier". Checking
+it, or `--include`, forgets the decline. Being pushed out by a limit is not a decline.
+
+### CLI
+
+- `brief --automatic` runs one automatic run: no prompts, today only, and it rejects
+  `--date`, `--include`, `--exclude` and `--yes`. Without permission it prints "N messages are
+  ready to review; automatic analysis is off."; with it, the usual result plus "N deferred to
+  your next review." when messages wait.
+- `ai-consent auto-send N` shows the disclosure and asks for a typed "yes" (`--yes` skips the
+  question, not the disclosure). `auto-send 0` turns it off without asking. `ai-consent
+  status` and `preferences show` show it, and `preferences show` the refresh settings.
+- `sync --show-metadata` marks declined messages.
+
+### Limits
+
+- Desktop only, only while open; there is no background service.
+- At most 10 messages per automatic run, and the usual messages-per-brief and AI limits still
+  apply (an explicit `MAILBRIEF_*` variable wins).
+- "Ready" counts the automatic selection, including messages already analyzed.
+- Automatic runs never write to the mailbox, to actions or to drafts.
+
+### Live acceptance
+
+1. Refresh every hour with automatic analysis off: sleep the computer for 3+ hours, then
+   wake it. There is exactly one "Checked Gmail at …" status, no Groq request in
+   `desktop.log` and no new brief.
+2. Give permission for 2: the dialog shows the disclosure, and the next automatic run
+   analyzes at most 2 new messages and defers the rest.
+3. Uncheck an auto-selected message in a review: later automatic runs never send it, and the
+   next review lists it unchecked.
+4. Revoke consent in Settings: the next automatic run only checks Gmail.
+5. Close MailBrief for a day and reopen it with "Refresh when MailBrief starts": one run for
+   today; yesterday stays missed.
+
+### For developers
+
+- `ui/scheduler.py` `RefreshScheduler` (minute tick, injected clock, `due` signal,
+  `note_run`, `retry_soon`); `ui/main_window.py` `_refresh_due`, `_automatic_refresh`,
+  `_automatic_finished`; `ui/auto_send_view.py` `AutoSendDialog`.
+- `services/brief.py` `generate(automatic=True)`, `permission_preview`,
+  `permission_sentence`; `services/consent.py` `auto_send_permission`, `set_auto_send`;
+  `AnalysisPlan.defer_after`; `AnalysisOutcome.DEFERRED`; `BriefStatus.READY_FOR_REVIEW`.
+- `MessageRepository.set_review_declined` and `declined_among`;
+  `ConsentRepository.set_auto_send`; `review_shortlist(declined=...)`; `ShortlistGate.review`
+  takes `outside_ids` and `declined_ids`.
+- `ui/diagnostics.py` `log_automatic_run` logs counts only.
