@@ -45,6 +45,7 @@ from mailbrief.domain.drafts import (
     placeholders,
     still_to_fill,
 )
+from mailbrief.domain.messages import ProviderKind
 from mailbrief.domain.preferences import OwnerPreferences, sender_excluded
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
@@ -72,7 +73,12 @@ from mailbrief.services.brief import (
     disclosure_lines,
     provider_display_name,
 )
-from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
+from mailbrief.services.calendar import (
+    InvalidTimezoneError,
+    day_window,
+    local_day_window,
+    resolve_timezone,
+)
 from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
@@ -82,6 +88,13 @@ from mailbrief.services.drafting import (
 )
 from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftNotFoundError, DraftService
+from mailbrief.services.history import (
+    BriefDateError,
+    BriefHistory,
+    check_brief_date,
+    coverage_line,
+    parse_brief_date,
+)
 from mailbrief.services.preferences import (
     PreferencesService,
     PreferencesUnavailableError,
@@ -103,7 +116,9 @@ from mailbrief.text.prepare import clean_generated_text
 
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 # Commands whose setup errors are shown as they are: static, actionable messages.
-_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts", "preferences"}
+_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts", "preferences", "briefs"}
+_NO_BRIEF = "No saved brief for that date."
+_SEVERAL_BRIEFS = "Several accounts have a brief for that date; pass --account."
 _TIMEZONE_HELP = "IANA time zone; defaults to your saved preference, else the system time zone."
 _LIMIT_LABELS = {
     "ai_batch_size": "Messages per AI request",
@@ -773,12 +788,20 @@ async def brief(
     exclude_ids: tuple[str, ...],
     assume_yes: bool,
     show: bool,
+    date_text: str | None = None,
 ) -> int:
-    """Sync, ask consent, analyze the shortlist with Groq and save today's brief."""
+    """Sync, ask consent, analyze the shortlist with Groq and save the day's brief.
+
+    The day is today, or ``date_text``: today or one of the previous seven days, checked
+    before Gmail is contacted.
+    """
+    day = None if date_text is None else parse_brief_date(date_text)
     owner = await _owner(database_path, timezone)
     settings, tz, path = owner.settings, owner.zone, owner.path
     now = datetime.now(UTC)
-    window = local_day_window(now, tz)
+    today = local_day_window(now, tz).local_date
+    check_brief_date(day or today, today)
+    window = day_window(day or today, tz)
     async with (
         gmail_provider(settings, silent_only=silent_only) as provider,
         groq_provider(settings) as ai,
@@ -808,6 +831,7 @@ async def brief(
                     exclude_ids=exclude_ids,
                     shortlist_limit=owner.preferences.shortlist_limit,
                     excluded_senders=owner.preferences.excluded_senders,
+                    local_date=window.local_date,
                 )
         finally:
             await database.dispose()
@@ -815,8 +839,93 @@ async def brief(
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
     _print_result(result, model=model)
     if show and result.digest is not None:
+        print(coverage_line(result.digest))
         _print_items(result.digest)
     return _brief_exit_code(result)
+
+
+async def _open_existing(path: Path) -> Database | None:
+    """The migrated database, or None when it doesn't exist; it is never created here."""
+    if not await asyncio.to_thread(path.exists):
+        return None
+    await asyncio.to_thread(upgrade_database, path)
+    return Database.from_path(path)
+
+
+async def briefs_list(*, database_path: Path | None, limit: int) -> int:
+    """Saved briefs, newest day first, then each Gmail account's missed days; offline.
+
+    Missed days are the previous seven days, in the saved time zone, without a brief.
+    """
+    path = database_path or AppPaths.from_qt().database_path
+    database = await _open_existing(path)
+    if database is None:
+        print("No saved briefs.")
+        return 0
+    try:
+        async with database.session() as session:
+            try:
+                zone = owner_zone(await PreferencesService(session).get())
+            except PreferencesUnavailableError:
+                await session.rollback()
+                print("Saved preferences could not be read; using the system time zone.")
+                zone = resolve_timezone(None)
+            today = datetime.now(UTC).astimezone(zone).date()
+            history = BriefHistory(session)
+            summaries = await history.list_saved(limit)
+            accounts = [
+                account.email_address
+                for account in await AccountRepository(session).list_all()
+                if account.provider == ProviderKind.GMAIL.value
+            ]
+            missed = {email: await history.missed_days(email, today) for email in accounts}
+    finally:
+        await database.dispose()
+    if not summaries:
+        print("No saved briefs.")
+    for summary in summaries:
+        noun = "item" if summary.item_count == 1 else "items"
+        print(
+            f"{summary.local_date} {summary.account_email}: {summary.status.value}; "
+            f"{summary.item_count} {noun}"
+        )
+        print(f"  {coverage_line(summary)}")
+    for email, days in missed.items():
+        listed = ", ".join(day.isoformat() for day in days) or "none"
+        print(f"Missed days for {email} (last 7 days): {listed}")
+    return 0
+
+
+async def briefs_show(date_text: str, *, account: str | None, database_path: Path | None) -> int:
+    """Print one saved brief as brief --show does, with its coverage line; offline."""
+    day = parse_brief_date(date_text)
+    path = database_path or AppPaths.from_qt().database_path
+    database = await _open_existing(path)
+    if database is None:
+        print(_NO_BRIEF)
+        return 3
+    try:
+        async with database.session() as session:
+            history = BriefHistory(session)
+            if account is None:
+                accounts = await history.accounts_for(day)
+                if len(accounts) > 1:
+                    print(_SEVERAL_BRIEFS)
+                    return 3
+                account = accounts[0] if accounts else None
+            digest = None if account is None else await history.get(account, day)
+    finally:
+        await database.dispose()
+    if digest is None:
+        print(_NO_BRIEF)
+        return 3
+    print(
+        f"Brief for {digest.local_date} ({digest.account_id}): {digest.status.value}; "
+        f"items: {len(digest.items)}"
+    )
+    print(coverage_line(digest))
+    _print_items(digest)
+    return 0
 
 
 async def actions(
@@ -979,6 +1088,17 @@ async def preferences_show(*, database_path: Path | None) -> int:
     return 0
 
 
+def _brief_count(text: str) -> int:
+    """A --limit of 1 to 365 briefs."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a whole number from 1 to 365") from None
+    if not 1 <= value <= 365:
+        raise argparse.ArgumentTypeError("use a whole number from 1 to 365")
+    return value
+
+
 def _add_day_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--silent-only", action="store_true", help="Never open a browser.")
     parser.add_argument("--database", type=Path, help="Optional SQLite path; defaults to app data.")
@@ -1025,6 +1145,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--yes",
         action="store_true",
         help="Send without asking when consent is already recorded; first use still asks.",
+    )
+    brief_parser.add_argument(
+        "--date",
+        dest="date_text",
+        metavar="YYYY-MM-DD",
+        help="Brief this day instead of today: one of the previous 7 days, never automatic.",
     )
     brief_parser.add_argument(
         "--show",
@@ -1138,6 +1264,27 @@ def main(arguments: Sequence[str] | None = None) -> int:
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
+    briefs_parser = commands.add_parser(
+        "briefs", help="List saved briefs and missed days, or show one saved brief; offline."
+    )
+    brief_commands = briefs_parser.add_subparsers(dest="action", required=True)
+    briefs_list_parser = brief_commands.add_parser(
+        "list", help="Saved briefs, newest first, then each account's missed days."
+    )
+    briefs_list_parser.add_argument(
+        "--limit", type=_brief_count, default=30, help="How many briefs to list; default 30."
+    )
+    briefs_show_parser = brief_commands.add_parser(
+        "show", help="Print one saved brief and what it covers."
+    )
+    briefs_show_parser.add_argument("date_text", metavar="DATE", help="The day, YYYY-MM-DD.")
+    briefs_show_parser.add_argument(
+        "--account", help="The Gmail address, when several accounts have a brief that day."
+    )
+    for subcommand in (briefs_list_parser, briefs_show_parser):
+        subcommand.add_argument(
+            "--database", type=Path, help="Optional SQLite path; defaults to app data."
+        )
     preferences_parser = commands.add_parser(
         "preferences", help="Show your saved preferences; set them in the desktop's Settings."
     )
@@ -1163,6 +1310,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     exclude_ids=tuple(args.exclude),
                     assume_yes=args.yes,
                     show=args.show,
+                    date_text=args.date_text,
                 )
             )
         if args.command == "ai-key":
@@ -1206,6 +1354,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return asyncio.run(ai_consent(args.action, database_path=args.database))
         if args.command == "preferences":
             return asyncio.run(preferences_show(database_path=args.database))
+        if args.command == "briefs" and args.action == "list":
+            return asyncio.run(briefs_list(database_path=args.database, limit=args.limit))
+        if args.command == "briefs":
+            return asyncio.run(
+                briefs_show(args.date_text, account=args.account, database_path=args.database)
+            )
         if args.command == "sync":
             return asyncio.run(
                 sync(
@@ -1270,6 +1424,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 3
     except ExcludedSenderError as exc:
         print(str(exc))  # Static: names no sender, rule or message.
+        return 3
+    except BriefDateError as exc:
+        print(str(exc))  # Static: the allowed dates, never the text given.
         return 3
     except (InvalidTimezoneError, ShortlistReviewError):
         if args.command == "actions":
