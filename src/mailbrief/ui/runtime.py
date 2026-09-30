@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from pydantic import SecretStr
@@ -34,7 +34,7 @@ from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import BriefService, ConsentGate, ShortlistGate
-from mailbrief.services.calendar import local_day_window, resolve_timezone
+from mailbrief.services.calendar import day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
@@ -234,7 +234,7 @@ class DesktopRuntime:
             zone = owner_zone(await self.get_owner_preferences())
         except PreferencesUnavailableError:
             zone = resolve_timezone(None)  # Browsing only displays local data.
-        window = local_day_window(datetime.combine(day, time(12), tzinfo=zone), zone)
+        window = day_window(day, zone)
         async with self._storage().session() as session:
             account = await AccountRepository(session).get_by_id(account_id)
             if account is None or account.provider != ProviderKind.GMAIL.value:
