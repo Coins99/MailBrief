@@ -258,15 +258,21 @@ class ActionService:
         """Accept a suggestion into an existing action instead of creating another, adding
         its email as a source unless it already is one; one revision.
 
-        The brief offers this for the live, open actions that track the email's thread, and
-        the CLI for any live action (``actions accept N --into``). Repeating it for the same
-        action returns the action unchanged, even with an old revision. undo_accept_into()
-        reverses it while the action is unchanged.
+        Only a live, open action takes it: a completed or deleted one raises
+        ActionConflictError, so it is reopened first. The brief offers this for the open
+        actions that track the email's thread; naming the action (``actions accept N
+        --into``) allows any thread or account. Repeating it for the same action returns
+        the action unchanged, even with an old revision. undo_accept_into() reverses it
+        while the action is unchanged.
         """
 
         async def run(now: datetime) -> AcceptedInto:
             _, message, account, key = await self._suggestion(suggestion_id)
-            target = await self._live(public_id, None)
+            target = await self._repository.get_action(public_id, include_deleted=True)
+            if target is None:
+                raise ActionNotFoundError(_NOT_FOUND)
+            if target.deleted_at_utc is not None or target.status != ActionStatus.OPEN.value:
+                raise ActionConflictError("Reopen the action before adding to it.")
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id == target.id:

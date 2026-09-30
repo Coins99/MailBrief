@@ -18,6 +18,7 @@ from mailbrief.domain.actions import (
     ThreadLink,
 )
 from mailbrief.domain.analysis import ActionOwnership
+from mailbrief.domain.briefs import BriefRunResult, BriefStatus
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncResult, SyncStatus
 from mailbrief.services.actions import ActionConflictError, ActionNotFoundError
 from mailbrief.ui.digest_view import DigestView
@@ -349,3 +350,19 @@ async def test_a_brief_run_reports_its_thread_check(
         "Brief saved (complete). Checked 3 of 4 tracked threads; 1 failed."
     )
     assert backend.link_calls[-1] == backend.saved
+
+
+async def test_a_cancelled_run_says_nothing_about_threads(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    backend.sync = sync(threads_tracked=5, threads_checked=2)
+    await window.initialize()
+
+    async def cancelled(*_args: object, **_kwargs: object) -> BriefRunResult:
+        return BriefRunResult(status=BriefStatus.CANCELLED, sync=backend.sync)
+
+    backend.generate = cancelled  # type: ignore[method-assign]
+    window.start(window._generate)
+    await finish(window)
+
+    assert window.status.text() == "Cancelled. The displayed saved brief is unchanged."

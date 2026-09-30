@@ -138,6 +138,7 @@ async def seed(
     *,
     message: str = "msg-1",
     prompt_version: str = "prompt-1",
+    thread: str = "conversation-1",
 ) -> Seeded:
     account = await AccountRepository(session).upsert(
         AccountIdentity(
@@ -149,6 +150,7 @@ async def seed(
         [
             make_message(
                 provider_message_id=message,
+                conversation_id=thread,
                 subject=f"Subject of {message}",
                 web_link=f"https://mail.google.com/mail/u/?authuser=me%40x.com#all/{message}",
             )
@@ -1006,9 +1008,45 @@ async def test_accept_into_refuses_deleted_targets_and_suggestions_owned_elsewhe
         await service.accept_into(seeded.suggestion_ids[0], target.public_id, 1)
 
     await service.delete(target.public_id, 1)
-    with pytest.raises(ActionNotFoundError):
+    with pytest.raises(ActionConflictError, match="Reopen the action before adding to it."):
         await service.accept_into(seeded.suggestion_ids[0], target.public_id, 2)
+    with pytest.raises(ActionNotFoundError):
+        await service.accept_into(
+            seeded.suggestion_ids[0], "00000000-0000-4000-8000-999999999999", 1
+        )
     assert (await service.get(owner.public_id)).revision == 1
+
+
+async def test_accept_into_refuses_a_completed_action_until_it_is_reopened(
+    session: AsyncSession, service: ActionService
+) -> None:
+    first = await seed(session)
+    second = await seed(session, (suggestion(0, "Send the deck, again"),), message="msg-2")
+    action = await service.accept(first.suggestion_ids[0])
+    await service.complete(action.public_id, 1)
+    before = await counts(session)
+
+    with pytest.raises(ActionConflictError, match="Reopen the action before adding to it."):
+        await service.accept_into(second.suggestion_ids[0], action.public_id, 2)
+
+    assert await counts(session) == before
+    assert (await states(session, second))[0] == (SuggestionState.PENDING, None)
+    await service.reopen(action.public_id, 2)
+    added = await service.accept_into(second.suggestion_ids[0], action.public_id, 3)
+    assert (added.action.revision, added.source_added) == (4, True)
+
+
+async def test_accept_into_takes_an_email_from_another_thread_when_named(
+    session: AsyncSession, service: ActionService
+) -> None:
+    first = await seed(session)
+    other = await seed(session, (suggestion(0, "Other"),), message="msg-2", thread="elsewhere")
+    action = await service.accept(first.suggestion_ids[0])
+
+    added = await service.accept_into(other.suggestion_ids[0], action.public_id, 1)
+
+    assert added.source_added
+    assert [source.provider_message_id for source in added.action.sources] == ["msg-1", "msg-2"]
 
 
 async def test_accept_into_takes_over_a_suggestion_whose_action_was_deleted(

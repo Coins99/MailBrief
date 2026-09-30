@@ -137,10 +137,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   Drafts, trash and spam are ignored, and no folder or label (the Sent folder included) is
   ever listed. A reply never changes an action: activity is derived, and only the owner's
   `mark_thread_seen` moves the watermark. A failed or stopped check never fails the sync.
-- Only the owner adds an email to an existing action (`accept_into`); the brief offers it
-  only for live, open actions with a source in the email's thread in the same account, it
-  makes one revision, and its undo works only while the action is unchanged and never
-  removes an action's last source.
+- Only the owner adds an email to an existing action (`accept_into`), and only to a live,
+  open one; the brief offers it only for actions with a source in the email's thread in the
+  same account, it makes one revision, and its undo works only while the action is
+  unchanged and never removes an action's last source.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.

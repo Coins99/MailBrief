@@ -48,6 +48,11 @@ Added with the desktop display (M8 Part 5).
 - **What the brief offers:** only live, open actions with a source in the email's thread in
   the same account (the same provider, account and thread snapshot), at most three, most
   urgent first. Nothing is offered across accounts, or for completed or deleted actions.
+- **Only open actions take an email.** `ActionService.accept_into` refuses a completed or
+  deleted action ("Reopen the action before adding to it."), so the CLI and the desktop
+  agree: adding to finished work would hide the suggestion in it. When the owner names the
+  action (`actions accept N --into`), any thread or account is allowed, since a related
+  email often starts a new thread.
 - **One revision:** the suggestion is accepted into the action, the email becomes a source
   unless it already is one, and nothing else about the action changes.
 - **Undo** works while the action is unchanged since the addition: the suggestion is pending

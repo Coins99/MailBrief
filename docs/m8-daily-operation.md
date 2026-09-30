@@ -318,7 +318,7 @@ Part 5 is implemented and awaits live acceptance. It needs no migration. The pol
 - **The status line** after Sync and review, or a brief from Briefs…, adds one sentence when
   threads were tracked: "Checked 3 tracked threads.", "Checked 3 of 5 tracked threads;
   2 failed." or "Thread checks stopped early." It never shows an error code, and says
-  nothing when no threads were tracked.
+  nothing when no threads were tracked or the run was cancelled.
 - Nothing here is automatic or uses AI: only you add an email to an action or mark
   activity seen.
 
@@ -339,7 +339,8 @@ Part 5 is implemented and awaits live acceptance. It needs no migration. The pol
 - `actions accept N --into PUBLIC_ID [--database PATH]` accepts suggestion N into that
   action and prints "Added to: <title> (<id>)". An unknown action or suggestion exits 3; a
   suggestion accepted into another action exits 3 with "That suggestion already belongs to
-  another action." Naming the action is your choice, so the CLI takes any live action; the
+  another action." Only an open action takes an email: a completed one exits 3 with "Reopen
+  the action before adding to it." When you name the action, any thread is allowed; the
   brief offers only those that continue the email's thread.
 - `brief --show` and `briefs show` print "Continues: <title> (<id>)" under an item for each
   action it continues, so you can pass that ID to `--into`.

@@ -1423,7 +1423,8 @@ class MainWindow(QMainWindow):
             self.status.setText("Transmission declined. No messages sent to AI in this run.")
         else:
             self.status.setText("Refresh failed. The displayed saved brief is unchanged.")
-        threads = thread_check_text(result.sync)
+        # A cancelled run's news is the cancellation; a partial count would invite misreading.
+        threads = "" if result.status is BriefStatus.CANCELLED else thread_check_text(result.sync)
         if threads:
             self.status.setText(f"{self.status.text()} {threads}")
         if result.error_code == "AUTH_REQUIRED" or result.sync.error_code == "AUTH_REQUIRED":
