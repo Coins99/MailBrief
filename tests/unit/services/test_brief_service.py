@@ -15,13 +15,14 @@ from mailbrief.domain.analysis import AIUsage, AnalysisRequest, AnalysisResponse
 from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS, BodySource, MessageBody
 from mailbrief.domain.briefs import SENT_FIELDS, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DigestStatus, SyncProgress, SyncStage
-from mailbrief.domain.messages import NormalizedMessage, RankedMessage
+from mailbrief.domain.messages import EmailContact, NormalizedMessage, RankedMessage
 from mailbrief.ports.errors import AIAuthenticationError, ProviderPermissionError
 from mailbrief.services.analysis import AnalysisPlan, AnalysisRun, AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
 from mailbrief.services.digest import DigestService
+from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
     AccountRepository,
@@ -618,7 +619,12 @@ class ReviewGate:
     selected: tuple[str, ...] | None
 
     async def review(
-        self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+        self,
+        candidates: tuple[RankedMessage, ...],
+        selected_ids: tuple[str, ...],
+        *,
+        blocked_ids: frozenset[str],
+        limit: int,
     ) -> tuple[str, ...] | None:
         return self.selected
 
@@ -632,7 +638,12 @@ async def test_review_can_replace_suggestion_with_other_inbox_message(
 
     class IncludeOther:
         async def review(
-            self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+            self,
+            candidates: tuple[RankedMessage, ...],
+            selected_ids: tuple[str, ...],
+            *,
+            blocked_ids: frozenset[str],
+            limit: int,
         ) -> tuple[str, ...]:
             assert len(candidates) == 12
             assert len(selected_ids) == 10
@@ -699,3 +710,134 @@ async def test_review_cancel_empty_and_invalid_never_fetch_bodies(
         result = await service.generate(tz_key=ZONE, shortlist_gate=ReviewGate(selection))
         assert result.status is (BriefStatus.CANCELLED if selection is None else BriefStatus.SAVED)
     assert provider.calls == 0
+
+
+BLOCKED_SENDER = "news@lists.example.org"
+RULES = ("@example.org",)
+
+
+def mixed_inbox() -> list[NormalizedMessage]:
+    """m0 and m2 come from a sender the rules exclude; m1 and m3 don't."""
+    return [
+        make_message(
+            provider_message_id=f"m{index}",
+            subject=f"Budget {index}",
+            sender=EmailContact(address=BLOCKED_SENDER if index % 2 == 0 else "boss@example.com"),
+            received_at_utc=datetime(2026, 9, 4, 13, index, tzinfo=UTC),
+            web_link=f"https://mail.example.com/m{index}",
+        )
+        for index in range(4)
+    ]
+
+
+class RecordingReader(FakeBodyReader):
+    def __init__(self, texts: dict[str, str]) -> None:
+        super().__init__(texts)
+        self.fetched: list[str] = []
+
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        self.fetched.append(provider_message_id)
+        return await super().fetch_message_body(provider_message_id)
+
+
+def with_reader(service: BriefService, mailbox: Sequence[NormalizedMessage]) -> RecordingReader:
+    reader = RecordingReader(texts_for(mailbox))
+    service._bodies = BodyService(reader)
+    return reader
+
+
+async def test_excluded_senders_are_never_selected_read_or_sent(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    mailbox = mixed_inbox()
+    provider = FakeAIProvider([answer_all()])
+    service = build(session, provider, RecordingGate(True), messages=mailbox)
+    reader = with_reader(service, mailbox)
+
+    with caplog.at_level(logging.DEBUG, logger="mailbrief"):
+        result = await service.generate(tz_key=ZONE, excluded_senders=RULES)
+
+    assert result.sync.shortlisted_message_keys == ("m3", "m1")
+    assert sorted(reader.fetched) == ["m1", "m3"]
+    (batch,) = provider.batches
+    assert {request.sender.address for request in batch} == {"boss@example.com"}
+    assert {request.subject for request in batch} == {"Budget 1", "Budget 3"}
+    assert "2 messages" in caplog.text and "example.org" not in caplog.text
+
+
+class OfferedGate:
+    """Records what review offered, then answers with a fixed selection."""
+
+    def __init__(self, selected: tuple[str, ...]) -> None:
+        self.selected = selected
+        self.offered: tuple[tuple[str, ...], frozenset[str], int] | None = None
+
+    async def review(
+        self,
+        candidates: tuple[RankedMessage, ...],
+        selected_ids: tuple[str, ...],
+        *,
+        blocked_ids: frozenset[str],
+        limit: int,
+    ) -> tuple[str, ...] | None:
+        self.offered = (
+            tuple(item.message.provider_message_id for item in candidates),
+            blocked_ids,
+            limit,
+        )
+        assert not blocked_ids & set(selected_ids)
+        return self.selected
+
+
+async def test_review_sees_blocked_messages_but_can_t_select_them(
+    session: AsyncSession,
+) -> None:
+    mailbox = mixed_inbox()
+    provider = FakeAIProvider()
+    service = build(session, provider, RecordingGate(True), messages=mailbox)
+    reader = with_reader(service, mailbox)
+    gate = OfferedGate(("m1", "m2"))
+
+    with pytest.raises(ExcludedSenderError):
+        await service.generate(
+            tz_key=ZONE, shortlist_gate=gate, excluded_senders=RULES, shortlist_limit=4
+        )
+
+    assert gate.offered is not None
+    assert sorted(gate.offered[0]) == ["m0", "m1", "m2", "m3"]
+    assert gate.offered[1:] == (frozenset({"m0", "m2"}), 4)
+    assert reader.fetched == []
+    assert provider.calls == 0
+
+
+async def test_an_excluded_include_fails_before_bodies_and_ai(session: AsyncSession) -> None:
+    mailbox = mixed_inbox()
+    provider = FakeAIProvider()
+    gate = RecordingGate(True)
+    service = build(session, provider, gate, messages=mailbox)
+    reader = with_reader(service, mailbox)
+
+    with pytest.raises(ExcludedSenderError):
+        await service.generate(tz_key=ZONE, include_ids=("m0",), excluded_senders=RULES)
+
+    assert reader.fetched == []
+    assert provider.calls == 0
+    assert gate.previews == []
+
+
+async def test_the_limit_caps_automatic_and_reviewed_selection(session: AsyncSession) -> None:
+    mailbox = inbox(5)
+    provider = FakeAIProvider([answer_all()])
+    service = build(session, provider, RecordingGate(True), messages=mailbox)
+    reader = with_reader(service, mailbox)
+
+    result = await service.generate(tz_key=ZONE, shortlist_limit=2)
+
+    assert len(result.sync.shortlisted_message_keys) == 2
+    assert len(reader.fetched) == 2
+
+    oversized = OfferedGate(("m0", "m1", "m2"))
+    with pytest.raises(ShortlistReviewError, match="up to two"):
+        await service.generate(tz_key=ZONE, shortlist_gate=oversized, shortlist_limit=2)
+    assert oversized.offered is not None and oversized.offered[2] == 2
+    assert len(reader.fetched) == 2

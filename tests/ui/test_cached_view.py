@@ -29,7 +29,9 @@ async def test_keyboard_review_can_select_outside_suggestions_and_enforces_limit
         )
         for index in range(12)
     )
-    task = asyncio.create_task(window.review(candidates, ("m0", "m1", "m2")))
+    task = asyncio.create_task(
+        window.review(candidates, ("m0", "m1", "m2"), blocked_ids=frozenset(), limit=10)
+    )
     await asyncio.sleep(0)
     try:
         assert window.shortlist.count() == 12

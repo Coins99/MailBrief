@@ -164,6 +164,24 @@ _AI_DECLINED = "Nothing was sent: AI drafting needs your consent first."
 _AI_FAILED = "Couldn't write with Groq. Your text is unchanged."
 
 
+def _review_hint(limit: int) -> str:
+    noun = "message" if limit == 1 else "messages"
+    return (
+        "Review today's Inbox. Suggested messages are checked; add or remove any message, "
+        f"up to {limit} {noun}. Only checked messages will have their bodies retrieved."
+    )
+
+
+def _too_many(limit: int) -> str:
+    return f"Choose at most {limit} {'message' if limit == 1 else 'messages'} before continuing."
+
+
+_EXCLUDED_TIP = (
+    "This sender is excluded in Settings > Preferences, so this message is never analyzed. "
+    "Change the rule there to include it."
+)
+
+
 class _ApprovedGate:
     """The editor's preview already asked; first use also needs the ticked consent box."""
 
@@ -260,6 +278,9 @@ class MainWindow(QMainWindow):
         self.task: asyncio.Task[None] | None = None
         self._cancel = asyncio.Event()
         self._review: asyncio.Future[tuple[str, ...] | None] | None = None
+        # The review in progress: its message limit and the messages it can't select.
+        self._review_limit = MAX_SHORTLIST_SIZE
+        self._review_blocked: frozenset[str] = frozenset()
         self._consent: asyncio.Future[bool] | None = None
         self._ready = False
         self._closing = False
@@ -336,12 +357,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.undo_button)
         self.review_panel = QWidget()
         review_layout = QVBoxLayout(self.review_panel)
-        review_layout.addWidget(
-            plain_label(
-                "Review today's Inbox. Suggested messages are checked; add or remove any "
-                "message, up to ten. Only checked messages will have their bodies retrieved."
-            )
-        )
+        self.review_hint = plain_label(_review_hint(MAX_SHORTLIST_SIZE))
+        review_layout.addWidget(self.review_hint)
         self.shortlist = QListWidget()
         self.shortlist.setAccessibleName("Messages selected for analysis")
         self.shortlist.itemChanged.connect(self._selection_changed)
@@ -1161,15 +1178,33 @@ class MainWindow(QMainWindow):
         )
 
     async def review(
-        self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+        self,
+        candidates: tuple[RankedMessage, ...],
+        selected_ids: tuple[str, ...],
+        *,
+        blocked_ids: frozenset[str],
+        limit: int,
     ) -> tuple[str, ...] | None:
+        """Blocked messages are listed but can't be checked; at most ``limit`` can be."""
         if not candidates:
             return ()
         self._review = asyncio.get_running_loop().create_future()
+        self._review_limit, self._review_blocked = limit, blocked_ids
+        self.review_hint.setText(_review_hint(limit))
         self.shortlist.clear()
         for ranked in candidates:
             message = ranked.message
-            item = QListWidgetItem(f"{message.sender.address} — {message.subject}")
+            label = f"{message.sender.address} — {message.subject}"
+            if message.provider_message_id in blocked_ids:
+                # Not user-checkable and never given a check box, so neither a click nor
+                # Space can select it.
+                item = QListWidgetItem(f"{label} — excluded in Settings")
+                item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                item.setToolTip(_EXCLUDED_TIP)
+                self.shortlist.addItem(item)
+                continue
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
             item.setToolTip(
                 f"Rank score: {ranked.score}\n"
@@ -1192,36 +1227,39 @@ class MainWindow(QMainWindow):
         finally:
             self.review_panel.hide()
 
-    def _accept_review(self) -> None:
-        if self._review is None or self._review.done():
-            return
+    def _checked_ids(self) -> list[str]:
+        """The checked messages; a blocked message never counts, even if checked."""
         selected: list[str] = []
         for index in range(self.shortlist.count()):
             item = self.shortlist.item(index)
-            if item is not None and item.checkState() is Qt.CheckState.Checked:
-                selected.append(str(item.data(Qt.ItemDataRole.UserRole)))
+            if item is not None and item.checkState() == Qt.CheckState.Checked:
+                key = str(item.data(Qt.ItemDataRole.UserRole))
+                if key not in self._review_blocked:
+                    selected.append(key)
+        return selected
+
+    def _accept_review(self) -> None:
+        if self._review is None or self._review.done():
+            return
+        selected = self._checked_ids()
         if not selected:
             # Continuing with nothing would save an empty brief over today's saved one.
             self.status.setText(_PICK_ONE)
             return
-        if len(selected) > MAX_SHORTLIST_SIZE:
-            self.status.setText("Choose at most ten messages before continuing.")
+        if len(selected) > self._review_limit:
+            self.status.setText(_too_many(self._review_limit))
             return
         self._review.set_result(tuple(selected))
 
     def _selection_changed(self) -> None:
-        count = 0
-        for index in range(self.shortlist.count()):
-            item = self.shortlist.item(index)
-            if item is not None and item.checkState() == Qt.CheckState.Checked:
-                count += 1
+        count = len(self._checked_ids())
         noun = "message" if count == 1 else "messages"
         self.review_button.setText(f"Co&ntinue with {count} selected {noun}")
-        self.review_button.setEnabled(1 <= count <= MAX_SHORTLIST_SIZE)
+        self.review_button.setEnabled(1 <= count <= self._review_limit)
         if count == 0:
             self.status.setText(_PICK_ONE)
-        elif count > MAX_SHORTLIST_SIZE:
-            self.status.setText("Choose at most ten messages before continuing.")
+        elif count > self._review_limit:
+            self.status.setText(_too_many(self._review_limit))
 
     async def confirm(self, preview: TransmissionPreview) -> bool:
         self._consent = asyncio.get_running_loop().create_future()

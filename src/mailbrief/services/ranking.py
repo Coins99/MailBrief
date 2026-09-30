@@ -20,10 +20,19 @@ MAX_SHORTLIST_SIZE: int = SHORTLIST_LIMIT_MAX
 
 
 class ShortlistGate(Protocol):
-    """Review all ranked metadata, with the automatic selection prechecked."""
+    """Review all ranked metadata, with the automatic selection prechecked.
+
+    ``blocked_ids`` are messages from excluded senders: shown, but never selectable.
+    At most ``limit`` messages may be selected.
+    """
 
     async def review(
-        self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+        self,
+        candidates: tuple[RankedMessage, ...],
+        selected_ids: tuple[str, ...],
+        *,
+        blocked_ids: frozenset[str],
+        limit: int,
     ) -> tuple[str, ...] | None: ...
 
 
@@ -225,24 +234,47 @@ class ShortlistReviewError(ValueError):
     """Manual shortlist choices are outside today's Inbox, overlap or are too many."""
 
 
+class ExcludedSenderError(ShortlistReviewError):
+    """A choice includes a message from a sender the owner excluded; the message is static."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A message from an excluded sender can't be included; change the rule in Settings."
+        )
+
+
 def review_shortlist(
     ranked: Sequence[RankedMessage],
     *,
     include_ids: tuple[str, ...] = (),
     exclude_ids: tuple[str, ...] = (),
+    limit: int = MAX_SHORTLIST_SIZE,
+    blocked: frozenset[str] = frozenset(),
 ) -> list[RankedMessage]:
-    """Apply explicit choices only within this account/day; do not backfill exclusions."""
+    """Apply explicit choices only within this account/day, at most ``limit`` messages.
+
+    Per-run exclusions are not backfilled. Blocked messages (from excluded senders) can't
+    be included and never take a slot: the automatic selection is made without them.
+    """
+    if not 1 <= limit <= MAX_SHORTLIST_SIZE:
+        raise ValueError("The shortlist limit must be 1 to 10.")
     include, exclude = set(include_ids), set(exclude_ids)
     available = {item.message.provider_message_id: item for item in ranked}
     if include & exclude or (include | exclude) - available.keys():
         raise ShortlistReviewError(
             "Review IDs must belong to this Inbox window and cannot overlap."
         )
-    if len(include) > MAX_SHORTLIST_SIZE:
+    if include & blocked:
+        raise ExcludedSenderError()
+    if len(include) > limit:
         raise ShortlistReviewError("Too many manually included messages for one shortlist.")
-    automatic = select_shortlist(ranked)
+    automatic = select_shortlist(
+        [item for item in ranked if item.message.provider_message_id not in blocked],
+        min_size=min(MIN_SHORTLIST_SIZE, limit),
+        max_size=limit,
+    )
     selected = [available[key] for key in include]
     selected.extend(
         item for item in automatic if item.message.provider_message_id not in include | exclude
     )
-    return sorted(selected[:MAX_SHORTLIST_SIZE], key=_sort_key)
+    return sorted(selected[:limit], key=_sort_key)

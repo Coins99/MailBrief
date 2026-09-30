@@ -2,16 +2,18 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.digests import SyncProgress, SyncResult, SyncStage, SyncStatus
-from mailbrief.domain.messages import ProviderKind, RankedMessage
+from mailbrief.domain.messages import NormalizedMessage, ProviderKind, RankedMessage
+from mailbrief.domain.preferences import sender_excluded
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.services.calendar import local_day_window, resolve_timezone
 from mailbrief.services.ranking import (
     MAX_SHORTLIST_SIZE,
+    ExcludedSenderError,
     ShortlistGate,
     ShortlistReviewError,
     rank_messages,
@@ -26,6 +28,17 @@ from mailbrief.storage.repositories import (
 from mailbrief.storage.tables import AccountTable
 
 logger = logging.getLogger(__name__)
+
+_COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+
+
+def blocked_ids(messages: Sequence[NormalizedMessage], rules: Sequence[str]) -> frozenset[str]:
+    """The IDs of messages whose sender matches one of the owner's sender rules."""
+    return frozenset(
+        message.provider_message_id
+        for message in messages
+        if sender_excluded(message.sender.address, rules)
+    )
 
 
 class ApplicationService:
@@ -69,8 +82,14 @@ class ApplicationService:
         include_ids: tuple[str, ...] = (),
         exclude_ids: tuple[str, ...] = (),
         shortlist_gate: ShortlistGate | None = None,
+        shortlist_limit: int = MAX_SHORTLIST_SIZE,
+        excluded_senders: tuple[str, ...] = (),
     ) -> tuple[SyncResult, list[RankedMessage]]:
         """Connect, sync and rank one day, optionally reviewing all metadata before body access.
+
+        At most ``shortlist_limit`` messages are selected. A message whose sender matches
+        ``excluded_senders`` is never selected: including it, here or in review, raises
+        ExcludedSenderError before any body is read.
 
         Returns the terminal SyncResult and deterministic shortlisted RankedMessage items.
         """
@@ -115,7 +134,9 @@ class ApplicationService:
         )
 
         if not rows:
-            review_shortlist([], include_ids=include_ids, exclude_ids=exclude_ids)
+            review_shortlist(
+                [], include_ids=include_ids, exclude_ids=exclude_ids, limit=shortlist_limit
+            )
             return sync_result, []
 
         provider_kind = ProviderKind(account.provider)
@@ -151,8 +172,21 @@ class ApplicationService:
         if self._session:
             await self._session.commit()
 
-        # 5. Deterministic shortlist selection
-        shortlist = review_shortlist(ranked, include_ids=include_ids, exclude_ids=exclude_ids)
+        # 5. Deterministic shortlist selection, never from excluded senders
+        blocked = blocked_ids(domain_messages, excluded_senders)
+        logger.info(
+            "Shortlist limit %d; %d sender rules block %d messages",
+            shortlist_limit,
+            len(excluded_senders),
+            len(blocked),
+        )
+        shortlist = review_shortlist(
+            ranked,
+            include_ids=include_ids,
+            exclude_ids=exclude_ids,
+            limit=shortlist_limit,
+            blocked=blocked,
+        )
         if shortlist_gate is not None:
             candidates = tuple(
                 sorted(
@@ -165,19 +199,25 @@ class ApplicationService:
                 )
             )
             selected = await shortlist_gate.review(
-                candidates, tuple(item.message.provider_message_id for item in shortlist)
+                candidates,
+                tuple(item.message.provider_message_id for item in shortlist),
+                blocked_ids=blocked,
+                limit=shortlist_limit,
             )
             if selected is None or (cancel is not None and cancel.is_set()):
                 return sync_result.model_copy(update={"status": SyncStatus.CANCELLED}), []
             available = {item.message.provider_message_id for item in candidates}
             if (
-                len(selected) > MAX_SHORTLIST_SIZE
+                len(selected) > shortlist_limit
                 or len(selected) != len(set(selected))
                 or not set(selected) <= available
             ):
                 raise ShortlistReviewError(
-                    "Reviewed messages must be unique members of today's Inbox, up to ten."
+                    "Reviewed messages must be unique members of today's Inbox, up to "
+                    f"{_COUNT_WORDS[shortlist_limit - 1]}."
                 )
+            if blocked & set(selected):
+                raise ExcludedSenderError()
             shortlist = [
                 item for item in candidates if item.message.provider_message_id in selected
             ]

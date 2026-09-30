@@ -28,6 +28,7 @@ from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.calendar import local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.services.ranking import ShortlistGate as ShortlistGate
 from mailbrief.storage.repositories import ConsentRepository
 
@@ -111,8 +112,13 @@ class BriefService:
         cancel: asyncio.Event | None = None,
         progress: Callable[[SyncProgress], None] | None = None,
         shortlist_gate: ShortlistGate | None = None,
+        shortlist_limit: int = MAX_SHORTLIST_SIZE,
+        excluded_senders: tuple[str, ...] = (),
     ) -> BriefRunResult:
-        """Sync today's Inbox, prepare bodies, confirm consent, analyze and save the brief."""
+        """Sync today's Inbox, prepare bodies, confirm consent, analyze and save the brief.
+
+        Messages from ``excluded_senders`` are never selected, downloaded or sent.
+        """
         now = self._clock()
         window = local_day_window(now, resolve_timezone(tz_key))
         account = await self._application.get_or_restore_account()
@@ -124,6 +130,8 @@ class BriefService:
             progress=progress,
             cancel=cancel,
             shortlist_gate=shortlist_gate,
+            shortlist_limit=shortlist_limit,
+            excluded_senders=excluded_senders,
         )
         if sync.status is SyncStatus.CANCELLED:
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)

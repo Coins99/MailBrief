@@ -51,6 +51,8 @@ class FakeBackend(FakeDrafts):
         self.action_counts: dict[ActionFilter, int] = {}
         self.count_calls: list[ActionFilter] = []
         self.candidates: tuple[str, ...] = ("message-1",)
+        self.blocked: frozenset[str] = frozenset()
+        self.limit = 10
         self.closed = False
         self.cleaned = False
         self.fail: Exception | None = None
@@ -187,7 +189,9 @@ class FakeBackend(FakeDrafts):
                     )
                     for key in self.candidates
                 ),
-                self.candidates,
+                tuple(key for key in self.candidates if key not in self.blocked),
+                blocked_ids=self.blocked,
+                limit=self.limit,
             )
             self.approved = await gate.confirm(
                 TransmissionPreview(
