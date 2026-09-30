@@ -22,6 +22,7 @@ from mailbrief.domain.analysis import (
     EVIDENCE_BODY_SHARE,
     EVIDENCE_STORE_CHARS,
     EVIDENCE_TOTAL_CHARS,
+    FOLLOW_UP_EVIDENCE_CHARS,
     MAX_ANALYSIS_BATCH,
     MAX_SUGGESTION_STEPS,
     MAX_SUGGESTIONS,
@@ -37,6 +38,7 @@ from mailbrief.domain.analysis import (
     AnalysisRequest,
     AnalysisResponse,
     DeadlinePrecision,
+    FollowUpKind,
     MessageAnalysis,
 )
 from mailbrief.domain.bodies import BodyStatus, PreparedBody
@@ -138,9 +140,11 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
 
     An over-long summary or action is shortened. The evidence must quote the email, and is
     stored at most 300 characters long and never as the whole body: it is cut to under 80%
-    of the body. Suggested actions are checked one at a time by _suggestions, which drops a
-    bad one without failing the message. Raises ValueError (pydantic's ValidationError is
-    one); messages never echo email text.
+    of the body. The follow-up signal is checked next by _follow_up, and becomes NONE
+    rather than failing the message. Suggested actions are checked one at a time by
+    _suggestions, which drops a bad one without failing the message; they get what is left
+    of the evidence budget. Raises ValueError (pydantic's ValidationError is one); messages
+    never echo email text.
     """
     if candidate.message_key != request.message_key:
         raise ValueError("the candidate key does not match its request")
@@ -155,6 +159,10 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
     stored_evidence = _fit(evidence, evidence_cap)
     deadline = resolve_deadline(candidate, request)
     action_text = clean_generated_text(candidate.action_text or "")
+    budget = min(EVIDENCE_TOTAL_CHARS, share_cap) - len(stored_evidence)
+    follow_up, follow_up_evidence = _follow_up(candidate, request, deadline, budget)
+    if follow_up_evidence is not None:
+        budget -= len(follow_up_evidence)
     return MessageAnalysis(
         message_key=request.message_key,
         category=candidate.category,
@@ -168,12 +176,34 @@ def validate_candidate(candidate: AnalysisCandidate, request: AnalysisRequest) -
         deadline_timezone=deadline.timezone,
         confidence=candidate.confidence,
         evidence=stored_evidence,
-        suggestions=_suggestions(
-            candidate.actions,
-            request,
-            evidence_budget=min(EVIDENCE_TOTAL_CHARS, share_cap) - len(stored_evidence),
-        ),
+        suggestions=_suggestions(candidate.actions, request, evidence_budget=budget),
+        follow_up=follow_up,
+        follow_up_evidence=follow_up_evidence,
     )
+
+
+def _follow_up(
+    candidate: AnalysisCandidate,
+    request: AnalysisRequest,
+    deadline: ResolvedDeadline,
+    evidence_budget: int,
+) -> tuple[FollowUpKind, str | None]:
+    """The candidate's follow-up signal and its quote, or (NONE, None) (ADR 0016).
+
+    The signal is kept only when its trimmed quote is 2 to 160 characters, quotes the email
+    and fits ``evidence_budget``, and, for a new deadline, when the email states a deadline.
+    """
+    kind = candidate.follow_up
+    if kind is FollowUpKind.NONE or candidate.follow_up_evidence is None:
+        return FollowUpKind.NONE, None
+    quote = _trim_evidence(candidate.follow_up_evidence)
+    if (
+        not 2 <= len(quote) <= min(FOLLOW_UP_EVIDENCE_CHARS, evidence_budget)
+        or not appears_in(quote, request.subject, request.body_text)
+        or (kind is FollowUpKind.NEW_DEADLINE and deadline.precision is DeadlinePrecision.NONE)
+    ):
+        return FollowUpKind.NONE, None
+    return kind, quote
 
 
 def _suggestions(

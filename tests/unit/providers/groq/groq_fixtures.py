@@ -74,6 +74,8 @@ def wire_result(message_key: str, evidence: str, **overrides: Any) -> dict[str, 
         "confidence": 0.8,
         "evidence": evidence,
         "actions": [],
+        "follow_up": "none",
+        "follow_up_evidence": None,
     }
     values.update(overrides)
     return values

@@ -194,20 +194,27 @@ def resolve_deadline_fields(
 def suggest_target(
     deadline: ResolvedDeadline, request: AnalysisRequest
 ) -> tuple[dt.date | None, TargetReason | None]:
+    """The target for a deadline in the request's email; see suggest_target_for."""
+    return suggest_target_for(deadline, request.received_at_utc, request.timezone_name)
+
+
+def suggest_target_for(
+    deadline: ResolvedDeadline, received_at_utc: dt.datetime, timezone_name: str
+) -> tuple[dt.date | None, TargetReason | None]:
     """A day to finish work due at the deadline, and why; (None, None) without a dated one.
 
-    Days are taken in the owner's zone. The target is the last working day (Monday to
-    Friday) before the deadline's day, unless that day is before the email arrived; then
-    it is the deadline's day. There is no holiday calendar.
+    Days are taken in the owner's zone, ``timezone_name``. The target is the last working
+    day (Monday to Friday) before the deadline's day, unless that day is before the email
+    arrived; then it is the deadline's day. There is no holiday calendar.
     """
-    zone = ZoneInfo(request.timezone_name)
+    zone = ZoneInfo(timezone_name)
     if deadline.precision is DeadlinePrecision.DATE and deadline.date is not None:
         due = deadline.date
     elif deadline.precision is DeadlinePrecision.DATETIME and deadline.at_utc is not None:
         due = deadline.at_utc.astimezone(zone).date()
     else:
         return None, None
-    received = request.received_at_utc.astimezone(zone).date()
+    received = received_at_utc.astimezone(zone).date()
     if due <= received:
         return due, TargetReason.ON_DEADLINE
     working_day = due - dt.timedelta(days=1)

@@ -26,6 +26,7 @@ from mailbrief.domain.analysis import (
     AnalysisRequest,
     AnalysisResponse,
     DeadlinePrecision,
+    FollowUpKind,
     TargetReason,
 )
 from mailbrief.domain.bodies import BodySource, BodyStatus, PreparedBody
@@ -1488,3 +1489,84 @@ async def test_an_incomplete_answer_from_any_provider_counts(session: AsyncSessi
 
     assert run.error_code == "AI_OUTPUT_INCOMPLETE"
     assert provider.calls == 2
+
+
+FOLLOW_BODY = (
+    "Thanks for the update. Can we move the review to next Monday? The finance team is "
+    "still collecting the figures, so Friday is too early. No longer needed: the old draft."
+)
+MOVE = "Can we move the review to next Monday?"
+
+
+@pytest.mark.parametrize(
+    ("kind", "overrides"),
+    [
+        (
+            FollowUpKind.NEW_DEADLINE,
+            {"deadline_text": "next Monday", "deadline_date": "2026-09-07"},
+        ),
+        (FollowUpKind.CANCELLED, {}),
+        (FollowUpKind.DELIVERED, {}),
+    ],
+)
+def test_validate_candidate_keeps_a_follow_up_that_quotes_the_email(
+    kind: FollowUpKind, overrides: dict[str, object]
+) -> None:
+    request = make_request(body_text=FOLLOW_BODY)
+    candidate = good_candidate(
+        request, follow_up=kind.value, follow_up_evidence=f"“{MOVE}”", **overrides
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    assert (analysis.follow_up, analysis.follow_up_evidence) == (kind, MOVE)
+
+
+LONG_QUOTE_BODY = "Moved. " + "x" * 161 + " Thanks, Sam and the finance team for the figures."
+
+
+@pytest.mark.parametrize(
+    ("body", "overrides"),
+    [
+        (FOLLOW_BODY, {"follow_up_evidence": "We cancelled everything yesterday."}),
+        (LONG_QUOTE_BODY, {"follow_up_evidence": "x" * 161}),
+        (FOLLOW_BODY, {"follow_up_evidence": "C"}),
+        (FOLLOW_BODY, {"follow_up_evidence": None}),
+        (FOLLOW_BODY, {"follow_up": "new_deadline"}),  # The email states no deadline.
+        (BODY, {"follow_up_evidence": "Please approve the quarterly"}),  # Over the budget.
+    ],
+    ids=["not-in-the-email", "over-160", "too-short", "missing", "no-deadline", "over-budget"],
+)
+def test_validate_candidate_drops_a_follow_up_it_cannot_check_and_keeps_the_message(
+    body: str, overrides: dict[str, object]
+) -> None:
+    request = make_request(body_text=body)
+    values: dict[str, object] = {"follow_up": "cancelled", "follow_up_evidence": MOVE}
+    values.update(overrides)
+    candidate = good_candidate(request, actions=[good_action(request)], **values)
+
+    analysis = validate_candidate(candidate, request)
+
+    assert (analysis.follow_up, analysis.follow_up_evidence) == (FollowUpKind.NONE, None)
+    assert analysis.summary == "A short summary."
+    assert len(analysis.suggestions) == 1
+
+
+@pytest.mark.parametrize(("follow_up", "kept"), [(False, True), (True, False)])
+def test_suggestions_get_what_the_follow_up_leaves_of_the_evidence_budget(
+    follow_up: bool, kept: bool
+) -> None:
+    request = make_request(body_text=FOLLOW_BODY)
+    # 134 characters in all (strictly under 80% of 168), less the message's own 40.
+    budget = math.ceil(len(FOLLOW_BODY) * 0.8) - 1 - 40
+    quote = FOLLOW_BODY[40 : 40 + budget - len(MOVE) + 1]  # One more than the follow-up leaves.
+    signal: dict[str, object] = (
+        {"follow_up": "cancelled", "follow_up_evidence": MOVE} if follow_up else {}
+    )
+    candidate = good_candidate(request, actions=[good_action(request, evidence=quote)], **signal)
+
+    analysis = validate_candidate(candidate, request)
+
+    (suggestion,) = analysis.suggestions
+    assert len(quote) <= budget
+    assert (suggestion.evidence == quote) is kept
