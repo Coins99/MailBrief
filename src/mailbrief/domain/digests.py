@@ -125,6 +125,22 @@ class DailyDigest(DomainModel):
         return self
 
 
+class SavedBriefSummary(DomainModel):
+    """One saved brief in the history list, without its items."""
+
+    account_email: str = Field(min_length=1, max_length=320)
+    local_date: date
+    timezone_name: str = Field(min_length=1, max_length=128)
+    status: DigestStatus
+    generated_at_utc: datetime
+    item_count: int = Field(ge=0)
+
+    @field_validator("generated_at_utc")
+    @classmethod
+    def normalize_generated_at(cls, value: datetime) -> datetime:
+        return normalize_utc(value)
+
+
 class SyncStage(StrEnum):
     """Progress stages emitted by the synchronization workflow."""
 

@@ -23,6 +23,7 @@ from mailbrief.domain.digests import (
     DigestItem,
     DigestSection,
     DigestStatus,
+    SavedBriefSummary,
     SyncStatus,
 )
 from mailbrief.domain.messages import (
@@ -748,26 +749,117 @@ class DigestRepository:
         return result.first()
 
     async def get_latest(self) -> DailyDigest | None:
-        """Restore the newest brief across all local Gmail accounts, regardless of sign-in.
+        """Restore the brief for the newest local day across all local Gmail accounts,
+        regardless of sign-in.
 
-        The desktop shows its account explicitly; offline startup needs no active session.
+        The newest day wins, not the newest save: a brief made today for a missed day never
+        replaces today's. The desktop shows its account explicitly; offline startup needs
+        no active session.
         """
         result = await self._session.execute(
             select(DigestTable, AccountTable)
             .join(AccountTable, DigestTable.account_id == AccountTable.id)
             .where(AccountTable.provider == ProviderKind.GMAIL.value)
-            .order_by(DigestTable.generated_at_utc.desc(), DigestTable.id.desc())
+            .order_by(
+                DigestTable.local_date.desc(),
+                DigestTable.generated_at_utc.desc(),
+                DigestTable.id.desc(),
+            )
             .limit(1)
         )
         row = result.first()
         if row is None:
             return None
         digest, account = row
+        return await self._domain(digest, account.email_address)
+
+    async def get_for_account_date(
+        self, account_email: str, local_date: date
+    ) -> DailyDigest | None:
+        """The saved brief of a Gmail account for one local date, with its suggestions."""
+        result = await self._session.execute(
+            select(DigestTable)
+            .join(AccountTable, DigestTable.account_id == AccountTable.id)
+            .where(
+                AccountTable.provider == ProviderKind.GMAIL.value,
+                AccountTable.email_address == account_email,
+                DigestTable.local_date == local_date,
+            )
+            .order_by(DigestTable.generated_at_utc.desc(), DigestTable.id.desc())
+            .limit(1)
+        )
+        digest = result.scalar_one_or_none()
+        return None if digest is None else await self._domain(digest, account_email)
+
+    async def _domain(self, digest: DigestTable, account_email: str) -> DailyDigest:
         items = await self.get_digest_items(digest.id)
         views = await suggestion_views(
             self._session, [(item.message_id, item.analysis_id) for item, _, _ in items]
         )
-        return self.to_domain(digest, items, account.email_address, suggestions=views)
+        return self.to_domain(digest, items, account_email, suggestions=views)
+
+    async def list_summaries(self, limit: int) -> tuple[SavedBriefSummary, ...]:
+        """Saved Gmail briefs, newest local day first, with item counts from one query."""
+        item_count = func.count(DigestItemTable.message_id)
+        result = await self._session.execute(
+            select(
+                AccountTable.email_address,
+                DigestTable.local_date,
+                DigestTable.timezone_name,
+                DigestTable.status,
+                DigestTable.generated_at_utc,
+                item_count,
+            )
+            .join(AccountTable, DigestTable.account_id == AccountTable.id)
+            .outerjoin(DigestItemTable, DigestItemTable.digest_id == DigestTable.id)
+            .where(AccountTable.provider == ProviderKind.GMAIL.value)
+            .group_by(DigestTable.id, AccountTable.email_address)
+            .order_by(
+                DigestTable.local_date.desc(),
+                DigestTable.generated_at_utc.desc(),
+                DigestTable.id.desc(),
+            )
+            .limit(limit)
+        )
+        return tuple(
+            SavedBriefSummary(
+                account_email=email,
+                local_date=local_date,
+                timezone_name=timezone_name,
+                status=DigestStatus(status),
+                generated_at_utc=generated_at_utc,
+                item_count=count,
+            )
+            for email, local_date, timezone_name, status, generated_at_utc, count in result
+        )
+
+    async def saved_dates(self, account_email: str, first: date, last: date) -> frozenset[date]:
+        """The local dates from ``first`` to ``last`` with a saved brief for a Gmail account."""
+        result = await self._session.scalars(
+            select(DigestTable.local_date)
+            .join(AccountTable, DigestTable.account_id == AccountTable.id)
+            .where(
+                AccountTable.provider == ProviderKind.GMAIL.value,
+                AccountTable.email_address == account_email,
+                DigestTable.local_date >= first,
+                DigestTable.local_date <= last,
+            )
+        )
+        return frozenset(result)
+
+    async def accounts_with_brief(self, local_date: date) -> tuple[str, ...]:
+        """The Gmail accounts that have a saved brief for a local date, sorted."""
+        result = await self._session.scalars(
+            select(AccountTable.email_address)
+            .join(DigestTable, DigestTable.account_id == AccountTable.id)
+            .where(
+                AccountTable.provider == ProviderKind.GMAIL.value,
+                DigestTable.local_date == local_date,
+            )
+            .distinct()
+            .order_by(AccountTable.email_address)
+        )
+        return tuple(result)
 
     async def get_digest_items(
         self,
