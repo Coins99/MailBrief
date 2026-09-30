@@ -508,9 +508,9 @@ Part 7 is implemented and awaits live acceptance. It adds no migration (the head
 - **In Your actions**, an open action's line ends with "· N proposals". **Proposals…** (Alt+R
   on Windows) opens a dialog listing that action's pending proposals: what each would
   change, the email's quote, its sender and when it arrived in your time zone. The button
-  above the list is labelled with the selected row's effect and applies it (Return on a row
-  does the same); **Dismiss** dismisses it; **Close** closes the dialog. A completed action
-  shows no proposals.
+  above the list reads "Apply: <the selected row's effect>" (Alt+A on Windows) and applies
+  it; **Dismiss** (Alt+D) dismisses it; **Close** closes the dialog. Only those buttons act:
+  Return and a double-click on a row do nothing. A completed action shows no proposals.
 - **After a run**, the status line adds "Proposed N updates to your actions." when a brief
   made any.
 

@@ -30,8 +30,9 @@ _COMPLETES = {
 }
 NONE_PENDING = "This action has no pending proposals."
 HINT = (
-    "Applying changes only what the row says: never the action's title, notes, steps or "
-    "owner. You can undo it right after."
+    "Select a row, then use a button: Return and a double-click never apply or dismiss. "
+    "Applying changes only what the row says, never the action's title, notes, steps or "
+    "owner, and you can undo it right after."
 )
 
 
@@ -76,7 +77,12 @@ def _label(text: str) -> str:
 
 class ProposalsDialog(QDialog):
     """``apply_requested(proposal_id)`` and ``dismiss_requested(proposal_id)`` ask the window
-    to act on the selected proposal; it looks up the action's revision from ``proposal()``."""
+    to act on the selected proposal; it looks up the action's revision from ``proposal()``.
+
+    Only the buttons (and their mnemonics) apply or dismiss: Return and a double-click on a
+    row do nothing, and neither button is the dialog's default, so Return elsewhere in the
+    dialog only reaches Close.
+    """
 
     apply_requested = Signal(int)
     dismiss_requested = Signal(int)
@@ -98,14 +104,15 @@ class ProposalsDialog(QDialog):
         layout.addWidget(self.listing, 1)
         layout.addWidget(_plain(HINT))
         buttons = QHBoxLayout()
-        self.apply_button = QPushButton("Apply")
+        self.apply_button = QPushButton("&Apply")
         self.dismiss_button = QPushButton("&Dismiss")
         self.close_button = QPushButton("&Close")
+        for button in (self.apply_button, self.dismiss_button):
+            button.setAutoDefault(False)
         for button in (self.apply_button, self.dismiss_button, self.close_button):
             buttons.addWidget(button)
         layout.addLayout(buttons)
         self.listing.currentRowChanged.connect(lambda _row: self._update_buttons())
-        self.listing.itemActivated.connect(lambda _item: self._apply())
         self.apply_button.clicked.connect(self._apply)
         self.dismiss_button.clicked.connect(self._dismiss)
         self.close_button.clicked.connect(self.reject)
@@ -156,11 +163,12 @@ class ProposalsDialog(QDialog):
         self.apply_button.setEnabled(enabled)
         self.dismiss_button.setEnabled(enabled)
         if chosen is None:
-            self.apply_button.setText("Apply")
+            self.apply_button.setText("&Apply")
             self.apply_button.setAccessibleName("Apply the selected proposal")
             return
         effect = effect_text(chosen, self._zone)
-        self.apply_button.setText(_label(effect))
+        # A fixed mnemonic (A): the effect's own first letter varies with the row.
+        self.apply_button.setText(f"&Apply: {_label(effect)}")
         self.apply_button.setAccessibleName(f"Apply: {effect}")
 
     def _apply(self) -> None:

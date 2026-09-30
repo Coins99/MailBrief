@@ -3,13 +3,14 @@ Proposals dialog, and the window's apply and dismiss with Undo (ADR 0016)."""
 
 import asyncio
 import re
+import sys
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 from pytestqt.qtbot import QtBot
@@ -387,12 +388,12 @@ def test_the_dialog_lists_effect_quote_sender_and_local_date(dialog: ProposalsDi
 
 def test_the_apply_button_follows_the_selected_rows_effect(dialog: ProposalsDialog) -> None:
     dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
-    assert dialog.apply_button.text() == "Set the deadline to 2026-10-05"
+    assert dialog.apply_button.text() == "&Apply: Set the deadline to 2026-10-05"
     assert dialog.apply_button.accessibleName() == "Apply: Set the deadline to 2026-10-05"
 
     dialog.listing.setCurrentRow(1)
 
-    assert dialog.apply_button.text() == "Complete it (delivered)"
+    assert dialog.apply_button.text() == "&Apply: Complete it (delivered)"
     assert dialog.apply_button.accessibleName() == "Apply: Complete it (delivered)"
 
 
@@ -401,10 +402,11 @@ def test_text_from_an_email_is_plain_and_never_a_mnemonic(dialog: ProposalsDialo
     dialog.show_proposals(make_action(proposals=(words,)), TORONTO)
 
     # An & in the label would read as a mnemonic marker; it is doubled, and the accessible
-    # name, which Qt doesn't parse, keeps the single one.
-    assert dialog.apply_button.text() == "Set the deadline to “Q&&A <b>day</b>”"
+    # name, which Qt doesn't parse, keeps the single one. The one mnemonic is the button's own.
+    assert dialog.apply_button.text() == "&Apply: Set the deadline to “Q&&A <b>day</b>”"
     assert dialog.apply_button.accessibleName() == "Apply: Set the deadline to “Q&A <b>day</b>”"
-    assert mnemonic(dialog.apply_button.text()) is None
+    assert mnemonic(dialog.apply_button.text()) == "a"
+    assert len(re.findall(r"(?<!&)&(?!&)", dialog.apply_button.text())) == 1
     item = dialog.listing.item(0)
     assert item is not None and "Q&A <b>day</b>" in item.text()
     assert dialog.heading.textFormat() == Qt.TextFormat.PlainText
@@ -427,16 +429,55 @@ def test_the_dialog_emits_apply_and_dismiss_for_the_selected_proposal(
     assert applied == [3, 9] and dismissed == [9]
 
 
-def test_return_applies_the_selected_row_once(dialog: ProposalsDialog) -> None:
+def test_only_the_button_applies_never_return_or_a_double_click(
+    dialog: ProposalsDialog,
+) -> None:
     dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
-    applied: list[int] = []
-    dialog.apply_requested.connect(applied.append)
+    asked: list[tuple[str, int]] = []
+    dialog.apply_requested.connect(lambda proposal_id: asked.append(("apply", proposal_id)))
+    dialog.dismiss_requested.connect(lambda proposal_id: asked.append(("dismiss", proposal_id)))
     dialog.show()
     dialog.listing.setFocus()
 
+    # On the list: Return and Enter are consumed, and a double-click activates the row.
     QTest.keyClick(dialog.listing, Qt.Key.Key_Return)
+    QTest.keyClick(dialog.listing, Qt.Key.Key_Enter)
+    row = dialog.listing.visualItemRect(dialog.listing.item(0))
+    QTest.mouseDClick(dialog.listing.viewport(), Qt.MouseButton.LeftButton, pos=row.center())
+    # On the buttons: Return only clicks a button that is the dialog's default.
+    for button in (dialog.apply_button, dialog.dismiss_button):
+        button.setFocus()
+        QTest.keyClick(button, Qt.Key.Key_Return)
 
-    assert applied == [3]
+    assert asked == []
+    assert not dialog.apply_button.autoDefault() and not dialog.dismiss_button.autoDefault()
+
+    # Anywhere else in the dialog, Return reaches the default button, which only closes it.
+    dialog.heading.setFocus()
+    QTest.keyClick(dialog, Qt.Key.Key_Return)
+    assert asked == [] and not dialog.isVisible()
+
+    # The buttons themselves still work.
+    dialog.apply_button.click()
+    dialog.dismiss_button.click()
+    assert asked == [("apply", 3), ("dismiss", 3)]
+
+
+def test_the_apply_button_has_its_own_mnemonic(dialog: ProposalsDialog) -> None:
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+    buttons = (dialog.apply_button, dialog.dismiss_button, dialog.close_button)
+
+    for row in (0, 1):
+        dialog.listing.setCurrentRow(row)
+        letters = [mnemonic(button.text()) for button in buttons]
+        assert letters == ["a", "d", "c"]  # Whatever the row, and distinct from the others.
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="Qt ignores mnemonics on macOS")
+def test_the_mnemonic_is_a_real_shortcut_where_qt_has_mnemonics(dialog: ProposalsDialog) -> None:
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+
+    assert QKeySequence.mnemonic(dialog.apply_button.text()).toString() == "Alt+A"
 
 
 def test_a_busy_dialog_acts_on_nothing(dialog: ProposalsDialog) -> None:
@@ -471,7 +512,7 @@ def test_refreshing_keeps_the_selection_and_an_empty_dialog_says_so(
     for gone in (make_action(), None):
         dialog.show_proposals(gone, TORONTO)
         assert dialog.listing.count() == 0 and NONE_PENDING in dialog.heading.text()
-        assert not dialog.apply_button.isEnabled() and dialog.apply_button.text() == "Apply"
+        assert not dialog.apply_button.isEnabled() and dialog.apply_button.text() == "&Apply"
     assert dialog.action_public_id is None
 
 
@@ -660,7 +701,7 @@ async def test_the_actions_pane_opens_the_dialog_for_the_selected_action(
     assert dialog.isVisible()
     assert dialog.heading.text() == "Proposals for “Send the deck”"
     assert dialog.listing.count() == 2
-    assert dialog.apply_button.text() == "Set the deadline to 2026-10-05"
+    assert dialog.apply_button.text() == "&Apply: Set the deadline to 2026-10-05"
 
 
 async def test_applying_in_the_dialog_uses_the_action_revision_and_refreshes_it(
