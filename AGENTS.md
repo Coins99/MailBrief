@@ -34,13 +34,15 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
   See ADR 0014. Brief history and bounded catch-up (Part 3) implemented, awaiting live
   acceptance: the desktop Briefs… dialog and `brief --date`, `briefs list` and
-  `briefs show`.
+  `briefs show`. Thread tracking backend (Part 4) implemented, awaiting live acceptance:
+  the threads of open actions are checked after today's sync (`actions list`,
+  `actions seen`). See ADR 0015.
 
 ## Layout (ports and adapters)
 
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
 - `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` / `DraftingProvider` protocols
-  (`drafting.py`) and provider-neutral errors.
+  (`drafting.py`), `ThreadReader` (`threads.py`) and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
   `providers/groq/`: active AI adapter (Structured Outputs), API key store and factory.
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
@@ -53,6 +55,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   saved AI limits (`effective_settings`) and the owner's zone (`owner_zone`).
 - `src/mailbrief/services/history.py`: saved briefs by day, missed days, the catch-up date
   rule (`check_brief_date`) and each brief's `coverage_line`.
+- `src/mailbrief/services/threads.py`: checks the threads of open actions and caches their
+  later messages' metadata (ADR 0015).
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
   `actions.py` for suggestions, decisions and accepted actions, `drafts.py` for drafts,
   their versions and source snapshots, and `preferences.py` for the preferences row.
@@ -65,7 +69,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
   (`drafting_panel.py`), the Settings Preferences tab (`preferences_view.py`) and the
-  Briefs… dialog for saved briefs and missed days (`history_view.py`).
+  Briefs… dialog for saved briefs and missed days (`history_view.py`); `lists.py` holds
+  `ActivatingList`, where Return or Enter activates a row once on every platform.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -123,6 +128,12 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   briefs past days automatically. `BriefService` enforces the date bounds before Gmail is
   contacted or anything is written, and only today's window advances the account's last
   complete sync.
+- Thread tracking (ADR 0015) reads metadata only (`threads.get`, `format=metadata`), for the
+  live, open actions of the connected account: at most 25 threads and the newest 20
+  messages per thread after the action's latest source, during today's sync or brief only.
+  Drafts, trash and spam are ignored, and no folder or label (the Sent folder included) is
+  ever listed. A reply never changes an action: activity is derived, and only the owner's
+  `mark_thread_seen` moves the watermark. A failed or stopped check never fails the sync.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
@@ -194,7 +205,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts, drafting, preferences and history services.
+  drafts, drafting, preferences, history and threads services.
 
 ## Dormant Microsoft notes
 

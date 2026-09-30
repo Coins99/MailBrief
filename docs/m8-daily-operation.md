@@ -12,7 +12,7 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | 1. Preferences core | Time zone, messages per brief, sender exclusions, drafting defaults, AI limits in SQLite; CLI | 0009, ADR 0014 | Done |
 | 2. Preferences in the desktop | The Settings Preferences tab; the owner's zone and drafting defaults in the window | None | Done |
 | 3. Brief history and bounded catch-up | Browse saved briefs; brief one missed day (within the last 7) per explicit run | None | Done |
-| 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Planned |
+| 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Done |
 | 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None expected | Planned |
 | 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7 | Planned |
 | 7. Follow-up proposals in the desktop | Reviewing and applying proposals | None expected | Planned |
@@ -214,3 +214,80 @@ Part 3 is implemented and awaits live acceptance. It needs no migration.
   now.
 - The desktop window remembers the connected account and the brief shown (`None` for the
   latest); `_reload_brief()` reloads the shown brief.
+
+## Thread tracking (Part 4)
+
+Part 4 is implemented and awaits live acceptance. The policy is
+[ADR 0015](adr/0015-thread-continuity.md); the desktop shows it from Part 5.
+
+### What it does
+
+- After today's sync or brief, MailBrief reads the Gmail threads of your open actions, both
+  yours and those waiting for someone, and caches the messages that arrived after each
+  action's email. `actions list` then shows how many are new, the latest one and whether
+  you replied.
+- **Bounds:** at most 25 threads per run, most urgent action first; at most the newest 20
+  messages per thread, and only those after the action's latest email in that thread.
+  Completed and deleted actions stop being tracked. Past-day briefs and anything scheduled
+  don't check threads.
+- **Nothing changes by itself:** a reply, from someone else or from you, never completes or
+  changes an action, and thread checks use no AI. The only change is yours: marking the
+  activity seen.
+- A failed or stopped check (a sign-in, permission or rate-limit problem) never fails the
+  sync or the brief; it is counted and reported, and what was already saved stays.
+
+### Privacy
+
+- Metadata only: the same four headers (From, To, Subject, Message-ID), labels, received
+  time and Gmail's preview snippet as the Inbox sync. Never bodies or attachments.
+- Drafts, trash and spam in a thread are ignored.
+- Your own messages are cached only inside tracked threads. The Sent folder, and every
+  other folder or label, is never listed.
+- Cached sent messages never reach a brief: the shortlist reads Inbox messages only, as
+  before.
+- Sender exclusions keep governing AI only; metadata from excluded senders is cached like
+  any Inbox message.
+
+### CLI
+
+- `sync` and `brief` print `Tracked threads: C checked, F failed, S messages saved` when any
+  threads were tracked, plus the reason if the check stopped.
+- `actions list` adds `; thread: N new, latest <time> from <sender>` and
+  `; you replied <date>`, in your time zone.
+- `actions seen PUBLIC_ID [--database PATH]` marks them seen ("Marked seen." or "Nothing
+  new in its threads."); an unknown ID exits 3. It is offline.
+
+### Limits
+
+- Sources accepted before migration 0010 whose email had already left local mail aren't
+  tracked.
+- The desktop display, and adding an email to an existing action, come in Part 5.
+- A message that arrives later but carries an earlier received time than your "seen" mark
+  isn't counted as new.
+
+### Live acceptance
+
+1. Accept an action from an email, reply to that email from another account, then run
+   `brief`: `actions list` shows "1 new".
+2. Reply yourself from Gmail: "you replied …" appears, and `actions seen <id>` clears both.
+3. Archive the other account's reply: it's still counted, because tracking isn't
+   Inbox-bound.
+4. Save a Gmail draft in the thread: it isn't counted.
+5. Complete the action: its thread is no longer checked (the tracked count drops).
+6. Search the database: none of the replies' text is stored beyond Gmail's preview
+   snippet.
+
+### For developers
+
+- `ports/threads.py`: `ThreadReader.fetch_thread(thread_id)`. `GmailProvider` implements it
+  with `threads.get`, `format=metadata` and a field mask; `providers/microsoft/` has none.
+- `services/threads.py`: `ThreadService.tracked()` and `check()`, with
+  `MAX_TRACKED_THREADS`, `MAX_THREAD_MESSAGES` and `THREAD_CONCURRENCY`. It commits per
+  thread and never writes to actions.
+- `ApplicationService(threads=...)` runs the check after a complete or partial sync of
+  today's window and adds its counts to `SyncResult`.
+- Migration 0010 adds `messages.is_sent`, the `(account_id, conversation_id)` index, source
+  snapshots (`provider`, `provider_account_id`, `provider_thread_id`) and
+  `actions.thread_seen_until_utc`.
+- `ActionRepository.load()` derives `Action.thread` with a fixed number of queries;
+  `ActionService.mark_thread_seen()` is the only change thread activity allows.

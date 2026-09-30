@@ -76,7 +76,14 @@ analysis follows this command yet.
 - Partial results may include previously cached Inbox records; their membership
   cannot be confirmed until a complete refresh. The CLI labels coverage incomplete.
 - Gmail listing is not a transactional mailbox snapshot. Changes during paging
-  may require another refresh. Exact history-based reconciliation follows in M8.
+  may require another refresh. History-based reconciliation isn't part of M8's pull
+  request ([M8 daily operation](m8-daily-operation.md)).
+- After today's sync, the threads of open actions are read with `threads.get`, using
+  `format=metadata` with the same headers and a field mask that excludes bodies and
+  attachment data. Only messages after the action's email are cached, the newest 20 per
+  thread and at most 25 threads, skipping drafts, trash and spam; messages sent from the
+  account are marked sent. No folder or label is listed. See
+  [ADR 0015](adr/0015-thread-continuity.md).
 
 Metadata format does not reliably reveal file attachments, so M2 does not award
 the attachment ranking bonus. Gmail's IMPORTANT label maps to high importance;
