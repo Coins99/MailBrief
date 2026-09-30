@@ -16,7 +16,7 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None | Done |
 | 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7, ADR 0016 | Done |
 | 7. Follow-up proposals in the desktop; earlier tracked replies offered in review | Reviewing and applying proposals; up to 3 tracked replies outside today's Inbox join the review | None | Done |
-| 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, ADR 0017 | Planned |
+| 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, [ADR 0017](adr/0017-automatic-runs.md) | In progress |
 | 9. Closeout | Acceptance, documentation and cleanup | None expected | Planned |
 
 The optional Gmail history cursor for incremental Inbox reconciliation is not part of this
