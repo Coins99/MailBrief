@@ -80,6 +80,7 @@ def map_metadata(data: dict[str, object], account: AccountIdentity) -> Normalize
             received_at_utc=received,
             is_read="UNREAD" not in labels,
             is_in_inbox="INBOX" in labels,
+            is_sent="SENT" in labels,
             importance=MessageImportance.HIGH
             if "IMPORTANT" in labels
             else MessageImportance.NORMAL,

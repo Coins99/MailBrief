@@ -1,4 +1,5 @@
-"""Gmail Inbox pagination, bounded metadata retrieval and shortlisted body reading."""
+"""Gmail Inbox pagination, bounded metadata retrieval, thread metadata and shortlisted body
+reading."""
 
 import asyncio
 import math
@@ -18,6 +19,9 @@ from mailbrief.providers.gmail.body import extract_body
 from mailbrief.providers.gmail.client import GmailClient, message_id
 from mailbrief.providers.gmail.errors import response_error
 from mailbrief.providers.gmail.mapper import map_metadata
+
+# A tracked thread never counts drafts, trashed or spam messages (ADR 0015).
+_IGNORED_LABELS = frozenset({"DRAFT", "TRASH", "SPAM"})
 
 
 class GmailSession(Protocol):
@@ -63,6 +67,41 @@ class GmailProvider:
                 return await self._client.part_data(identifier, attachment)
 
             return await extract_body(raw, identifier, fetch_part)
+
+    async def fetch_thread(self, provider_thread_id: str) -> tuple[NormalizedMessage, ...]:
+        """A thread's message metadata, oldest first; never bodies or attachments.
+
+        Drafts, trash and spam are skipped, as are items from another thread and items that
+        can't be mapped: one bad message never fails the thread. No Inbox or date filtering
+        happens here. A thread that no longer exists raises MessageUnavailableError.
+        """
+        if self._account is None:
+            raise AuthenticationRequiredError("Connect Gmail before reading threads.")
+        identifier = message_id(provider_thread_id)
+        account = self._account
+        async with self._slots:
+            raw = await self._client.thread(identifier)
+        if raw is None:
+            raise MessageUnavailableError("The Gmail thread is no longer available.")
+        items = raw.get("messages", [])
+        if not isinstance(items, list):
+            raise response_error("Gmail returned an invalid thread.")
+        messages: list[NormalizedMessage] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("threadId") != identifier:
+                continue
+            labels = item.get("labelIds", [])
+            if isinstance(labels, list) and _IGNORED_LABELS.intersection(
+                label for label in labels if isinstance(label, str)
+            ):
+                continue
+            try:
+                messages.append(map_metadata(item, account))
+            except ProviderResponseError:
+                continue
+        return tuple(
+            sorted(messages, key=lambda item: (item.received_at_utc, item.provider_message_id))
+        )
 
     async def iter_message_pages(
         self,

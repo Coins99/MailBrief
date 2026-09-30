@@ -20,6 +20,8 @@ from mailbrief.ports.errors import (
 from mailbrief.providers.gmail.errors import permission_guidance, response_error
 
 MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+THREADS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/threads"
+METADATA_HEADERS = ("From", "To", "Subject", "Message-ID")
 MAX_RESPONSE_BYTES = 2_000_000
 
 
@@ -93,10 +95,25 @@ class GmailClient:
                 [
                     ("format", "metadata"),
                     ("fields", "id,threadId,labelIds,internalDate,snippet,payload/headers"),
-                    *(
-                        ("metadataHeaders", name)
-                        for name in ("From", "To", "Subject", "Message-ID")
+                    *(("metadataHeaders", name) for name in METADATA_HEADERS),
+                ]
+            ),
+            missing_ok=True,
+        )
+
+    async def thread(self, identifier: str) -> dict[str, object] | None:
+        """One thread's message metadata: the same headers, labels, time and snippet as
+        metadata(), never bodies or attachments. None when the thread is gone."""
+        return await self._get(
+            THREADS_URL + "/" + message_id(identifier),
+            httpx.QueryParams(
+                [
+                    ("format", "metadata"),
+                    (
+                        "fields",
+                        "id,messages(id,threadId,labelIds,internalDate,snippet,payload/headers)",
                     ),
+                    *(("metadataHeaders", name) for name in METADATA_HEADERS),
                 ]
             ),
             missing_ok=True,
