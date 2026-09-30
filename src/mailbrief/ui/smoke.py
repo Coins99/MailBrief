@@ -13,11 +13,15 @@ from PySide6.QtCore import QLibraryInfo
 from PySide6.QtWidgets import QApplication
 
 from mailbrief.domain.messages import AccountIdentity, EmailContact, NormalizedMessage, ProviderKind
+from mailbrief.domain.preferences import PreferencesEdit
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, MessageRepository
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
+from mailbrief.ui.preferences_view import region_zones
 from mailbrief.ui.runtime import DesktopRuntime
+
+SMOKE_ZONE = "America/New_York"
 
 
 async def seed_metadata(path: Path) -> None:
@@ -54,7 +58,8 @@ async def seed_metadata(path: Path) -> None:
 
 
 async def check_package(directory: Path) -> None:
-    """Exercise two launches, settings, bundled migrations, Qt, TLS and timezone data."""
+    """Exercise two launches, settings and preferences, bundled migrations, Qt, TLS and
+    time zone data."""
     # Class priority checks dependencies without constructing a vault or reading secrets.
     backend = "Windows" if sys.platform == "win32" else "macOS"
     module = importlib.import_module(f"keyring.backends.{backend}")
@@ -69,6 +74,8 @@ async def check_package(directory: Path) -> None:
     async with httpx.AsyncClient(trust_env=False):
         pass
     ZoneInfo("America/Toronto")
+    if SMOKE_ZONE not in region_zones():
+        raise RuntimeError("Time zone list unavailable.")
     for _ in range(2):
         runtime = DesktopRuntime(directory / "smoke.sqlite3")
         try:
@@ -77,6 +84,13 @@ async def check_package(directory: Path) -> None:
             await runtime.save_preferences(DesktopPreferences(groq_model="smoke-test-model"))
             if (await runtime.get_preferences()).groq_model != "smoke-test-model":
                 raise RuntimeError("Settings restoration failed.")
+            owner = await runtime.get_owner_preferences()
+            if owner.revision == 0:
+                owner = await runtime.save_owner_preferences(
+                    PreferencesEdit(time_zone=SMOKE_ZONE), 0
+                )
+            if owner.time_zone != SMOKE_ZONE:
+                raise RuntimeError("Preferences restoration failed.")
             window = MainWindow(runtime)
             window.show()
             QApplication.processEvents()
@@ -84,8 +98,9 @@ async def check_package(directory: Path) -> None:
                 raise RuntimeError("Qt rendering failed.")
             accounts = await runtime.cached_accounts()
             window.cached_dialog.configure(accounts)
+            # The saved zone decides the day, whatever the system zone is.
             page = await runtime.cached_messages(
-                accounts[0].account_id, datetime.now(UTC).astimezone().date()
+                accounts[0].account_id, datetime.now(UTC).astimezone(ZoneInfo(SMOKE_ZONE)).date()
             )
             if len(page.messages) != 1:
                 raise RuntimeError("Offline metadata restoration failed.")

@@ -61,6 +61,9 @@ class DigestView(QTextBrowser):
         self._replies: dict[str, tuple[str, str]] = {}
         # The brief shown: account, local date and when it was generated.
         self._shown: tuple[str, date, datetime] | None = None
+        # The owner's zone, for when the brief was saved; the window sets it. Deadlines
+        # keep the brief's own zone.
+        self.zone: ZoneInfo | None = None
         self.setPlainText("No saved brief yet. Connect Gmail, then sync and review your shortlist.")
 
     def _open_source(self, url: QUrl) -> None:
@@ -92,11 +95,11 @@ class DigestView(QTextBrowser):
         if age >= 1440:
             count, unit = age // 1440, "day"
         age_label = f"{count} {unit}{'' if count == 1 else 's'}"
+        saved = digest.generated_at_utc.astimezone(self.zone).isoformat(timespec="minutes")
         parts = [
             f"<h2>{digest.local_date.isoformat()} · {escape(digest.status.value.title())}</h2>",
             f"<p>{escape(digest.account_id)} · {escape(digest.timezone_name)}<br>"
-            f"Saved {escape(digest.generated_at_utc.astimezone().isoformat(timespec='minutes'))} "
-            f"({age_label} ago at load)</p>",
+            f"Saved {escape(saved)} ({age_label} ago at load)</p>",
         ]
         coverage = digest.coverage
         if coverage is not None:

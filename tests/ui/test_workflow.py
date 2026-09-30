@@ -17,8 +17,10 @@ from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPre
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncResult, SyncStatus
 from mailbrief.domain.messages import RankedMessage
+from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.brief import ConsentGate, ShortlistGate
+from mailbrief.services.preferences import PreferencesConflictError
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
 from tests.factories import make_action, make_digest_item, make_message
@@ -61,6 +63,10 @@ class FakeBackend(FakeDrafts):
         self.selected: tuple[str, ...] | None = None
         self.approved = False
         self.preferences = DesktopPreferences()
+        # The owner's preferences, as the database would hold them.
+        self.owner_preferences = OwnerPreferences.defaults()
+        self.owner_fail: Exception | None = None
+        self.owner_saves: list[tuple[PreferencesEdit, int]] = []
         self.key_value: SecretStr | None = None
         self.revoked = False
         self.sync = SyncResult(
@@ -148,6 +154,29 @@ class FakeBackend(FakeDrafts):
 
     async def save_preferences(self, preferences: DesktopPreferences) -> None:
         self.preferences = preferences
+
+    async def get_owner_preferences(self) -> OwnerPreferences:
+        if self.owner_fail is not None:
+            raise self.owner_fail
+        return self.owner_preferences
+
+    async def save_owner_preferences(
+        self, edit: PreferencesEdit, revision: int
+    ) -> OwnerPreferences:
+        self.owner_saves.append((edit, revision))
+        if revision != self.owner_preferences.revision:
+            raise PreferencesConflictError()
+        self.owner_preferences = OwnerPreferences(
+            **edit.model_dump(), revision=revision + 1, updated_at_utc=datetime.now(UTC)
+        )
+        return self.owner_preferences
+
+    async def reset_owner_preferences(self) -> OwnerPreferences:
+        self.owner_fail = None
+        self.owner_preferences = OwnerPreferences(
+            revision=self.owner_preferences.revision + 1, updated_at_utc=datetime.now(UTC)
+        )
+        return self.owner_preferences
 
     async def save_key(self, key: SecretStr) -> None:
         self.key_value = key

@@ -3,16 +3,25 @@
 import asyncio
 import json
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import SecretStr
+from sqlalchemy import text
 
+from mailbrief.config import Settings
+from mailbrief.domain.drafting import DraftingOptions
 from mailbrief.domain.messages import AccountIdentity, ProviderKind
+from mailbrief.domain.preferences import AI_LIMIT_FIELDS, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.providers.groq.credentials import GroqKeyStore
+from mailbrief.services.preferences import PreferencesConflictError, PreferencesUnavailableError
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, ConsentRepository
 from mailbrief.ui import runtime
@@ -137,4 +146,158 @@ async def test_revoke_only_groq_for_gmail_accounts(tmp_path: Path) -> None:
             assert await consents.get_active(identities[ProviderKind.MICROSOFT], "groq", "test")
     finally:
         await database.dispose()
+        await backend.close()
+
+
+class Recorder:
+    """Stands in for a service or provider factory and records how it was built and used."""
+
+    def __init__(self) -> None:
+        self.built: list[dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> "Recorder":
+        self.built.append({"args": args, **kwargs})
+        return self
+
+    async def generate(self, *args: Any, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return "result"
+
+    async def available_parts(self, public_id: str) -> frozenset[str]:
+        return frozenset()
+
+    async def prepare(self, public_id: str, options: object) -> str:
+        return "plan"
+
+
+def provider_factory(settings_seen: list[Settings]) -> Any:
+    @asynccontextmanager
+    async def factory(settings: Settings, **kwargs: Any) -> AsyncIterator[object]:
+        settings_seen.append(settings)
+        yield object()
+
+    return factory
+
+
+@pytest.fixture
+def ai_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in AI_LIMIT_FIELDS:
+        monkeypatch.delenv(f"MAILBRIEF_{name.upper()}", raising=False)
+    monkeypatch.setenv("MAILBRIEF_AI_TIMEOUT_SECONDS", "30")
+
+
+PLAN: Any = "plan"  # The drafting service is a Recorder, so any plan will do.
+SAVED = PreferencesEdit(
+    time_zone="Asia/Tokyo",
+    shortlist_limit=3,
+    excluded_senders=("@example.org",),
+    ai_batch_size=4,
+    ai_body_character_limit=2_000,
+    ai_timeout_seconds=90,
+)
+
+
+async def test_a_brief_uses_the_owner_s_zone_limit_rules_and_ai_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ai_environment: None
+) -> None:
+    seen: list[Settings] = []
+    monkeypatch.setattr(runtime, "gmail_provider", provider_factory(seen))
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory(seen))
+    brief, bodies, analysis = Recorder(), Recorder(), Recorder()
+    monkeypatch.setattr(runtime, "BriefService", brief)
+    monkeypatch.setattr(runtime, "BodyService", bodies)
+    monkeypatch.setattr(runtime, "AnalysisService", analysis)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        review = AsyncMock()
+
+        result: object = await backend.generate(
+            AsyncMock(), review, asyncio.Event(), lambda _: None
+        )
+
+        assert result == "result"
+        (call,) = brief.calls
+        assert call["tz_key"] == "Asia/Tokyo"
+        assert call["shortlist_limit"] == 3
+        assert call["excluded_senders"] == ("@example.org",)
+        assert call["shortlist_gate"] is review
+        assert bodies.built[0]["limit"] == 2_000  # Saved.
+        assert analysis.built[0]["batch_size"] == 4  # Saved.
+        assert {settings.ai_timeout_seconds for settings in seen} == {30}  # Environment.
+    finally:
+        await backend.close()
+
+
+async def test_drafting_uses_the_owner_s_zone_and_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ai_environment: None
+) -> None:
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
+    drafting = Recorder()
+    monkeypatch.setattr(runtime, "DraftingService", drafting)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+
+        await backend.available_drafting_parts("draft")
+        await backend.prepare_drafting("draft", DraftingOptions())
+        await backend.generate_draft(PLAN, AsyncMock(), asyncio.Event())
+
+        assert len(drafting.built) == 3
+        for built in drafting.built:
+            assert built["zone"] == ZoneInfo("Asia/Tokyo")
+            assert built["excluded_senders"] == ("@example.org",)
+    finally:
+        await backend.close()
+
+
+async def test_unreadable_preferences_stop_everything_that_could_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbidden = AsyncMock(side_effect=AssertionError("no provider may be built"))
+    monkeypatch.setattr(runtime, "gmail_provider", forbidden)
+    monkeypatch.setattr(runtime, "groq_provider", forbidden)
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        database = Database.from_path(path)
+        try:
+            async with database.transaction() as session:
+                await session.execute(
+                    text("UPDATE owner_preferences SET excluded_senders_json = 'not json'")
+                )
+        finally:
+            await database.dispose()
+
+        operations = (
+            backend.generate(AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None),
+            backend.available_drafting_parts("draft"),
+            backend.prepare_drafting("draft", DraftingOptions()),
+            backend.generate_draft(PLAN, AsyncMock(), asyncio.Event()),
+        )
+        for operation in operations:
+            with pytest.raises(PreferencesUnavailableError):
+                await operation
+
+        assert (await backend.reset_owner_preferences()).excluded_senders == ()
+        assert (await backend.get_owner_preferences()).revision == 2
+    finally:
+        await backend.close()
+
+
+async def test_a_stale_save_is_a_conflict(tmp_path: Path) -> None:
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        assert (await backend.get_owner_preferences()).revision == 0
+        await backend.save_owner_preferences(PreferencesEdit(shortlist_limit=5), 0)
+        with pytest.raises(PreferencesConflictError):
+            await backend.save_owner_preferences(PreferencesEdit(shortlist_limit=6), 0)
+        assert (await backend.get_owner_preferences()).shortlist_limit == 5
+    finally:
         await backend.close()

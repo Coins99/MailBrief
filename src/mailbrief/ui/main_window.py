@@ -45,6 +45,7 @@ from mailbrief.domain.drafts import (
     still_to_fill,
 )
 from mailbrief.domain.messages import RankedMessage
+from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
@@ -63,6 +64,11 @@ from mailbrief.services.drafting import (
 )
 from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftConflictError, DraftNotFoundError, SourceNotFoundError
+from mailbrief.services.preferences import (
+    PreferencesConflictError,
+    PreferencesUnavailableError,
+    owner_zone,
+)
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.ui.action_editor import ActionEditor
 from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPanel
@@ -75,6 +81,7 @@ from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.preferences import DesktopPreferences
+from mailbrief.ui.preferences_view import region_zones
 from mailbrief.ui.settings_view import SettingsDialog
 
 
@@ -85,6 +92,11 @@ class DesktopBackend(Protocol):
     ) -> CachedMailPage: ...
     async def get_preferences(self) -> DesktopPreferences: ...
     async def save_preferences(self, preferences: DesktopPreferences) -> None: ...
+    async def get_owner_preferences(self) -> OwnerPreferences: ...
+    async def save_owner_preferences(
+        self, edit: PreferencesEdit, revision: int
+    ) -> OwnerPreferences: ...
+    async def reset_owner_preferences(self) -> OwnerPreferences: ...
     async def save_key(self, key: SecretStr) -> None: ...
     async def remove_key(self) -> None: ...
     async def revoke_consent(self) -> int: ...
@@ -311,6 +323,11 @@ class MainWindow(QMainWindow):
         self.settings_dialog.revoke_requested.connect(
             lambda: self.start(self._revoke_consent, cancellable=False)
         )
+        preferences_panel = self.settings_dialog.preferences_panel
+        preferences_panel.save_requested.connect(self._request_save_owner_preferences)
+        preferences_panel.reset_requested.connect(
+            lambda: self.start(self._reset_owner_preferences, cancellable=False)
+        )
         self.setWindowTitle("MailBrief")
         self.resize(980, 760)
         content = QWidget()
@@ -378,6 +395,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.consent_panel)
         self.consent_panel.hide()
         self.digest = DigestView()
+        self.digest.zone = self.zone
+        self.cached_dialog.zone = self.zone
         self.digest.suggestion_requested.connect(self._request_suggestion)
         self.digest.setMinimumHeight(180)
         layout.addWidget(self.digest, 1)
@@ -1049,8 +1068,58 @@ class MainWindow(QMainWindow):
             # A corrupt settings file must remain repairable from the editor.
             preferences = DesktopPreferences()
         self.settings_dialog.set_preferences(preferences)
-        self.status.setText("Edit connection and AI settings.")
+        panel = self.settings_dialog.preferences_panel
+        panel.set_zones(str(resolve_timezone(None)), await asyncio.to_thread(region_zones))
+        self.status.setText("Edit connection and AI settings, and your preferences.")
+        try:
+            panel.set_preferences(await self.backend.get_owner_preferences())
+        except PreferencesUnavailableError as exc:
+            # Unreadable preferences stay repairable: the panel offers a reset.
+            log_failure(exc)
+            panel.set_unavailable()
+            self.status.setText(str(exc))
         self.settings_dialog.open()
+
+    def _apply_owner_preferences(self, preferences: OwnerPreferences) -> None:
+        """The owner's zone for every local day and time shown, and the drafting defaults."""
+        self.zone = owner_zone(preferences)
+        self.digest.zone = self.cached_dialog.zone = self.zone
+        self.draft_editor.ai_panel.set_defaults(preferences.draft_tone, preferences.draft_length)
+
+    async def _load_owner_preferences(self) -> None:
+        """Views only display local data, so unreadable preferences fall back to the system
+        zone here; a brief or AI drafting still refuses to run until they are reset."""
+        try:
+            preferences = await self.backend.get_owner_preferences()
+        except Exception as exc:
+            log_failure(exc)
+            self._apply_owner_preferences(OwnerPreferences.defaults())
+            if isinstance(exc, PreferencesUnavailableError):
+                self.status.setText(str(exc))
+            return
+        self._apply_owner_preferences(preferences)
+
+    def _request_save_owner_preferences(self, edit: PreferencesEdit, revision: int) -> None:
+        self.start(lambda: self._save_owner_preferences(edit, revision), cancellable=False)
+
+    async def _save_owner_preferences(self, edit: PreferencesEdit, revision: int) -> None:
+        try:
+            saved = await self.backend.save_owner_preferences(edit, revision)
+        except PreferencesConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static; _run shows it in the dialog too.
+            return
+        await self._owner_preferences_changed(saved, "Preferences saved.")
+
+    async def _reset_owner_preferences(self) -> None:
+        saved = await self.backend.reset_owner_preferences()
+        await self._owner_preferences_changed(saved, "Preferences reset to the defaults.")
+
+    async def _owner_preferences_changed(self, saved: OwnerPreferences, message: str) -> None:
+        self._apply_owner_preferences(saved)
+        self.settings_dialog.preferences_panel.set_preferences(saved)
+        self.status.setText(message)
+        await self._refresh_views()
 
     def _request_save_preferences(self, preferences: DesktopPreferences) -> None:
         self.start(lambda: self._save_preferences(preferences), cancellable=False)
@@ -1107,13 +1176,14 @@ class MainWindow(QMainWindow):
             self.digest.setPlainText("Saved brief unavailable until local storage can be opened.")
             return
         self._ready = True
+        self.status.setText("Ready. Sync to review today's messages.")
+        await self._load_owner_preferences()
         if saved is not None:
             self.digest.show_digest(saved)
         else:
             self.digest.setPlainText(
                 "No saved brief yet. Connect Gmail, then sync and review your shortlist."
             )
-        self.status.setText("Ready. Sync to review today's messages.")
         await self._refresh_actions()
         await self._refresh_drafts()
         await self._refresh_ai_status()

@@ -14,6 +14,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import DeadlinePrecision
+from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.services.actions import ActionConflictError
 from mailbrief.ui.digest_view import ACCEPT, DISMISS
 from mailbrief.ui.main_window import MainWindow
@@ -34,6 +35,7 @@ DONE = make_action(
 def backend() -> FakeBackend:
     result = FakeBackend()
     result.actions = {ActionFilter.OPEN: (OPEN,), ActionFilter.COMPLETED: (DONE,)}
+    result.owner_preferences = OwnerPreferences(revision=1, time_zone="UTC")
     return result
 
 
@@ -272,7 +274,7 @@ async def test_the_editor_shows_deadlines_in_the_window_s_zone(
             ),
         )
     }
-    window.zone = ZoneInfo("America/Toronto")
+    backend.owner_preferences = OwnerPreferences(revision=1, time_zone="America/Toronto")
     await window.initialize()
 
     window.actions_panel.edit_button.click()
@@ -281,9 +283,9 @@ async def test_the_editor_shows_deadlines_in_the_window_s_zone(
 
 
 async def test_the_editor_offers_the_owner_s_local_today_without_a_target(
-    window: MainWindow,
+    window: MainWindow, backend: FakeBackend
 ) -> None:
-    window.zone = ZoneInfo("America/Toronto")
+    backend.owner_preferences = OwnerPreferences(revision=1, time_zone="America/Toronto")
     window.now = lambda: datetime(2026, 9, 28, 2, tzinfo=UTC)  # Still the 27th in Toronto.
     await window.initialize()
 

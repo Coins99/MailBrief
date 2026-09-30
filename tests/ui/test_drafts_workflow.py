@@ -15,6 +15,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter, ActionSource
 from mailbrief.domain.drafts import DraftEdit, DraftKind, DraftVersionOrigin
+from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.ui.draft_editor import CONFLICT, NOT_SAVED
 from mailbrief.ui.drafts_view import OPEN
 from mailbrief.ui.main_window import DraftWrites, MainWindow
@@ -42,6 +43,7 @@ def backend() -> FakeBackend:
     result = FakeBackend()
     result.actions = {ActionFilter.OPEN: (ACTION, UNSOURCED)}
     result.action_titles = {ACTION.public_id: ACTION.title, UNSOURCED.public_id: "Call Sam"}
+    result.owner_preferences = OwnerPreferences(revision=1, time_zone="UTC")
     return result
 
 

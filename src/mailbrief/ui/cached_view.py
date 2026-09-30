@@ -30,6 +30,8 @@ class CachedMailDialog(QDialog):
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.resize(850, 620)
         self._page: CachedMailPage | None = None
+        # The owner's zone, for the last sync time; the window sets it.
+        self.zone: ZoneInfo | None = None
         layout = QVBoxLayout(self)
         filters = QHBoxLayout()
         self.accounts = QComboBox()
@@ -115,7 +117,9 @@ class CachedMailDialog(QDialog):
     def show_page(self, page: CachedMailPage) -> None:
         self._page = page
         last = page.account.last_sync_at_utc
-        stamp = last.astimezone().isoformat(timespec="minutes") if last else "none recorded"
+        stamp = (
+            last.astimezone(self.zone).isoformat(timespec="minutes") if last else "none recorded"
+        )
         self.status.setText(
             f"{page.local_date} ({page.timezone_name}) · {len(page.messages)} saved messages "
             f"on this page. Account last complete sync: {stamp}. "

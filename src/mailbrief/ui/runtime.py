@@ -23,6 +23,7 @@ from mailbrief.domain.drafts import (
     DraftVersionInfo,
 )
 from mailbrief.domain.messages import ProviderKind
+from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.providers.gmail.cache import GmailCredentialStore
 from mailbrief.providers.gmail.factory import gmail_provider
 from mailbrief.providers.gmail.oauth import DesktopClient
@@ -43,6 +44,12 @@ from mailbrief.services.drafting import (
     DraftingService,
 )
 from mailbrief.services.drafts import DraftService
+from mailbrief.services.preferences import (
+    PreferencesService,
+    PreferencesUnavailableError,
+    effective_settings,
+    owner_zone,
+)
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -72,7 +79,12 @@ class _GmailBodies:
 
 
 class DesktopRuntime:
-    """Use the same settings, vault, migrations and services as the diagnostic CLI."""
+    """Use the same settings, vault, migrations and services as the diagnostic CLI.
+
+    The owner's preferences are read for every operation that could send data, and
+    unreadable preferences stop it (PreferencesUnavailableError) rather than fall back to
+    defaults that would drop the owner's sender exclusions.
+    """
 
     def __init__(self, database_path: Path) -> None:
         self._path = database_path
@@ -149,13 +161,13 @@ class DesktopRuntime:
         cancel: asyncio.Event,
         progress: Callable[[SyncProgress], None],
     ) -> BriefRunResult:
-        if self._database is None:
-            raise RuntimeError("Desktop storage is not initialized.")
-        settings = (await self.get_preferences()).settings()
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
+        zone = owner_zone(preferences)
         async with (
             gmail_provider(settings, silent_only=True) as provider,
             groq_provider(settings) as ai,
-            self._database.session() as session,
+            self._storage().session() as session,
         ):
             service = BriefService(
                 session=session,
@@ -170,10 +182,37 @@ class DesktopRuntime:
                 digests=DigestService(session),
                 consent_gate=gate,
             )
-            return await service.generate(cancel=cancel, progress=progress, shortlist_gate=review)
+            return await service.generate(
+                tz_key=zone.key,
+                cancel=cancel,
+                progress=progress,
+                shortlist_gate=review,
+                shortlist_limit=preferences.shortlist_limit,
+                excluded_senders=preferences.excluded_senders,
+            )
 
     async def get_preferences(self) -> DesktopPreferences:
         return await asyncio.to_thread(self._preferences.load)
+
+    async def _settings(self, preferences: OwnerPreferences) -> Settings:
+        """Device settings with the saved AI limits where no MAILBRIEF_* variable is set."""
+        return effective_settings((await self.get_preferences()).settings(), preferences)
+
+    # The owner's preferences (ADR 0014) live in the database, shared with the CLI.
+
+    async def get_owner_preferences(self) -> OwnerPreferences:
+        async with self._storage().session() as session:
+            return await PreferencesService(session).get()
+
+    async def save_owner_preferences(
+        self, edit: PreferencesEdit, revision: int
+    ) -> OwnerPreferences:
+        async with self._storage().session() as session:
+            return await PreferencesService(session).save(edit, revision)
+
+    async def reset_owner_preferences(self) -> OwnerPreferences:
+        async with self._storage().session() as session:
+            return await PreferencesService(session).reset()
 
     async def cached_accounts(self) -> tuple[CachedAccount, ...]:
         if self._database is None:
@@ -191,11 +230,12 @@ class DesktopRuntime:
             )
 
     async def cached_messages(self, account_id: int, day: date, offset: int = 0) -> CachedMailPage:
-        if self._database is None:
-            raise RuntimeError("Desktop storage is not initialized.")
-        zone = resolve_timezone(None)
+        try:
+            zone = owner_zone(await self.get_owner_preferences())
+        except PreferencesUnavailableError:
+            zone = resolve_timezone(None)  # Browsing only displays local data.
         window = local_day_window(datetime.combine(day, time(12), tzinfo=zone), zone)
-        async with self._database.session() as session:
+        async with self._storage().session() as session:
             account = await AccountRepository(session).get_by_id(account_id)
             if account is None or account.provider != ProviderKind.GMAIL.value:
                 raise ValueError("Choose an existing cached Gmail account.")
@@ -373,34 +413,44 @@ class DesktopRuntime:
     # opened for each call and closed afterwards.
 
     async def available_drafting_parts(self, public_id: str) -> frozenset[DraftContextPart]:
-        settings = (await self.get_preferences()).settings()
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
         async with groq_provider(settings) as ai, self._storage().session() as session:
             service = DraftingService(
                 session,
                 ai,
                 BodyService(_GmailBodies(settings), limit=settings.ai_body_character_limit),
-                zone=resolve_timezone(None),
+                zone=owner_zone(preferences),
+                excluded_senders=preferences.excluded_senders,
             )
             return await service.available_parts(public_id)
 
     async def prepare_drafting(self, public_id: str, options: DraftingOptions) -> DraftingPlan:
         """Build what would be sent; choosing the email downloads its body now, in memory."""
-        settings = (await self.get_preferences()).settings()
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
         async with groq_provider(settings) as ai, self._storage().session() as session:
             service = DraftingService(
                 session,
                 ai,
                 BodyService(_GmailBodies(settings), limit=settings.ai_body_character_limit),
-                zone=resolve_timezone(None),
+                zone=owner_zone(preferences),
+                excluded_senders=preferences.excluded_senders,
             )
             return await service.prepare(public_id, options)
 
     async def generate_draft(
         self, plan: DraftingPlan, gate: DraftingGate, cancel: asyncio.Event
     ) -> DraftingOutcome:
-        settings = (await self.get_preferences()).settings()
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
         async with groq_provider(settings) as ai, self._storage().session() as session:
-            service = DraftingService(session, ai, zone=resolve_timezone(None))
+            service = DraftingService(
+                session,
+                ai,
+                zone=owner_zone(preferences),
+                excluded_senders=preferences.excluded_senders,
+            )
             return await service.generate(plan, gate, cancel)
 
     async def close(self) -> None:
