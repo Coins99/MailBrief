@@ -86,7 +86,11 @@ class Mailbox:
     def reply(
         self, identifier: str, to: str, *, received: datetime, labels: tuple[str, ...]
     ) -> None:
-        """A later message in ``to``'s thread, served only through threads.get."""
+        """A later message in ``to``'s thread, served through threads.get and, for a body
+        download, like any message; never listed in the Inbox."""
+        self._router.get(f"{MESSAGES_URL}/{identifier}", params__contains={"format": "full"}).mock(
+            side_effect=lambda request: self._full_message(identifier)
+        )
         item = metadata(identifier, received=received)
         item["threadId"] = f"thread_{to}"
         item["labelIds"] = list(labels)

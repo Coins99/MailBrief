@@ -79,7 +79,7 @@ from mailbrief.services.preferences import (
     PreferencesUnavailableError,
     owner_zone,
 )
-from mailbrief.services.ranking import MAX_SHORTLIST_SIZE, reason_text
+from mailbrief.services.ranking import MAX_SHORTLIST_SIZE, OUTSIDE_REPLY_TEXT, reason_text
 from mailbrief.ui.action_editor import ActionEditor
 from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, SEEN, ActionsPanel
 from mailbrief.ui.cached_view import CachedMailDialog
@@ -1448,9 +1448,13 @@ class MainWindow(QMainWindow):
         selected_ids: tuple[str, ...],
         *,
         blocked_ids: frozenset[str],
+        outside_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None:
-        """Blocked messages are listed but can't be checked; at most ``limit`` can be."""
+        """Blocked messages are listed but can't be checked; at most ``limit`` can be.
+
+        Replies in tracked threads that aren't in today's Inbox (``outside_ids``) are labelled
+        as such and are otherwise like any other message."""
         if not candidates:
             return ()
         self._review = asyncio.get_running_loop().create_future()
@@ -1469,6 +1473,8 @@ class MainWindow(QMainWindow):
                 item.setToolTip(_EXCLUDED_TIP)
                 self.shortlist.addItem(item)
                 continue
+            if message.provider_message_id in outside_ids:
+                label = f"{label} — {OUTSIDE_REPLY_TEXT}"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
             item.setToolTip(

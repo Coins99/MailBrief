@@ -20,6 +20,8 @@ MIN_SHORTLIST_SIZE: int = 3
 MAX_SHORTLIST_SIZE: int = SHORTLIST_LIMIT_MAX
 _UNTRACKED: Final[Mapping[str, datetime]] = MappingProxyType({})
 _REASON_TEXT: Final = {RankReason.TRACKED_THREAD_REPLY: "reply in a thread you track"}
+# How the review and ``sync --show-metadata`` label a reply outside today's Inbox.
+OUTSIDE_REPLY_TEXT: Final = "reply in a tracked thread, not in today's Inbox"
 
 
 def reason_text(reason: RankReason) -> str:
@@ -31,7 +33,8 @@ class ShortlistGate(Protocol):
     """Review all ranked metadata, with the automatic selection prechecked.
 
     ``blocked_ids`` are messages from excluded senders: shown, but never selectable.
-    At most ``limit`` messages may be selected.
+    ``outside_ids`` are replies in tracked threads that aren't in today's Inbox: selectable
+    like any other, and labelled so. At most ``limit`` messages may be selected.
     """
 
     async def review(
@@ -40,6 +43,7 @@ class ShortlistGate(Protocol):
         selected_ids: tuple[str, ...],
         *,
         blocked_ids: frozenset[str],
+        outside_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None: ...
 

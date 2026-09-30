@@ -6,20 +6,26 @@ the action's latest source in that thread are cached, the newest MAX_THREAD_MESS
 thread, as ordinary metadata. Nothing here downloads a body, lists a folder or label, or
 changes an action: thread activity is derived from the cached messages. Logs carry counts
 only.
+
+Replies the day's Inbox sync can't see (archived, or received on an earlier day) are found
+in that cache by outside_replies(), at most MAX_OUTSIDE_REPLIES a run (ADR 0016).
 """
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import select
+from sqlalchemy import and_, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.actions import ActionStatus
-from mailbrief.domain.analysis import DeadlinePrecision, deadline_due_at
-from mailbrief.domain.messages import NormalizedMessage
+from mailbrief.domain.analysis import ANALYSIS_SCHEMA_VERSION, DeadlinePrecision, deadline_due_at
+from mailbrief.domain.common import normalize_utc
+from mailbrief.domain.messages import NormalizedMessage, ProviderKind
+from mailbrief.domain.preferences import sender_excluded
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
     MessageUnavailableError,
@@ -29,14 +35,22 @@ from mailbrief.ports.errors import (
 )
 from mailbrief.ports.threads import ThreadReader
 from mailbrief.services.actions import urgency
+from mailbrief.services.calendar import DayWindow
 from mailbrief.services.sync import sanitize_error_code
 from mailbrief.storage.repositories import MessageRepository
-from mailbrief.storage.tables import AccountTable, ActionSourceTable, ActionTable
+from mailbrief.storage.tables import (
+    AccountTable,
+    ActionSourceTable,
+    ActionTable,
+    AnalysisTable,
+    MessageTable,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_TRACKED_THREADS: Final = 25
 MAX_THREAD_MESSAGES: Final = 20
+MAX_OUTSIDE_REPLIES: Final = 3
 THREAD_CONCURRENCY: Final = 3
 # These stop the whole check: every later request would fail the same way.
 _STOPPING: Final = (AuthenticationRequiredError, ProviderPermissionError, ProviderRateLimitError)
@@ -142,6 +156,85 @@ class ThreadService:
             TrackedThread(thread_id=thread_id, since_utc=min(baselines[thread_id].values()))
             for thread_id in (threads if limit is None else threads[:limit])
         ]
+
+    async def outside_replies(
+        self,
+        account: AccountTable,
+        window: DayWindow,
+        *,
+        limit: int = MAX_OUTSIDE_REPLIES,
+        excluded_senders: Sequence[str] = (),
+        tracked: Sequence[TrackedThread] | None = None,
+    ) -> list[NormalizedMessage]:
+        """Cached replies in tracked threads that ``window``'s Inbox sync can't see, newest
+        first, at most ``limit``.
+
+        A reply qualifies when it was received after its thread's baseline (TrackedThread),
+        isn't the owner's own (is_own_message), isn't from a sender in ``excluded_senders``,
+        hasn't been analyzed at the current ANALYSIS_SCHEMA_VERSION, and isn't both inside
+        ``window`` and in the Inbox, which that day's sync already covers. Every tracked
+        thread counts, not only the MAX_TRACKED_THREADS the check reads. Two queries however
+        many threads, actions or messages there are (one, when ``tracked`` is given); nothing
+        is written. A caller that has
+        already listed every tracked thread (``tracked(account, limit=None)``) passes it in
+        to save that query.
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        every = await self.tracked(account, limit=None) if tracked is None else tracked
+        since = {thread.thread_id: normalize_utc(thread.since_utc) for thread in every}
+        if not since:
+            return []
+        tracked_threads = (
+            select(ActionSourceTable.provider_thread_id)
+            .join(ActionTable, ActionSourceTable.action_id == ActionTable.id)
+            .where(
+                ActionTable.deleted_at_utc.is_(None),
+                ActionTable.status == ActionStatus.OPEN.value,
+                ActionSourceTable.provider == account.provider,
+                ActionSourceTable.provider_account_id == account.provider_account_id,
+                ActionSourceTable.provider_thread_id.is_not(None),
+            )
+        )
+        analyzed = (
+            exists()
+            .where(
+                AnalysisTable.message_id == MessageTable.id,
+                AnalysisTable.schema_version == ANALYSIS_SCHEMA_VERSION,
+            )
+            .correlate(MessageTable)
+        )
+        covered = and_(
+            MessageTable.is_in_inbox.is_(True),
+            MessageTable.received_at_utc >= normalize_utc(window.start_utc),
+            MessageTable.received_at_utc < normalize_utc(window.end_utc),
+        )
+        result = await self._session.scalars(
+            select(MessageTable)
+            .where(
+                MessageTable.account_id == account.id,
+                MessageTable.conversation_id.in_(tracked_threads),
+                MessageTable.received_at_utc > min(since.values()),
+                ~analyzed,
+                ~covered,
+            )
+            .execution_options(populate_existing=True)
+        )
+        mine = own_addresses(account)
+        provider = ProviderKind(account.provider)
+        found: list[NormalizedMessage] = []
+        for row in result:
+            baseline = since.get(row.conversation_id or "")
+            if baseline is None or normalize_utc(row.received_at_utc) <= baseline:
+                continue
+            message = MessageRepository.to_domain(row, account.provider_account_id, provider)
+            if is_own_message(message, mine) or sender_excluded(
+                message.sender.address, excluded_senders
+            ):
+                continue
+            found.append(message)
+        found.sort(key=lambda item: (-item.received_at_utc.timestamp(), item.provider_message_id))
+        return found[:limit]
 
     async def check(
         self, account: AccountTable, *, cancel: asyncio.Event | None = None

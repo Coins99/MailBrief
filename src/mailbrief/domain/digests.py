@@ -190,6 +190,8 @@ class SyncResult(DomainModel):
     threads_failed: int = Field(default=0, ge=0)
     thread_messages: int = Field(default=0, ge=0)
     threads_stopped_code: str | None = Field(default=None, max_length=128)
+    # Selected messages that are replies in tracked threads outside today's Inbox (ADR 0016).
+    outside_ids: frozenset[str] = frozenset()
 
     @field_validator("range_start_utc", "range_end_utc")
     @classmethod

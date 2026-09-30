@@ -35,9 +35,14 @@ async def window(qtbot: QtBot) -> AsyncIterator[MainWindow]:
 
 
 async def start_review(
-    window: MainWindow, blocked: frozenset[str], limit: int
+    window: MainWindow,
+    blocked: frozenset[str],
+    limit: int,
+    outside: frozenset[str] = frozenset(),
 ) -> "asyncio.Task[tuple[str, ...] | None]":
-    task = asyncio.create_task(window.review(CANDIDATES, ("m1",), blocked_ids=blocked, limit=limit))
+    task = asyncio.create_task(
+        window.review(CANDIDATES, ("m1",), blocked_ids=blocked, outside_ids=outside, limit=limit)
+    )
     await asyncio.sleep(0)
     return task
 

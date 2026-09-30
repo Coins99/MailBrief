@@ -126,9 +126,10 @@ def test_brief_reports_the_thread_check(
     path = tmp_path / "brief.sqlite3"
     assert sync(path) == 0
     track_a1(path)
-    # Archived at once: it is still tracked, but never joins today's shortlist.
+    # Archived at once, it isn't in today's Inbox, but it is a reply in a tracked thread, so
+    # it joins the shortlist as an outside reply (ADR 0016).
     mailbox.reply("r1", "a1", received=MIDDAY + timedelta(hours=1), labels=())
-    # The owner's reply today is cached as sent and never reaches the brief either.
+    # The owner's reply today is cached as sent and never reaches the brief.
     mailbox.reply("mine", "a1", received=MIDDAY + timedelta(hours=2), labels=("SENT",))
     groq_answers(respx_mock)
     replies(monkeypatch, "yes")
@@ -138,8 +139,38 @@ def test_brief_reports_the_thread_check(
 
     output = capsys.readouterr().out
     assert "Tracked threads: 1 checked, 0 failed, 2 messages saved" in output
-    assert "Coverage: shortlisted 1," in output  # Only a1: both replies stay out.
+    assert "Coverage: shortlisted 2," in output  # a1 and the archived reply r1, not "mine".
     assert mailbox.thread_route.call_count == 1
+
+
+def sync_with_metadata(path: Path) -> int:
+    return gmail.main(
+        ["sync", "--silent-only", "--database", str(path), "--timezone", "UTC", "--show-metadata"]
+    )
+
+
+def test_sync_show_metadata_labels_replies_outside_the_inbox(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "outside.sqlite3"
+    assert sync(path) == 0
+    track_a1(path)
+    # Archived at once, so today's Inbox never lists it; the owner's own reply is never shown.
+    mailbox.reply("r1", "a1", received=MIDDAY + timedelta(hours=1), labels=())
+    mailbox.reply("mine", "a1", received=MIDDAY + timedelta(hours=2), labels=("SENT",))
+    capsys.readouterr()
+
+    assert sync_with_metadata(path) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    (reply,) = (index for index, line in enumerate(lines) if line.startswith("r1 [selected]"))
+    assert lines[reply + 1] == "  reply in a tracked thread, not in today's Inbox"
+    assert not any("mine" in line for line in lines)
+    # Today's own Inbox message carries no such label.
+    (inbox,) = (index for index, line in enumerate(lines) if line.startswith("a1 ["))
+    assert "not in today's Inbox" not in " ".join(lines[inbox : inbox + 3])
 
 
 def test_a_rate_limited_check_is_reported_and_the_sync_still_succeeds(

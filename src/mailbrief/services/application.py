@@ -146,6 +146,13 @@ class ApplicationService:
         After a complete or partial sync of today's window, the threads of open actions are
         checked when a thread service is composed; past days never check threads.
 
+        Today's run with a thread service also brings in up to MAX_OUTSIDE_REPLIES cached
+        replies in tracked threads that today's Inbox sync can't see (ThreadService.
+        outside_replies, ADR 0016). They are ranked with the tracked-thread bonus, never come
+        from a sender in ``excluded_senders``, and compete for the selection, the review and
+        the limit like any other message; the result's ``outside_ids`` names the selected
+        ones.
+
         Returns the terminal SyncResult and deterministic shortlisted RankedMessage items.
         """
         now = normalize_utc(now_utc) if now_utc is not None else datetime.now(UTC)
@@ -190,19 +197,35 @@ class ApplicationService:
             window.end_utc,
             inbox_only=True,
         )
-
-        if not rows:
-            review_shortlist(
-                [], include_ids=include_ids, exclude_ids=exclude_ids, limit=shortlist_limit
-            )
-            return sync_result, []
-
         provider_kind = ProviderKind(account.provider)
-
         domain_messages = [
             MessageRepository.to_domain(row, account.provider_account_id, provider_kind)
             for row in rows
         ]
+        # Every tracked thread, for ranking and for the replies the Inbox sync can't see.
+        tracked_threads = (
+            await self._threads.tracked(account, limit=None)
+            if self._threads is not None and (rows or today)
+            else []
+        )
+        # Those replies join only today's run, and never come from blocked senders.
+        outside = (
+            [
+                message
+                for message in await self._threads.outside_replies(
+                    account, window, excluded_senders=excluded_senders, tracked=tracked_threads
+                )
+                if not sender_excluded(message.sender.address, excluded_senders)
+            ]
+            if today and self._threads is not None
+            else []
+        )
+
+        if not rows and not outside:
+            review_shortlist(
+                [], include_ids=include_ids, exclude_ids=exclude_ids, limit=shortlist_limit
+            )
+            return sync_result, []
 
         if progress:
             try:
@@ -223,34 +246,35 @@ class ApplicationService:
             if getattr(account, "account_addresses", None)
             else (account.email_address,)
         )  # noqa: E501
-        tracked = (
-            {}
-            if self._threads is None
-            else {
-                thread.thread_id: thread.since_utc
-                for thread in await self._threads.tracked(account, limit=None)
-            }
-        )
+        tracked = {thread.thread_id: thread.since_utc for thread in tracked_threads}
         ranked = rank_messages(
-            domain_messages,
+            [*domain_messages, *outside],
             user_email=user_addresses,  # type: ignore[arg-type]
             now_utc=now,
             tracked=tracked,
         )
 
         # 4. Batch persist computed rankings in SQLite
-        rankings_data = [(row.id, r.score, r.reasons) for row, r in zip(rows, ranked, strict=True)]
+        rankings_data = [
+            (row.id, r.score, r.reasons) for row, r in zip(rows, ranked[: len(rows)], strict=True)
+        ]
         await self._message_repo.update_rankings(rankings_data)
+        await self._message_repo.update_rankings_by_provider_id(
+            account.id,
+            [(r.message.provider_message_id, r.score, r.reasons) for r in ranked[len(rows) :]],
+        )
         if self._session:
             await self._session.commit()
 
         # 5. Deterministic shortlist selection, never from excluded senders
         blocked = blocked_ids(domain_messages, excluded_senders)
+        outside_all = frozenset(message.provider_message_id for message in outside)
         logger.info(
-            "Shortlist limit %d; %d sender rules block %d messages",
+            "Shortlist limit %d; %d sender rules block %d messages; %d outside replies",
             shortlist_limit,
             len(excluded_senders),
             len(blocked),
+            len(outside_all),
         )
         shortlist = review_shortlist(
             ranked,
@@ -274,6 +298,7 @@ class ApplicationService:
                 candidates,
                 tuple(item.message.provider_message_id for item in shortlist),
                 blocked_ids=blocked,
+                outside_ids=outside_all,
                 limit=shortlist_limit,
             )
             if selected is None or (cancel is not None and cancel.is_set()):
@@ -296,5 +321,8 @@ class ApplicationService:
         shortlist_keys = tuple(m.message.provider_message_id for m in shortlist)
 
         return sync_result.model_copy(
-            update={"shortlisted_message_keys": shortlist_keys}
+            update={
+                "shortlisted_message_keys": shortlist_keys,
+                "outside_ids": outside_all.intersection(shortlist_keys),
+            }
         ), shortlist

@@ -109,7 +109,12 @@ from mailbrief.services.preferences import (
     owner_zone,
 )
 from mailbrief.services.proposals import ProposalNotFoundError, ProposalService
-from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError, reason_text
+from mailbrief.services.ranking import (
+    OUTSIDE_REPLY_TEXT,
+    ExcludedSenderError,
+    ShortlistReviewError,
+    reason_text,
+)
 from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
@@ -279,12 +284,13 @@ async def sync(
             async with database.session() as session:
                 accounts = AccountRepository(session)
                 messages = MessageRepository(session)
+                threads = ThreadService(session, provider)
                 application = ApplicationService(
                     provider,
                     messages,
                     SyncRunRepository(session),
                     accounts,
-                    threads=ThreadService(session, provider),
+                    threads=threads,
                 )
                 result, shortlist = await application.prepare_daily_shortlist(
                     tz_key=owner.zone.key,
@@ -337,6 +343,21 @@ async def sync(
                         if reasons:
                             print(f"  reasons: {reasons}")
                         print(f"  {row.web_link}")
+                    # Replies in tracked threads that today's Inbox sync can't see (ADR 0016).
+                    # Excluded senders never appear, like in the review.
+                    for reply in await threads.outside_replies(
+                        account, window, excluded_senders=rules
+                    ):
+                        key = reply.provider_message_id
+                        stored = await messages.get_by_provider_message_id(account.id, key)
+                        score = None if stored is None else stored.rank_score
+                        marker = "selected" if key in selected else "omitted"
+                        print(
+                            f"{key} [{marker}] score={score} {reply.sender.address}: "
+                            f"{reply.subject}"
+                        )
+                        print(f"  {OUTSIDE_REPLY_TEXT}")
+                        print(f"  {reply.web_link}")
                 return 0 if result.status is SyncStatus.COMPLETE else 4
         finally:
             await database.dispose()

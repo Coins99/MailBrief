@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from mailbrief.domain.messages import (
     EmailContact,
     MessagePage,
     NormalizedMessage,
+    ProviderKind,
     RankedMessage,
 )
 from mailbrief.ports.errors import AIAuthenticationError, ProviderPermissionError
@@ -32,6 +33,7 @@ from mailbrief.services.digest import DigestService
 from mailbrief.services.history import BriefDateError
 from mailbrief.services.proposals import ProposalService
 from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
+from mailbrief.services.threads import ThreadCheck, ThreadService
 from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
@@ -42,9 +44,10 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     SyncRunRepository,
 )
-from mailbrief.storage.tables import AccountTable, ActionTable, SyncRunTable
+from mailbrief.storage.tables import AccountTable, ActionSourceTable, ActionTable, SyncRunTable
 from tests.factories import make_message
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all
+from tests.unit.services.test_application import RecordingThreads
 from tests.unit.services.test_sync import FakeEmailProvider
 
 NOW = datetime(2026, 9, 4, 16, 0, tzinfo=UTC)  # Noon in Toronto.
@@ -126,6 +129,7 @@ def build(
     batch_size: int = 5,
     body_limit: int = MAX_ANALYSIS_CHARS,
     proposals: ProposalService | None = None,
+    threads: ThreadService | None = None,
 ) -> BriefService:
     mailbox = list(inbox() if messages is None else messages)
     email = email or FakeEmailProvider(pages=[mailbox])
@@ -134,6 +138,7 @@ def build(
         message_repo=MessageRepository(session),
         sync_run_repo=SyncRunRepository(session),
         account_repo=AccountRepository(session),
+        threads=threads,
     )
     gate.provider = provider
     return BriefService(
@@ -637,6 +642,7 @@ class ReviewGate:
         selected_ids: tuple[str, ...],
         *,
         blocked_ids: frozenset[str],
+        outside_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None:
         return self.selected
@@ -656,6 +662,7 @@ async def test_review_can_replace_suggestion_with_other_inbox_message(
             selected_ids: tuple[str, ...],
             *,
             blocked_ids: frozenset[str],
+            outside_ids: frozenset[str],
             limit: int,
         ) -> tuple[str, ...]:
             assert len(candidates) == 12
@@ -791,6 +798,7 @@ class OfferedGate:
         selected_ids: tuple[str, ...],
         *,
         blocked_ids: frozenset[str],
+        outside_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None:
         self.offered = (
@@ -991,11 +999,12 @@ async def test_seven_days_back_is_allowed(session: AsyncSession) -> None:
     assert result.digest.status is DigestStatus.EMPTY
 
 
-async def link_m0_to_an_action(session: AsyncSession) -> str:
-    """An open action whose source is the cached message m0; m1 follows it in the thread."""
+async def link_m0_to_an_action(session: AsyncSession, key: str = "m0") -> str:
+    """An open action whose source is the cached message ``key``; a later message in its
+    thread follows it."""
     account = await AccountRepository(session).get_by_email("user@example.com")
     assert account is not None
-    message = await MessageRepository(session).get_by_provider_message_id(account.id, "m0")
+    message = await MessageRepository(session).get_by_provider_message_id(account.id, key)
     assert message is not None
     repository = ActionRepository(session)
     row = await repository.add_action(
@@ -1033,6 +1042,108 @@ async def test_a_saved_brief_turns_follow_up_signals_into_proposals(
     assert second.status is BriefStatus.SAVED
     (proposal,) = await ProposalService(session).pending()
     assert (proposal.action_public_id, proposal.provider_message_id) == (public_id, "m1")
+
+
+async def test_a_past_day_s_brief_makes_proposals_too(session: AsyncSession) -> None:
+    provider = RangeProvider(two_days())
+    signal = answer_all(follow_up="cancelled", follow_up_evidence="waiting on it")
+    texts = texts_for(two_days())
+    first = await build(
+        session, FakeAIProvider([signal]), RecordingGate(True), email=provider, texts=texts
+    ).generate(tz_key=ZONE, local_date=YESTERDAY)
+    public_id = await link_m0_to_an_action(session, "y0")
+
+    # Again, from the cached analyses: y1 follows y0, the action's source, in its thread.
+    second = await build(
+        session, FakeAIProvider(), RecordingGate(True), email=provider, texts=texts
+    ).generate(tz_key=ZONE, local_date=YESTERDAY)
+
+    assert (first.proposals_created, second.proposals_created) == (0, 1)
+    (proposal,) = await ProposalService(session).pending()
+    assert (proposal.action_public_id, proposal.provider_message_id) == (public_id, "y1")
+
+
+async def seed_outside_reply(session: AsyncSession) -> None:
+    """An open action tracking thread "deck", and its archived reply from two hours ago."""
+    account = await AccountRepository(session).upsert(
+        AccountIdentity(
+            provider=ProviderKind.MICROSOFT,
+            provider_account_id="acc-1",
+            email_address="user@example.com",
+        )
+    )
+    since = NOW - timedelta(days=3)
+    row = await ActionRepository(session).add_action(
+        ActionTable(
+            public_id="00000000-0000-4000-8000-000000000002",
+            title="Send the deck",
+            ownership="mine",
+            status="open",
+            deadline_precision="none",
+            created_at_utc=since,
+            updated_at_utc=since,
+            revision=1,
+        )
+    )
+    session.add(
+        ActionSourceTable(
+            action_id=row.id,
+            provider_message_id="source-deck",
+            subject="Deck",
+            sender_address="alex@example.com",
+            web_link="https://mail.google.com/mail/u/#all/x",
+            received_at_utc=since,
+            provider=account.provider,
+            provider_account_id=account.provider_account_id,
+            provider_thread_id="deck",
+        )
+    )
+    archived = make_message(
+        provider_message_id="archived",
+        conversation_id="deck",
+        subject="Re: Deck",
+        received_at_utc=NOW - timedelta(hours=2),
+        is_in_inbox=False,
+        web_link="https://mail.example.com/archived",
+    )
+    await MessageRepository(session).upsert_messages(account.id, [archived])
+    await session.commit()
+
+
+async def test_an_outside_reply_goes_through_the_same_consent_and_limit(
+    session: AsyncSession,
+) -> None:
+    await seed_outside_reply(session)
+    mailbox = inbox(2)
+    gate = RecordingGate(False)
+    service = build(
+        session,
+        FakeAIProvider(),
+        gate,
+        messages=mailbox,
+        texts={**texts_for(mailbox), "archived": f"{BODY} Reference archived."},
+        threads=RecordingThreads(session, ThreadCheck()),
+    )
+
+    declined = await service.generate(tz_key=ZONE)
+
+    # Declining sends nothing, the outside reply included, and saves no brief.
+    assert declined.status is BriefStatus.CONSENT_DECLINED
+    (preview,) = gate.previews
+    assert preview.message_count == 3  # The two Inbox messages and the outside reply.
+    assert await DigestRepository(session).get_latest() is None
+
+    limited = build(
+        session,
+        FakeAIProvider([answer_all()]),
+        RecordingGate(True),
+        messages=mailbox,
+        texts={**texts_for(mailbox), "archived": f"{BODY} Reference archived."},
+        threads=RecordingThreads(session, ThreadCheck()),
+    )
+    result = await limited.generate(tz_key=ZONE, shortlist_limit=1)
+    assert result.coverage is not None and result.coverage.shortlisted == 1
+    assert result.sync.outside_ids == {"archived"}  # The tracked bonus wins the one place.
 
 
 class FailingProposals(ProposalService):
