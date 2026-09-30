@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Final, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,8 +26,9 @@ from mailbrief.services.analysis import (
 )
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
-from mailbrief.services.calendar import local_day_window, resolve_timezone
+from mailbrief.services.calendar import day_window, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
+from mailbrief.services.history import check_brief_date
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.services.ranking import ShortlistGate as ShortlistGate
 from mailbrief.storage.repositories import ConsentRepository
@@ -114,13 +115,21 @@ class BriefService:
         shortlist_gate: ShortlistGate | None = None,
         shortlist_limit: int = MAX_SHORTLIST_SIZE,
         excluded_senders: tuple[str, ...] = (),
+        local_date: date | None = None,
     ) -> BriefRunResult:
-        """Sync today's Inbox, prepare bodies, confirm consent, analyze and save the brief.
+        """Sync one day's Inbox, prepare bodies, confirm consent, analyze and save the brief.
 
-        Messages from ``excluded_senders`` are never selected, downloaded or sent.
+        The day is today in ``tz_key``'s zone, or ``local_date``: today or one of the
+        previous seven days. Any other date raises BriefDateError before Gmail is contacted
+        or anything is written. A past day's brief covers only the messages still in the
+        Inbox now. Messages from ``excluded_senders`` are never selected, downloaded or
+        sent.
         """
         now = self._clock()
-        window = local_day_window(now, resolve_timezone(tz_key))
+        zone = resolve_timezone(tz_key)
+        today = local_day_window(now, zone).local_date
+        check_brief_date(local_date or today, today)
+        window = day_window(local_date or today, zone)
         account = await self._application.get_or_restore_account()
         sync, shortlist = await self._application.prepare_daily_shortlist(
             tz_key=window.timezone_name,
@@ -132,6 +141,7 @@ class BriefService:
             shortlist_gate=shortlist_gate,
             shortlist_limit=shortlist_limit,
             excluded_senders=excluded_senders,
+            local_date=window.local_date,
         )
         if sync.status is SyncStatus.CANCELLED:
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)

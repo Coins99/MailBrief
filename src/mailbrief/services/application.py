@@ -3,14 +3,14 @@
 import asyncio
 import logging
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.digests import SyncProgress, SyncResult, SyncStage, SyncStatus
 from mailbrief.domain.messages import NormalizedMessage, ProviderKind, RankedMessage
 from mailbrief.domain.preferences import sender_excluded
 from mailbrief.ports.email_provider import EmailProvider
-from mailbrief.services.calendar import local_day_window, resolve_timezone
+from mailbrief.services.calendar import day_window, local_day_window, resolve_timezone
 from mailbrief.services.ranking import (
     MAX_SHORTLIST_SIZE,
     ExcludedSenderError,
@@ -84,8 +84,14 @@ class ApplicationService:
         shortlist_gate: ShortlistGate | None = None,
         shortlist_limit: int = MAX_SHORTLIST_SIZE,
         excluded_senders: tuple[str, ...] = (),
+        local_date: date | None = None,
     ) -> tuple[SyncResult, list[RankedMessage]]:
         """Connect, sync and rank one day, optionally reviewing all metadata before body access.
+
+        The day is today in ``tz_key``'s zone, or ``local_date`` when given; callers check
+        that a past date is allowed (services.history.check_brief_date). Only a sync of the
+        window containing now advances the account's last-sync time. Ranking always uses
+        the real now.
 
         At most ``shortlist_limit`` messages are selected. A message whose sender matches
         ``excluded_senders`` is never selected: including it, here or in review, raises
@@ -97,7 +103,7 @@ class ApplicationService:
         account = await self.get_or_restore_account()
 
         tz = resolve_timezone(tz_key)
-        window = local_day_window(now, tz)
+        window = local_day_window(now, tz) if local_date is None else day_window(local_date, tz)
 
         # 1. Sync messages from provider
         sync_result = await self._sync_service.sync_day(
@@ -106,6 +112,7 @@ class ApplicationService:
             window=window,
             progress=progress,
             cancel=cancel,
+            record_last_sync=window.start_utc <= now < window.end_utc,
         )
 
         if sync_result.status in {SyncStatus.CANCELLED, SyncStatus.FAILED}:

@@ -9,19 +9,27 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.analysis import AIUsage, AnalysisRequest, AnalysisResponse
 from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS, BodySource, MessageBody
 from mailbrief.domain.briefs import SENT_FIELDS, BriefStatus, TransmissionPreview
 from mailbrief.domain.digests import DigestStatus, SyncProgress, SyncStage
-from mailbrief.domain.messages import EmailContact, NormalizedMessage, RankedMessage
+from mailbrief.domain.messages import (
+    AccountIdentity,
+    EmailContact,
+    MessagePage,
+    NormalizedMessage,
+    RankedMessage,
+)
 from mailbrief.ports.errors import AIAuthenticationError, ProviderPermissionError
 from mailbrief.services.analysis import AnalysisPlan, AnalysisRun, AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
 from mailbrief.services.digest import DigestService
+from mailbrief.services.history import BriefDateError
 from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
@@ -32,6 +40,7 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     SyncRunRepository,
 )
+from mailbrief.storage.tables import AccountTable, SyncRunTable
 from tests.factories import make_message
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all
 from tests.unit.services.test_sync import FakeEmailProvider
@@ -841,3 +850,138 @@ async def test_the_limit_caps_automatic_and_reviewed_selection(session: AsyncSes
         await service.generate(tz_key=ZONE, shortlist_gate=oversized, shortlist_limit=2)
     assert oversized.offered is not None and oversized.offered[2] == 2
     assert len(reader.fetched) == 2
+
+
+YESTERDAY = date(2026, 9, 3)
+
+
+class RangeProvider(FakeEmailProvider):
+    """Serves only the messages in the requested range and records every range and connect."""
+
+    def __init__(self, messages: Sequence[NormalizedMessage]) -> None:
+        super().__init__(pages=[list(messages)])
+        self.messages = list(messages)
+        self.ranges: list[tuple[datetime, datetime]] = []
+        self.connects = 0
+
+    async def connect(self) -> AccountIdentity:
+        self.connects += 1
+        return await super().connect()
+
+    async def iter_message_pages(
+        self,
+        *,
+        range_start_utc: datetime,
+        range_end_utc: datetime,
+        continuation: str | None = None,
+    ) -> AsyncIterator[MessagePage]:
+        self.ranges.append((range_start_utc, range_end_utc))
+        chosen = tuple(
+            message
+            for message in self.messages
+            if range_start_utc <= message.received_at_utc < range_end_utc
+        )
+        yield MessagePage(page_number=1, messages=chosen, continuation=None)
+
+
+def two_days() -> list[NormalizedMessage]:
+    """y0 and y1 arrived yesterday in Toronto, t0 today."""
+    return [
+        make_message(
+            provider_message_id=key,
+            subject=f"Budget {key}",
+            received_at_utc=received,
+            web_link=f"https://mail.example.com/{key}",
+        )
+        for key, received in (
+            ("y0", datetime(2026, 9, 3, 14, tzinfo=UTC)),
+            ("y1", datetime(2026, 9, 4, 3, 30, tzinfo=UTC)),  # 23:30 on the 3rd in Toronto.
+            ("t0", datetime(2026, 9, 4, 13, tzinfo=UTC)),
+        )
+    ]
+
+
+async def last_sync(session: AsyncSession) -> datetime | None:
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    await session.refresh(account)
+    return account.last_sync_at_utc
+
+
+async def test_a_past_day_syncs_exactly_its_window_and_saves_under_its_date(
+    session: AsyncSession,
+) -> None:
+    provider = RangeProvider(two_days())
+    ai = FakeAIProvider([answer_all(), answer_all()])
+    service = build(session, ai, RecordingGate(True), email=provider, texts=texts_for(two_days()))
+
+    today = await service.generate(tz_key=ZONE)
+    synced_today = await last_sync(session)
+    past = await service.generate(tz_key=ZONE, local_date=YESTERDAY)
+
+    assert provider.ranges[1] == (
+        datetime(2026, 9, 3, 4, tzinfo=UTC),  # Midnight in Toronto.
+        datetime(2026, 9, 4, 4, tzinfo=UTC),
+    )
+    assert past.digest is not None and past.digest.local_date == YESTERDAY
+    assert {item.message_key for item in past.digest.items} == {"y0", "y1"}
+    assert today.digest is not None and today.digest.local_date == TODAY
+    assert synced_today is not None
+    assert await last_sync(session) == synced_today  # Only today's window moves it.
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    kept = await DigestRepository(session).get_by_account_and_date(account.id, TODAY)
+    assert kept is not None  # Today's brief is untouched.
+
+
+async def test_a_past_day_reconciles_its_inbox_membership(session: AsyncSession) -> None:
+    """A message archived since it was cached leaves a past day's brief."""
+    provider = RangeProvider(two_days())
+    ai = FakeAIProvider([answer_all()])  # The second run reuses y0's analysis.
+    service = build(session, ai, RecordingGate(True), email=provider, texts=texts_for(two_days()))
+    await service.generate(tz_key=ZONE, local_date=YESTERDAY)
+    provider.messages = [m for m in provider.messages if m.provider_message_id != "y1"]
+
+    again = await service.generate(tz_key=ZONE, local_date=YESTERDAY)
+
+    assert again.digest is not None
+    assert [item.message_key for item in again.digest.items] == ["y0"]
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    rows = await MessageRepository(session).get_messages_in_range(
+        account.id,
+        datetime(2026, 9, 3, 4, tzinfo=UTC),
+        datetime(2026, 9, 4, 4, tzinfo=UTC),
+        inbox_only=False,
+    )
+    assert {row.provider_message_id: row.is_in_inbox for row in rows} == {
+        "y0": True,
+        "y1": False,
+    }
+
+
+@pytest.mark.parametrize("day", [date(2026, 8, 27), date(2026, 9, 5)])
+async def test_an_out_of_range_date_fails_before_gmail_or_the_database(
+    session: AsyncSession, day: date
+) -> None:
+    provider = RangeProvider(two_days())
+    ai = FakeAIProvider()
+    service = build(session, ai, RecordingGate(True), email=provider)
+
+    with pytest.raises(BriefDateError):
+        await service.generate(tz_key=ZONE, local_date=day)
+
+    assert provider.connects == 0 and provider.ranges == []
+    assert await session.scalar(select(func.count()).select_from(SyncRunTable)) == 0
+    assert await session.scalar(select(func.count()).select_from(AccountTable)) == 0
+    assert await DigestRepository(session).get_latest() is None
+
+
+async def test_seven_days_back_is_allowed(session: AsyncSession) -> None:
+    provider = RangeProvider(two_days())
+    service = build(session, FakeAIProvider(), RecordingGate(True), email=provider)
+
+    result = await service.generate(tz_key=ZONE, local_date=date(2026, 8, 28))
+
+    assert result.digest is not None and result.digest.local_date == date(2026, 8, 28)
+    assert result.digest.status is DigestStatus.EMPTY
