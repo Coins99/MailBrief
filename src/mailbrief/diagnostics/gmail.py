@@ -24,11 +24,12 @@ from mailbrief.domain.actions import (
     ActionFilter,
     ActionStatus,
     SuggestionState,
+    ThreadActivity,
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.bodies import BodyStatus, MessageBody, PreparedBody
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
-from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncStatus
+from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncResult, SyncStatus
 from mailbrief.domain.drafting import (
     DraftContextPart,
     DraftingOptions,
@@ -299,6 +300,7 @@ async def sync(
                     f"selected: {len(shortlist)}"
                 )
                 print(f"Last complete sync (UTC): {account.last_sync_at_utc or 'never'}")
+                _print_threads(result)
                 print("Metadata only: no full bodies, attachments, AI calls, or mailbox changes.")
                 if result.error_code:
                     print(
@@ -844,6 +846,7 @@ async def brief(
         model = ai.model_name
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
     _print_result(result, model=model)
+    _print_threads(result.sync)
     if show and result.digest is not None:
         print(coverage_line(result.digest))
         _print_items(result.digest)
@@ -941,6 +944,36 @@ async def briefs_show(date_text: str, *, account: str | None, database_path: Pat
     return 0
 
 
+def _print_threads(result: SyncResult) -> None:
+    """The thread check's counts, when any threads were tracked or the check stopped."""
+    if not (result.threads_tracked or result.threads_stopped_code):
+        return
+    saved = result.thread_messages
+    line = (
+        f"Tracked threads: {result.threads_checked} checked, {result.threads_failed} failed, "
+        f"{saved} {'message' if saved == 1 else 'messages'} saved"
+    )
+    if result.threads_stopped_code:
+        line += f"; stopped: {result.threads_stopped_code}"
+    print(line)
+
+
+def _thread_text(thread: ThreadActivity | None, zone: ZoneInfo) -> str:
+    """Later messages in an action's threads, in the owner's zone; empty when none."""
+    if thread is None:
+        return ""
+    text = ""
+    if thread.latest_at_utc is not None and thread.latest_sender is not None:
+        latest = thread.latest_at_utc.astimezone(zone)
+        text += (
+            f"; thread: {thread.new_messages} new, latest {latest:%Y-%m-%d %H:%M} from "
+            f"{_terminal_safe(thread.latest_sender)}"
+        )
+    if thread.owner_replied_at_utc is not None:
+        text += f"; you replied {thread.owner_replied_at_utc.astimezone(zone).date().isoformat()}"
+    return text
+
+
 async def actions(
     action: str,
     *,
@@ -948,8 +981,10 @@ async def actions(
     view: str,
     timezone: str | None,
     suggestion_id: int | None,
+    public_id: str | None = None,
 ) -> int:
-    """List actions, or accept or dismiss a stored suggestion; needs no Gmail or AI access.
+    """List actions, accept or dismiss a stored suggestion, or mark an action's threads
+    seen; needs no Gmail or AI access.
 
     The list shows dates in --timezone, else the saved time zone. Listing only displays
     local data, so unreadable preferences fall back to the system time zone.
@@ -976,6 +1011,13 @@ async def actions(
                 assert suggestion_id is not None
                 await service.dismiss(suggestion_id)
                 print("Dismissed.")
+                return 0
+            if action == "seen":
+                assert public_id is not None
+                current = await service.get(public_id)
+                marked = await service.mark_thread_seen(public_id, current.revision)
+                unchanged = marked.revision == current.revision
+                print("Nothing new in its threads." if unchanged else "Marked seen.")
                 return 0
             listed = await service.list_actions(ActionFilter(view))
             total = (
@@ -1009,6 +1051,7 @@ async def actions(
             line += "; carried over"
         if item.status is ActionStatus.OPEN and item.is_overdue(now):
             line += "; overdue"
+        line += _thread_text(item.thread, zone)
         print(line)
     if total > len(listed):
         print(f"Showing the newest {len(listed)} of {total} completed actions.")
@@ -1214,7 +1257,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         decide.add_argument(
             "suggestion_id", type=int, help="The number after # in brief --show output."
         )
-    for subcommand in (list_parser, accept_parser, dismiss_parser):
+    seen_parser = action_commands.add_parser(
+        "seen", help="Mark the later messages in an action's threads as seen."
+    )
+    seen_parser.add_argument("public_id", help="The action ID shown by actions list.")
+    for subcommand in (list_parser, accept_parser, dismiss_parser, seen_parser):
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
@@ -1337,6 +1384,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     view=getattr(args, "view", ActionFilter.OPEN.value),
                     timezone=getattr(args, "timezone", None),
                     suggestion_id=getattr(args, "suggestion_id", None),
+                    public_id=getattr(args, "public_id", None),
                 )
             )
         if args.command == "drafts" and args.action == "generate":
