@@ -8,7 +8,7 @@ import getpass
 import logging
 import threading
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from alembic.util import CommandError
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.config import Settings
 from mailbrief.domain.actions import (
@@ -25,6 +26,7 @@ from mailbrief.domain.actions import (
     ActionStatus,
     SuggestionState,
     ThreadActivity,
+    ThreadLink,
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.bodies import BodyStatus, MessageBody, PreparedBody
@@ -758,12 +760,21 @@ def _print_suggestions(item: DigestItem, zone: ZoneInfo) -> None:
             print(f"     - {step}")
 
 
-def _print_items(digest: DailyDigest) -> None:
-    """Derived brief content, shown only on request; never evidence or bodies."""
+def _print_items(
+    digest: DailyDigest, links: Mapping[str, tuple[ThreadLink, ...]] | None = None
+) -> None:
+    """Derived brief content, shown only on request; never evidence or bodies.
+
+    ``links`` names the open actions that continue each item's thread; an action the email
+    is already a source of isn't repeated.
+    """
     zone = ZoneInfo(digest.timezone_name)
     for item in digest.items:
         print(f"{item.position + 1}. [{item.section.value}] {item.sender.address}: {item.subject}")
         print(f"   {item.summary}")
+        for link in (links or {}).get(item.message_key, ()):
+            if not link.is_source:
+                print(f"   Continues: {_terminal_safe(link.title)} ({link.public_id})")
         if item.action_text:
             print(f"   Action: {item.action_text}")
         deadline = _deadline(item, zone)
@@ -841,6 +852,11 @@ async def brief(
                     excluded_senders=owner.preferences.excluded_senders,
                     local_date=window.local_date,
                 )
+                links = (
+                    await _brief_links(session, result.digest)
+                    if show and result.digest is not None
+                    else {}
+                )
         finally:
             await database.dispose()
         model = ai.model_name
@@ -849,8 +865,17 @@ async def brief(
     _print_threads(result.sync)
     if show and result.digest is not None:
         print(coverage_line(result.digest))
-        _print_items(result.digest)
+        _print_items(result.digest, links)
     return _brief_exit_code(result)
+
+
+async def _brief_links(
+    session: AsyncSession, digest: DailyDigest
+) -> dict[str, tuple[ThreadLink, ...]]:
+    """The open actions that continue each item's thread, read from local data."""
+    return await ActionService(session).thread_links(
+        digest.account_id, (item.message_key for item in digest.items)
+    )
 
 
 async def _open_existing(path: Path) -> Database | None:
@@ -930,6 +955,7 @@ async def briefs_show(date_text: str, *, account: str | None, database_path: Pat
                     return 3
                 account = accounts[0] if accounts else None
             digest = None if account is None else await history.get(account, day)
+            links = {} if digest is None else await _brief_links(session, digest)
     finally:
         await database.dispose()
     if digest is None:
@@ -940,7 +966,7 @@ async def briefs_show(date_text: str, *, account: str | None, database_path: Pat
         f"items: {len(digest.items)}"
     )
     print(coverage_line(digest))
-    _print_items(digest)
+    _print_items(digest, links)
     return 0
 
 
@@ -982,12 +1008,14 @@ async def actions(
     timezone: str | None,
     suggestion_id: int | None,
     public_id: str | None = None,
+    into: str | None = None,
 ) -> int:
     """List actions, accept or dismiss a stored suggestion, or mark an action's threads
     seen; needs no Gmail or AI access.
 
-    The list shows dates in --timezone, else the saved time zone. Listing only displays
-    local data, so unreadable preferences fall back to the system time zone.
+    ``into`` accepts the suggestion into that existing action instead of creating one. The
+    list shows dates in --timezone, else the saved time zone. Listing only displays local
+    data, so unreadable preferences fall back to the system time zone.
     """
     zone = resolve_timezone(timezone) if timezone and timezone.strip() else None
     path = database_path or AppPaths.from_qt().database_path
@@ -1002,6 +1030,17 @@ async def actions(
                     await session.rollback()
                     print("Saved preferences could not be read; showing the system time zone.")
             service = ActionService(session)
+            if action == "accept" and into is not None:
+                assert suggestion_id is not None
+                current = await service.get(into)
+                try:
+                    added = await service.accept_into(suggestion_id, into, current.revision)
+                except ActionConflictError as exc:
+                    print(str(exc))  # Static, such as a suggestion owned by another action.
+                    return 3
+                title = _terminal_safe(added.action.title)
+                print(f"Added to: {title} ({added.action.public_id})")
+                return 0
             if action == "accept":
                 assert suggestion_id is not None
                 accepted = await service.accept(suggestion_id)
@@ -1257,6 +1296,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         decide.add_argument(
             "suggestion_id", type=int, help="The number after # in brief --show output."
         )
+    accept_parser.add_argument(
+        "--into",
+        metavar="PUBLIC_ID",
+        help="Add the suggestion's email to this existing action instead of creating one.",
+    )
     seen_parser = action_commands.add_parser(
         "seen", help="Mark the later messages in an action's threads as seen."
     )
@@ -1385,6 +1429,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     timezone=getattr(args, "timezone", None),
                     suggestion_id=getattr(args, "suggestion_id", None),
                     public_id=getattr(args, "public_id", None),
+                    into=getattr(args, "into", None),
                 )
             )
         if args.command == "drafts" and args.action == "generate":

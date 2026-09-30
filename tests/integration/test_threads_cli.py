@@ -1,7 +1,9 @@
 """Thread tracking from the CLI: sync and brief check threads, actions list shows the
-activity, and actions seen clears it. Gmail and Groq run over respx."""
+activity, actions seen clears it, briefs name the actions an email continues, and accept
+--into adds the email to one. Gmail and Groq run over respx."""
 
 import asyncio
+import re
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -13,10 +15,11 @@ from sqlalchemy import select
 from mailbrief.diagnostics import gmail
 from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.database import Database
-from mailbrief.storage.tables import AccountTable, ActionTable, MessageTable
+from mailbrief.storage.tables import AccountTable, ActionSourceTable, ActionTable, MessageTable
 from tests.integration.test_brief_cli import (  # noqa: F401 - fixtures used by name
     MIDDAY,
     Mailbox,
+    answer_with_two_actions,
     groq_answers,
     mailbox,
     midday,
@@ -166,3 +169,96 @@ def test_no_open_actions_means_no_thread_line(
     assert sync(tmp_path / "quiet.sqlite3") == 0
     assert "Tracked threads" not in capsys.readouterr().out
     assert mailbox.thread_route.call_count == 0
+
+
+def track_earlier(path: Path, title: str) -> str:
+    """An open action whose one source is an earlier message in a1's thread, so a1
+    continues it."""
+
+    async def create() -> str:
+        database = Database.from_path(path)
+        try:
+            async with database.transaction() as session:
+                message = await session.scalar(
+                    select(MessageTable).where(MessageTable.provider_message_id == "a1")
+                )
+                assert message is not None
+                account = await session.get(AccountTable, message.account_id)
+                assert account is not None
+                row = await ActionRepository(session).add_action(
+                    ActionTable(
+                        public_id=str(uuid.uuid4()),
+                        title=title,
+                        ownership="waiting_for",
+                        status="open",
+                        deadline_precision="none",
+                        created_at_utc=MIDDAY - timedelta(days=1),
+                        updated_at_utc=MIDDAY - timedelta(days=1),
+                        revision=1,
+                    )
+                )
+                session.add(
+                    ActionSourceTable(
+                        action_id=row.id,
+                        provider_message_id="a0",
+                        subject="Budget",
+                        sender_address="sender@example.com",
+                        web_link=message.web_link,
+                        received_at_utc=MIDDAY - timedelta(days=1),
+                        provider=account.provider,
+                        provider_account_id=account.provider_account_id,
+                        provider_thread_id=message.conversation_id,
+                    )
+                )
+                return row.public_id
+        finally:
+            await database.dispose()
+
+    return asyncio.run(create())
+
+
+def test_briefs_show_continuations_and_accept_into_adds_to_the_action(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "continues.sqlite3"
+    assert sync(path) == 0
+    public_id = track_earlier(path, "\x1b[2JChase the budget")
+    groq_answers(respx_mock, answer_with_two_actions)
+    replies(monkeypatch, "yes")
+    capsys.readouterr()
+
+    assert run_brief(path, "--show") == 0
+    shown = capsys.readouterr().out
+    continues = f"   Continues: [2JChase the budget ({public_id})\n"
+    assert continues in shown and "\x1b" not in shown
+    mine, waiting = re.findall(r"\[pending #(\d+)\]", shown)
+    assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
+    assert continues in capsys.readouterr().out
+
+    def actions(*options: str) -> int:
+        return gmail.main(["actions", *options, "--database", str(path)])
+
+    assert actions("accept", waiting, "--into", public_id) == 0
+    assert capsys.readouterr().out == f"Added to: [2JChase the budget ({public_id})\n"
+    assert actions("list", "--view", "waiting", "--timezone", "UTC") == 0
+    assert capsys.readouterr().out.count("Chase the budget") == 1  # No second action.
+
+    # a1 is now one of the action's sources, so it no longer "continues" it.
+    assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
+    after = capsys.readouterr().out
+    assert "Continues:" not in after
+    assert "   [accepted] Wait for the signed copy\n" in after
+
+    assert actions("accept", mine) == 0
+    capsys.readouterr()
+    assert actions("accept", mine, "--into", public_id) == 3
+    assert capsys.readouterr().out == "That suggestion already belongs to another action.\n"
+    refused = "That suggestion or action was not found or cannot change now.\n"
+    assert actions("accept", mine, "--into", "00000000-0000-4000-8000-000000000000") == 3
+    assert capsys.readouterr().out == refused
+    assert actions("accept", "999999", "--into", public_id) == 3
+    assert capsys.readouterr().out == refused
