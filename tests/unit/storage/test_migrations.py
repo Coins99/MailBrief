@@ -1050,3 +1050,57 @@ def test_thread_tracking_backfills_sources_and_downgrades_keeping_rows(tmp_path:
     assert _query(path, "SELECT provider FROM action_sources WHERE message_id IS NOT NULL") == [
         ("gmail",)
     ]
+
+
+_PROPOSAL = (
+    "INSERT INTO action_proposals(action_id,message_id,kind,evidence,provider,"
+    "provider_account_id,provider_message_id,subject,sender_address,web_link,received_at_utc,"
+    "created_at_utc) VALUES(?,1,?,'Moved to Monday','gmail','account-1','message-1',"
+    "'Re: budget','sam@example.com','https://mail.google.com/x','2026-09-30 12:00:00',"
+    "'2026-09-30 12:00:00')"
+)
+
+
+def test_follow_up_proposals_upgrade_and_downgrade_keeping_rows(tmp_path: Path) -> None:
+    path = tmp_path / "m8-proposals.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)
+    command.upgrade(config, "20260930_0010")
+    kept = (*_OLD_ROWS, "actions", "action_suggestions", "suggestion_decisions")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260930_0011")
+
+    # Existing analyses read "no follow-up"; every other row is kept.
+    assert _query(path, "SELECT follow_up_kind, follow_up_evidence FROM analyses") == [
+        ("none", None)
+    ]
+    assert _earlier_columns(_rows(path, kept), before) == before
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(_PROPOSAL, (action_id, "cancelled"))
+        connection.execute(_PROPOSAL, (action_id, "delivered"))
+        for kind in ("cancelled", "none"):  # One per action, email and kind; never "none".
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(_PROPOSAL, (action_id, kind))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE analyses SET follow_up_kind = 'postponed'")
+        connection.commit()
+    assert _query(path, "SELECT state, source_added, deadline_precision FROM action_proposals") == [
+        ("pending", 0, "none"),
+        ("pending", 0, "none"),
+    ]
+    assert _schema(path)["action_proposals"]["autoincrement"] is True
+
+    command.downgrade(config, "20260930_0010")
+
+    assert "action_proposals" not in table_names(path)
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0010.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260930_0010")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT count(*) FROM action_proposals") == [(0,)]

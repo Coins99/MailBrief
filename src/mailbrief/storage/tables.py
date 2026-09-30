@@ -54,6 +54,9 @@ _DRAFT_TONE_CHECK = "tone IN ('neutral','warm','formal','direct')"
 _DRAFT_LENGTH_CHECK = "length IN ('short','medium','long')"
 _DEFAULT_TONE_CHECK = "draft_tone IN ('neutral','warm','formal','direct')"
 _DEFAULT_LENGTH_CHECK = "draft_length IN ('short','medium','long')"
+_FOLLOW_UP_CHECK = "follow_up_kind IN ('none','new_deadline','cancelled','delivered')"
+_PROPOSAL_KIND_CHECK = "kind IN ('new_deadline','cancelled','delivered')"
+_PROPOSAL_STATE_CHECK = "state IN ('pending','applied','dismissed')"
 
 
 class Base(DeclarativeBase):
@@ -167,6 +170,7 @@ class AnalysisTable(Base):
             "deadline_precision IN ('none','unresolved','date','datetime')",
             name="deadline_precision_known",
         ),
+        CheckConstraint(_FOLLOW_UP_CHECK, name="follow_up_kind_known"),
         Index("ix_analyses_message_id", "message_id"),
     )
 
@@ -202,6 +206,11 @@ class AnalysisTable(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False)
     analyzed_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    # The follow-up signal (ADR 0016); rows from before schema 7 read "none".
+    follow_up_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="none", server_default="none"
+    )
+    follow_up_evidence: Mapped[str | None] = mapped_column(String(160))
 
 
 class DigestTable(Base):
@@ -488,6 +497,66 @@ class SuggestionDecisionTable(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"))
     decided_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ActionProposalTable(Base):
+    """A later email's proposed update to an action, applied only by the owner (ADR 0016).
+
+    It keeps a snapshot of the email, so it outlives the cached message. ``previous_json``,
+    ``source_added`` and ``applied_revision`` record what applying changed, for Undo.
+    """
+
+    __tablename__ = "action_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "action_id", "provider_message_id", "kind", name="uq_action_proposals_identity"
+        ),
+        CheckConstraint(_PROPOSAL_KIND_CHECK, name="kind_known"),
+        CheckConstraint(_PROPOSAL_STATE_CHECK, name="state_known"),
+        CheckConstraint(_PRECISION_CHECK, name="deadline_precision_known"),
+        Index("ix_action_proposals_action_id", "action_id"),
+        # A deleted proposal's ID is never given to another, so a stale ID fails.
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    action_id: Mapped[int] = mapped_column(
+        ForeignKey("actions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    deadline_text: Mapped[str | None] = mapped_column(Text)
+    deadline_precision: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="none",
+        server_default="none",
+    )
+    deadline_date: Mapped[date | None] = mapped_column(Date)
+    deadline_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    deadline_timezone: Mapped[str | None] = mapped_column(String(128))
+    suggested_target_date: Mapped[date | None] = mapped_column(Date)
+    target_reason: Mapped[str | None] = mapped_column(String(32))
+    evidence: Mapped[str] = mapped_column(String(160), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_account_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_message_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    provider_thread_id: Mapped[str | None] = mapped_column(String(512))
+    subject: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sender_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    web_link: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    previous_json: Mapped[dict[str, str | None] | None] = mapped_column(JSON)
+    source_added: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    applied_revision: Mapped[int | None] = mapped_column(Integer)
+    created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    decided_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class DraftTable(Base):

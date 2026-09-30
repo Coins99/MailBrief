@@ -16,6 +16,7 @@ from sqlalchemy.orm import aliased
 from mailbrief.domain.actions import (
     Action,
     ActionFilter,
+    ActionProposal,
     ActionSource,
     ActionStatus,
     ActionStep,
@@ -31,6 +32,7 @@ from mailbrief.domain.analysis import (
     TargetReason,
 )
 from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
+from mailbrief.storage.proposals import ProposalRepository, proposal_from_row
 from mailbrief.storage.tables import (
     AccountTable,
     ActionSourceTable,
@@ -242,9 +244,10 @@ def action_from_rows(
     steps: Sequence[ActionStepTable],
     sources: Sequence[tuple[ActionSourceTable, bool | None]],
     thread: ThreadActivity | None = None,
+    proposals: Sequence[ActionProposal] = (),
 ) -> Action:
     """Rebuild an action; each source pairs its snapshot with the cached Inbox state, if any,
-    and ``thread`` is its derived thread activity."""
+    ``thread`` is its derived thread activity, and ``proposals`` its pending proposals."""
     return Action(
         public_id=row.public_id,
         title=row.title,
@@ -289,6 +292,7 @@ def action_from_rows(
         ),
         thread_seen_until_utc=row.thread_seen_until_utc,
         thread=thread,
+        proposals=tuple(proposals),
     )
 
 
@@ -470,15 +474,7 @@ class ActionRepository:
     ) -> bool:
         """Link a message snapshot, with its provider, account and thread so the thread can
         be tracked (ADR 0015); False when the action already has this message."""
-        existing = await self._session.scalar(
-            select(ActionSourceTable.id).where(
-                ActionSourceTable.action_id == action_id,
-                ActionSourceTable.provider_message_id == message.provider_message_id,
-            )
-        )
-        if existing is not None:
-            return False
-        self._session.add(
+        return await self.add_source_snapshot(
             ActionSourceTable(
                 action_id=action_id,
                 message_id=message.id,
@@ -492,6 +488,19 @@ class ActionRepository:
                 provider_thread_id=message.conversation_id,
             )
         )
+
+    async def add_source_snapshot(self, source: ActionSourceTable) -> bool:
+        """Add a source built from a snapshot, as when its email has left local mail;
+        False when the action already has this message."""
+        existing = await self._session.scalar(
+            select(ActionSourceTable.id).where(
+                ActionSourceTable.action_id == source.action_id,
+                ActionSourceTable.provider_message_id == source.provider_message_id,
+            )
+        )
+        if existing is not None:
+            return False
+        self._session.add(source)
         return True
 
     async def remove_source(self, action_id: int, provider_message_id: str) -> None:
@@ -610,7 +619,8 @@ class ActionRepository:
         return count or 0
 
     async def load(self, rows: Sequence[ActionTable]) -> list[Action]:
-        """Domain actions for rows, reading steps and sources with one chunked query each."""
+        """Domain actions for rows, reading steps, sources and pending proposals with one
+        chunked query each, and thread activity with a fixed number more."""
         ids = [row.id for row in rows]
         steps: dict[int, list[ActionStepTable]] = {}
         for chunk in _chunks(ids):
@@ -635,12 +645,17 @@ class ActionRepository:
             action_id: [source for source, _ in pairs] for action_id, pairs in sources.items()
         }
         accounts, cached = await self._thread_messages(snapshots)
+        proposals = await ProposalRepository(self._session).pending_for_actions(ids)
         return [
             action_from_rows(
                 row,
                 steps.get(row.id, ()),
                 sources.get(row.id, ()),
                 _activity(row, snapshots.get(row.id, ()), accounts, cached),
+                [
+                    proposal_from_row(proposal, row.public_id, row.title)
+                    for proposal in proposals.get(row.id, ())
+                ],
             )
             for row in rows
         ]

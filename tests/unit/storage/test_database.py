@@ -34,6 +34,7 @@ def test_metadata_contains_all_initial_tables() -> None:
         "action_steps",
         "action_sources",
         "suggestion_decisions",
+        "action_proposals",
         "drafts",
         "draft_versions",
         "draft_sources",

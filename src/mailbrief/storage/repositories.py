@@ -14,6 +14,7 @@ from mailbrief.domain.analysis import (
     SUMMARY_MAX_CHARS,
     AnalysisCategory,
     DeadlinePrecision,
+    FollowUpKind,
     MessageAnalysis,
 )
 from mailbrief.domain.common import normalize_utc
@@ -456,6 +457,8 @@ class AnalysisRepository:
             confidence=analysis.confidence,
             evidence=analysis.evidence,
             analyzed_at_utc=datetime.now(UTC),
+            follow_up_kind=analysis.follow_up.value,
+            follow_up_evidence=analysis.follow_up_evidence,
         )
         stmt = base_stmt.on_conflict_do_update(
             index_elements=[
@@ -479,6 +482,8 @@ class AnalysisRepository:
                 "confidence": base_stmt.excluded.confidence,
                 "evidence": base_stmt.excluded.evidence,
                 "analyzed_at_utc": base_stmt.excluded.analyzed_at_utc,
+                "follow_up_kind": base_stmt.excluded.follow_up_kind,
+                "follow_up_evidence": base_stmt.excluded.follow_up_evidence,
             },
         ).returning(AnalysisTable)
         result_table = await self._session.scalar(stmt)
@@ -600,6 +605,8 @@ class AnalysisRepository:
             confidence=row.confidence,
             evidence=row.evidence,
             suggestions=tuple(suggestion_from_row(item) for item in suggestions),
+            follow_up=FollowUpKind(row.follow_up_kind),
+            follow_up_evidence=row.follow_up_evidence,
         )
 
 
