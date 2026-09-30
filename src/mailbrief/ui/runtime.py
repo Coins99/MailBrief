@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import SecretStr
 
 from mailbrief.config import Settings
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit, ThreadLink
 from mailbrief.domain.bodies import MessageBody
 from mailbrief.domain.briefs import BriefRunResult
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
@@ -29,7 +29,7 @@ from mailbrief.providers.gmail.factory import gmail_provider
 from mailbrief.providers.gmail.oauth import DesktopClient
 from mailbrief.providers.groq.credentials import GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
-from mailbrief.services.actions import ActionService
+from mailbrief.services.actions import AcceptedInto, ActionService
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
@@ -344,6 +344,29 @@ class DesktopRuntime:
     async def accept_suggestion(self, suggestion_id: int) -> Action:
         async with self._storage().session() as session:
             return await ActionService(session).accept(suggestion_id)
+
+    async def brief_links(self, digest: DailyDigest) -> dict[str, tuple[ThreadLink, ...]]:
+        """The live, open actions that continue each item's thread; local data only."""
+        async with self._storage().session() as session:
+            return await ActionService(session).thread_links(
+                digest.account_id, (item.message_key for item in digest.items)
+            )
+
+    async def accept_into(self, suggestion_id: int, public_id: str, revision: int) -> AcceptedInto:
+        async with self._storage().session() as session:
+            return await ActionService(session).accept_into(suggestion_id, public_id, revision)
+
+    async def undo_accept_into(
+        self, suggestion_id: int, public_id: str, revision: int, remove_source: bool
+    ) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).undo_accept_into(
+                suggestion_id, public_id, revision, remove_source
+            )
+
+    async def mark_thread_seen(self, public_id: str, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).mark_thread_seen(public_id, revision)
 
     async def dismiss_suggestion(self, suggestion_id: int) -> None:
         async with self._storage().session() as session:

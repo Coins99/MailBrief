@@ -1,5 +1,7 @@
-"""Saved brief rendering: escaped content, Gmail sources and suggestion decisions."""
+"""Saved brief rendering: escaped content, Gmail sources, suggestion decisions, and the
+actions that continue each email's thread."""
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from html import escape
 from zoneinfo import ZoneInfo
@@ -8,7 +10,12 @@ from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QTextBrowser
 
-from mailbrief.domain.actions import TARGET_REASON_TEXT, SuggestionState, SuggestionView
+from mailbrief.domain.actions import (
+    TARGET_REASON_TEXT,
+    SuggestionState,
+    SuggestionView,
+    ThreadLink,
+)
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.digests import DailyDigest
 from mailbrief.services.history import coverage_line
@@ -18,10 +25,21 @@ ACCEPT = "accept"
 DISMISS = "dismiss"
 
 
-def _suggestion_html(view: SuggestionView, accept: str, dismiss: str, zone: ZoneInfo) -> str:
+def _owner(ownership: ActionOwnership) -> str:
+    return "mine" if ownership is ActionOwnership.MINE else "waiting for"
+
+
+def _suggestion_html(
+    view: SuggestionView,
+    accept: str,
+    dismiss: str,
+    zone: ZoneInfo,
+    into: Sequence[tuple[str, str]] = (),
+) -> str:
     """One pending suggestion; every mail- or AI-derived string is escaped.
 
     An exact deadline is shown in ``zone``, the brief's, like the message's own deadline.
+    ``into`` holds an internal link and an action title for each "Add to" offer.
     """
     suggestion = view.suggestion
     owner = "yours" if suggestion.ownership is ActionOwnership.MINE else "waiting for someone"
@@ -35,20 +53,25 @@ def _suggestion_html(view: SuggestionView, accept: str, dismiss: str, zone: Zone
     if due is not None:
         detail.append(f"due {due}")
     steps = "".join(f"<li>{escape(step)}</li>" for step in suggestion.steps)
+    links = [f'<a href="{accept}">Accept</a>', f'<a href="{dismiss}">Dismiss</a>']
+    links.extend(f'<a href="{link}">Add to “{escape(title)}”</a>' for link, title in into)
     return (
         f"<p>Suggested: {escape(suggestion.title)} ({escape('; '.join(detail))})<br>"
-        f'<a href="{accept}">Accept</a> · <a href="{dismiss}">Dismiss</a></p>'
+        + " · ".join(links)
+        + "</p>"
         + (f"<ul>{steps}</ul>" if steps else "")
     )
 
 
 class DigestView(QTextBrowser):
-    """Suggestion links only emit ``suggestion_requested(kind, suggestion_id)``, and reply
-    links ``reply_requested(account_email, message_id)``; the window decides what happens.
+    """Suggestion links only emit ``suggestion_requested(kind, suggestion_id)``, "Add to"
+    links ``accept_into_requested(suggestion_id, public_id, revision)``, and reply links
+    ``reply_requested(account_email, message_id)``; the window decides what happens.
     Unknown links, including any an email could smuggle in, do nothing.
     """
 
     suggestion_requested = Signal(str, int)
+    accept_into_requested = Signal(int, str, int)
     reply_requested = Signal(str, str)
 
     def __init__(self) -> None:
@@ -59,6 +82,8 @@ class DigestView(QTextBrowser):
         self.anchorClicked.connect(self._open_source)
         self._sources: dict[str, str] = {}
         self._suggestions: dict[str, tuple[str, int]] = {}
+        # "Add to" links: suggestion ID, action public ID and the revision shown.
+        self._into: dict[str, tuple[int, str, int]] = {}
         self._replies: dict[str, tuple[str, str]] = {}
         # The brief shown: account, local date and when it was generated.
         self._shown: tuple[str, date, datetime] | None = None
@@ -77,20 +102,33 @@ class DigestView(QTextBrowser):
         if request is not None:
             self.suggestion_requested.emit(*request)
             return
+        into = self._into.get(key)
+        if into is not None:
+            self.accept_into_requested.emit(*into)
+            return
         reply = self._replies.get(key)
         if reply is not None:
             self.reply_requested.emit(*reply)
 
-    def show_digest(self, digest: DailyDigest) -> None:
+    def show_digest(
+        self, digest: DailyDigest, links: Mapping[str, tuple[ThreadLink, ...]] | None = None
+    ) -> None:
         """Render a brief. Re-rendering the same brief, as after Accept or Dismiss, keeps the
-        reader's place; a different brief starts at the top."""
+        reader's place; a different brief starts at the top.
+
+        ``links`` maps an item's message key to the live, open actions that continue its
+        thread: each is named on the item unless the email is already its source, and each
+        pending suggestion offers to add the email to it.
+        """
         identity = (digest.account_id, digest.local_date, digest.generated_at_utc)
         same = identity == self._shown
         position = self.verticalScrollBar().value()
         self._shown = identity
         self._sources.clear()
         self._suggestions.clear()
+        self._into.clear()
         self._replies.clear()
+        continued = links or {}
         age = max(0, int((datetime.now(UTC) - digest.generated_at_utc).total_seconds() // 60))
         count, unit = (age, "minute") if age < 60 else (age // 60, "hour")
         if age >= 1440:
@@ -121,6 +159,12 @@ class DigestView(QTextBrowser):
                 f"<p><b>{escape(item.subject)}</b><br>{escape(item.sender.address)}<br>"
                 f"{escape(item.summary)}</p>"
             )
+            item_links = continued.get(item.message_key, ())
+            for tracked in item_links:
+                if not tracked.is_source:
+                    parts.append(
+                        f"<p>Continues: “{escape(tracked.title)}” ({_owner(tracked.ownership)})</p>"
+                    )
             for text in (item.action_text, item.deadline_text):
                 if text:
                     parts.append(f"<p>{escape(text)}</p>")
@@ -140,19 +184,26 @@ class DigestView(QTextBrowser):
                     dismiss = f"mailbrief:dismiss/{view.suggestion_id}"
                     self._suggestions[accept] = (ACCEPT, view.suggestion_id)
                     self._suggestions[dismiss] = (DISMISS, view.suggestion_id)
+                    into: list[tuple[str, str]] = []
+                    for tracked in item_links:
+                        key = f"mailbrief:into/{len(self._into)}"
+                        self._into[key] = (view.suggestion_id, tracked.public_id, tracked.revision)
+                        into.append((key, tracked.title))
                     parts.append(
-                        _suggestion_html(view, accept, dismiss, ZoneInfo(digest.timezone_name))
+                        _suggestion_html(
+                            view, accept, dismiss, ZoneInfo(digest.timezone_name), into
+                        )
                     )
             # The brief's account_id is the account's email address, and each item's
             # message_key is its Gmail message ID.
             reply = f"mailbrief:reply/{index}"
             self._replies[reply] = (digest.account_id, item.message_key)
-            links = [f'<a href="{reply}">Draft a reply</a>']
+            footer = [f'<a href="{reply}">Draft a reply</a>']
             source = item.source_url
             if source.scheme == "https" and source.host == "mail.google.com":
                 link = f"mailbrief:source/{index}"
                 self._sources[link] = str(source)
-                links.append(f'<a href="{link}">Open source in Gmail</a>')
-            parts.append(f"<p>{' · '.join(links)}</p>")
+                footer.append(f'<a href="{link}">Open source in Gmail</a>')
+            parts.append(f"<p>{' · '.join(footer)}</p>")
         self.setHtml("".join(parts))
         self.verticalScrollBar().setValue(position if same else 0)

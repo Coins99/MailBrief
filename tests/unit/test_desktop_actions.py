@@ -160,6 +160,41 @@ async def test_saving_an_edit_without_a_plan_leaves_the_steps_unchanged(tmp_path
         await runtime.close()
 
 
+async def test_the_runtime_links_briefs_adds_to_actions_and_marks_threads_seen(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    runtime = DesktopRuntime(path)
+    try:
+        assert await runtime.load_saved() is None  # Migrates the new database.
+        await seed_brief(path)
+        saved = await runtime.load_saved()
+        assert saved is not None
+        first, second = (view.suggestion_id for view in saved.items[0].suggestions)
+        assert await runtime.brief_links(saved) == {}
+
+        action = await runtime.accept_suggestion(first)
+        (link,) = (await runtime.brief_links(saved))[saved.items[0].message_key]
+        assert (link.public_id, link.revision, link.is_source) == (action.public_id, 1, True)
+
+        added = await runtime.accept_into(second, action.public_id, 1)
+        assert (added.action.revision, added.source_added) == (2, False)
+        assert states(await runtime.load_saved()) == [SuggestionState.ACCEPTED] * 2
+        undone = await runtime.undo_accept_into(second, action.public_id, 2, added.source_added)
+        assert undone.revision == 3
+        assert states(await runtime.load_saved()) == [
+            SuggestionState.ACCEPTED,
+            SuggestionState.PENDING,
+        ]
+
+        # Nothing later in its thread: marking it seen makes no new revision.
+        assert (await runtime.mark_thread_seen(action.public_id, 3)).revision == 3
+        with pytest.raises(ActionConflictError):
+            await runtime.mark_thread_seen(action.public_id, 1)
+    finally:
+        await runtime.close()
+
+
 async def test_action_calls_need_initialized_storage(tmp_path: Path) -> None:
     runtime = DesktopRuntime(tmp_path / "unopened.sqlite3")
 

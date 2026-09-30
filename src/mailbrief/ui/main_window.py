@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit, ThreadLink
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
 from mailbrief.domain.digests import (
@@ -31,6 +31,7 @@ from mailbrief.domain.digests import (
     DigestStatus,
     SavedBriefSummary,
     SyncProgress,
+    SyncResult,
     SyncStatus,
 )
 from mailbrief.domain.drafting import (
@@ -58,6 +59,7 @@ from mailbrief.infra.files import write_text_atomically
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.actions import (
     COMPLETED_LIST_LIMIT,
+    AcceptedInto,
     ActionConflictError,
     ActionNotFoundError,
     SuggestionNotFoundError,
@@ -79,7 +81,7 @@ from mailbrief.services.preferences import (
 )
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.ui.action_editor import ActionEditor
-from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPanel
+from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, SEEN, ActionsPanel
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
 from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
@@ -127,6 +129,14 @@ class DesktopBackend(Protocol):
     async def close(self) -> None: ...
     async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]: ...
     async def accept_suggestion(self, suggestion_id: int) -> Action: ...
+    async def brief_links(self, digest: DailyDigest) -> dict[str, tuple[ThreadLink, ...]]: ...
+    async def accept_into(
+        self, suggestion_id: int, public_id: str, revision: int
+    ) -> AcceptedInto: ...
+    async def undo_accept_into(
+        self, suggestion_id: int, public_id: str, revision: int, remove_source: bool
+    ) -> Action: ...
+    async def mark_thread_seen(self, public_id: str, revision: int) -> Action: ...
     async def dismiss_suggestion(self, suggestion_id: int) -> None: ...
     async def restore_suggestion(self, suggestion_id: int) -> None: ...
     async def unaccept_action(self, public_id: str, revision: int) -> None: ...
@@ -205,6 +215,20 @@ _EXCLUDED_TIP = (
     "This sender is excluded in Settings > Preferences, so this message is never analyzed. "
     "Change the rule there to include it."
 )
+
+
+def thread_check_text(sync: SyncResult) -> str:
+    """The run's check of tracked threads in one sentence, never with its code; empty when
+    no threads were tracked."""
+    if sync.threads_stopped_code:
+        return "Thread checks stopped early."
+    tracked, checked = sync.threads_tracked, sync.threads_checked
+    if not tracked:
+        return ""
+    noun = "thread" if tracked == 1 else "threads"
+    if checked == tracked:
+        return f"Checked {checked} tracked {noun}."
+    return f"Checked {checked} of {tracked} tracked {noun}; {sync.threads_failed} failed."
 
 
 class _ApprovedGate:
@@ -430,6 +454,7 @@ class MainWindow(QMainWindow):
         self.digest.zone = self.zone
         self.cached_dialog.zone = self.zone
         self.digest.suggestion_requested.connect(self._request_suggestion)
+        self.digest.accept_into_requested.connect(self._request_accept_into)
         self.digest.setMinimumHeight(180)
         layout.addWidget(self.digest, 1)
         self.actions_panel = ActionsPanel()
@@ -518,7 +543,18 @@ class MainWindow(QMainWindow):
             await self._reload_brief()
             return
         if saved is not None:
-            self.digest.show_digest(saved)
+            await self._show_digest(saved)
+
+    async def _show_digest(self, digest: DailyDigest) -> None:
+        """Every brief is shown here, with the actions that continue its threads; when those
+        can't be read, the brief is shown without them."""
+        links: dict[str, tuple[ThreadLink, ...]] | None
+        try:
+            links = await self.backend.brief_links(digest)
+        except Exception as exc:
+            log_failure(exc)
+            links = None
+        self.digest.show_digest(digest, links)
 
     async def _refresh_actions(self) -> None:
         now = self.now()
@@ -576,6 +612,32 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Accepted: {action.title}. It stays open until you complete it.")
         await self._refresh_views()
 
+    def _request_accept_into(self, suggestion_id: int, public_id: str, revision: int) -> None:
+        self._start_from_link(lambda: self._accept_into(suggestion_id, public_id, revision))
+
+    async def _accept_into(self, suggestion_id: int, public_id: str, revision: int) -> None:
+        """Add the suggestion's email to an action that continues its thread, with Undo."""
+        try:
+            result = await self.backend.accept_into(suggestion_id, public_id, revision)
+        except ActionConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static; names no action or mail.
+            await self._refresh_views()
+            return
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        action = result.action
+
+        async def undo() -> None:
+            await self.backend.undo_accept_into(
+                suggestion_id, action.public_id, action.revision, result.source_added
+            )
+
+        self._offer_undo("Undo add", undo)
+        self.status.setText(f"Added to: {action.title}.")
+        await self._refresh_views()
+
     async def _dismiss_suggestion(self, suggestion_id: int) -> None:
         try:
             await self.backend.dismiss_suggestion(suggestion_id)
@@ -611,6 +673,8 @@ class MainWindow(QMainWindow):
             self.start(lambda: self._reopen_action(action), cancellable=False)
         elif kind == DELETE:
             self.start(lambda: self._delete_action(action), cancellable=False)
+        elif kind == SEEN:
+            self.start(lambda: self._mark_seen(action), cancellable=False)
 
     def _request_save_action(
         self, action: Action, edit: ActionEdit, steps: Sequence[StepEdit] | None
@@ -660,6 +724,16 @@ class MainWindow(QMainWindow):
 
         self._offer_undo("Undo delete", undo)
         self.status.setText(f"Deleted: {action.title}.")
+        await self._refresh_views()
+
+    async def _mark_seen(self, action: Action) -> None:
+        try:
+            marked = await self.backend.mark_thread_seen(action.public_id, action.revision)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._offer_undo()  # Like an edit, it has no undo; an older offer could be stale.
+        self.status.setText(f"Marked seen: {marked.title}.")
         await self._refresh_views()
 
     async def _save_action(
@@ -1239,7 +1313,7 @@ class MainWindow(QMainWindow):
         self.status.setText("Ready. Sync to review today's messages.")
         await self._load_owner_preferences()
         if saved is not None:
-            self.digest.show_digest(saved)
+            await self._show_digest(saved)
         else:
             self.digest.setPlainText(
                 "No saved brief yet. Connect Gmail, then sync and review your shortlist."
@@ -1305,7 +1379,7 @@ class MainWindow(QMainWindow):
         identity = (digest.account_id, digest.local_date)
         is_latest = latest is not None and (latest.account_id, latest.local_date) == identity
         self._set_shown(None if is_latest else identity)
-        self.digest.show_digest(digest)
+        await self._show_digest(digest)
 
     async def _back_to_latest(self) -> None:
         self._set_shown(None)
@@ -1332,7 +1406,7 @@ class MainWindow(QMainWindow):
         )
         if result.digest is not None:
             if local_date is None:
-                self.digest.show_digest(result.digest)
+                await self._show_digest(result.digest)
             else:
                 await self._view(result.digest)
             self.status.setText(f"Brief saved ({result.digest.status.value}).")
@@ -1349,6 +1423,9 @@ class MainWindow(QMainWindow):
             self.status.setText("Transmission declined. No messages sent to AI in this run.")
         else:
             self.status.setText("Refresh failed. The displayed saved brief is unchanged.")
+        threads = thread_check_text(result.sync)
+        if threads:
+            self.status.setText(f"{self.status.text()} {threads}")
         if result.error_code == "AUTH_REQUIRED" or result.sync.error_code == "AUTH_REQUIRED":
             self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
         for code in dict.fromkeys((result.error_code, result.sync.error_code)):

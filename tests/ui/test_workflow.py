@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
+from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit, ThreadLink
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
@@ -26,6 +26,7 @@ from mailbrief.domain.digests import (
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
+from mailbrief.services.actions import AcceptedInto
 from mailbrief.services.brief import ConsentGate, ShortlistGate
 from mailbrief.services.preferences import PreferencesConflictError
 from mailbrief.ui.main_window import MainWindow
@@ -80,6 +81,12 @@ class FakeBackend(FakeDrafts):
         self.generated_days: list[date | None] = []
         self.key_value: SecretStr | None = None
         self.revoked = False
+        # The actions continuing each message's thread, for every brief shown; links_fail
+        # makes every read fail. source_added is what accept_into reports.
+        self.links: dict[str, tuple[ThreadLink, ...]] = {}
+        self.links_fail: Exception | None = None
+        self.link_calls: list[DailyDigest] = []
+        self.source_added = True
         self.sync = SyncResult(
             account_id="owner@example.com",
             range_start_utc=datetime(2026, 9, 4, tzinfo=UTC),
@@ -113,6 +120,27 @@ class FakeBackend(FakeDrafts):
     async def accept_suggestion(self, suggestion_id: int) -> Action:
         await self._act("accept_suggestion", suggestion_id)
         return make_action(title="Approve the budget")
+
+    async def brief_links(self, digest: DailyDigest) -> dict[str, tuple[ThreadLink, ...]]:
+        self.link_calls.append(digest)
+        if self.links_fail is not None:
+            raise self.links_fail
+        return self.links
+
+    async def accept_into(self, suggestion_id: int, public_id: str, revision: int) -> AcceptedInto:
+        await self._act("accept_into", suggestion_id, public_id, revision)
+        action = make_action(public_id=public_id, title="Send the deck", revision=revision + 1)
+        return AcceptedInto(action, source_added=self.source_added)
+
+    async def undo_accept_into(
+        self, suggestion_id: int, public_id: str, revision: int, remove_source: bool
+    ) -> Action:
+        await self._act("undo_accept_into", suggestion_id, public_id, revision, remove_source)
+        return make_action(public_id=public_id, revision=revision + 1)
+
+    async def mark_thread_seen(self, public_id: str, revision: int) -> Action:
+        await self._act("mark_thread_seen", public_id, revision)
+        return make_action(public_id=public_id, revision=revision + 1)
 
     async def dismiss_suggestion(self, suggestion_id: int) -> None:
         await self._act("dismiss_suggestion", suggestion_id)
