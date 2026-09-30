@@ -666,7 +666,7 @@ it, or `--include`, forgets the decline. Being pushed out by a limit is not a de
 - Desktop only, only while open; there is no background service.
 - At most 10 messages per automatic run, and the usual messages-per-brief and AI limits still
   apply (an explicit `MAILBRIEF_*` variable wins).
-- "Ready" counts the automatic selection, including messages already analyzed.
+- "Ready" counts only new messages: the selection minus those in the day's saved brief.
 - Automatic runs never write to the mailbox, to actions or to drafts.
 
 ### Live acceptance

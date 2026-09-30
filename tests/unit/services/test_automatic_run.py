@@ -351,15 +351,15 @@ async def test_an_automatic_run_takes_no_review_and_no_choices(session: AsyncSes
 async def test_an_automatic_brief_still_derives_proposals(session: AsyncSession) -> None:
     signal = answer_all(follow_up="cancelled", follow_up_evidence="waiting on it")
     manual = build(session, FakeAIProvider([signal]), RecordingGate(True))
-    await manual.generate(tz_key=ZONE)
+    await manual.generate(tz_key=ZONE, include_ids=("m1",), shortlist_limit=1)
     public_id = await link_m0_to_an_action(session)
     owner = await AccountRepository(session).get_by_email("user@example.com")
     assert owner is not None
     await ConsentRepository(session).set_auto_send(owner.id, PROVIDER, "2", 1, NOW)
     await session.commit()
 
-    # From the cached analyses: m1 follows the action's source m0 in its thread.
-    result = await build(session, FakeAIProvider(), NoAsking(answer=False)).generate(
+    # m1, in the day's brief, follows the action's source m0 in its thread; m0 is the new one.
+    result = await build(session, FakeAIProvider([answer_all()]), NoAsking(answer=False)).generate(
         tz_key=ZONE, automatic=True
     )
 

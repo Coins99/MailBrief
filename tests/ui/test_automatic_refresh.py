@@ -101,9 +101,9 @@ def open_dialogs(window: MainWindow) -> list[QDialog]:
 @pytest.mark.parametrize(
     ("count", "sentence"),
     [
-        (0, "No messages are ready to review."),
-        (1, "1 message is ready to review."),
-        (4, "4 messages are ready to review."),
+        (0, "Nothing new to review."),
+        (1, "1 new message is ready to review."),
+        (4, "4 new messages are ready to review."),
     ],
 )
 async def test_a_refresh_without_permission_says_how_many_messages_are_ready(
@@ -164,16 +164,16 @@ async def test_the_status_line_says_when_a_refresh_is_under_way(
 @pytest.mark.parametrize(
     ("analyzed", "deferred", "proposals", "sentence"),
     [
-        (3, 0, 0, "analyzed 3 messages."),
-        (1, 0, 0, "analyzed 1 message."),
-        (3, 2, 0, "analyzed 3 messages; 2 wait for your review."),
-        (1, 1, 0, "analyzed 1 message; 1 waits for your review."),
-        (2, 0, 1, "analyzed 2 messages. Proposed 1 update to your actions."),
+        (3, 0, 0, "analyzed 3 new messages."),
+        (1, 0, 0, "analyzed 1 new message."),
+        (3, 2, 0, "analyzed 3 new messages; 2 wait for your review."),
+        (1, 1, 0, "analyzed 1 new message; 1 waits for your review."),
+        (2, 0, 1, "analyzed 2 new messages. Proposed 1 update to your actions."),
         (
             2,
             3,
             4,
-            "analyzed 2 messages; 3 wait for your review. Proposed 4 updates to your actions.",
+            "analyzed 2 new messages; 3 wait for your review. Proposed 4 updates to your actions.",
         ),
         (0, 0, 0, "nothing new to analyze."),
     ],
@@ -240,7 +240,7 @@ async def test_a_refresh_never_pulls_the_owner_away_from_a_past_brief(
 
     assert len(backend.link_calls) == shown  # Not shown: they are reading another day's.
     assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
-    assert window.status.text().startswith("Automatic brief at 10:02: analyzed 3 messages")
+    assert window.status.text().startswith("Automatic brief at 10:02: analyzed 3 new messages")
 
 
 # When it doesn't run
@@ -398,7 +398,7 @@ async def test_a_partial_brief_reports_what_it_saved_and_why_some_failed(
     await due(window)
 
     assert window.status.text() == (
-        "Automatic brief at 10:02: analyzed 1 message. "
+        "Automatic brief at 10:02: analyzed 1 new message. "
         "Automatic refresh: Groq rate limit reached; retry later."
     )
 

@@ -281,8 +281,14 @@ def review_shortlist(
     limit: int = MAX_SHORTLIST_SIZE,
     blocked: frozenset[str] = frozenset(),
     declined: frozenset[str] = frozenset(),
+    carried: Sequence[str] = (),
 ) -> list[RankedMessage]:
     """Apply explicit choices only within this account/day, at most ``limit`` messages.
+
+    ``carried`` are the messages of the day's saved brief, in brief order (ADR 0017). Those
+    still among ``ranked``, not blocked, not declined and not excluded stay selected ahead
+    of the automatic selection, which fills the free slots; the others are ignored. An
+    explicit include is never cut by carried messages.
 
     Per-run exclusions are not backfilled. Blocked messages (from excluded senders) can't
     be included and never take a slot: the automatic selection is made without them.
@@ -308,7 +314,12 @@ def review_shortlist(
         max_size=limit,
     )
     selected = [available[key] for key in include]
-    selected.extend(
-        item for item in automatic if item.message.provider_message_id not in include | exclude
-    )
+    kept = [
+        available[key]
+        for key in dict.fromkeys(carried)
+        if key in available and key not in blocked | declined | include | exclude
+    ]
+    selected.extend(kept)
+    taken = include | exclude | {item.message.provider_message_id for item in kept}
+    selected.extend(item for item in automatic if item.message.provider_message_id not in taken)
     return sorted(selected[:limit], key=_sort_key)

@@ -126,6 +126,24 @@ class ApplicationService:
             len(taken_back),
         )
 
+    async def _carried_outside(
+        self,
+        account: AccountTable,
+        carried_outside: frozenset[str],
+        known: set[str],
+        excluded_senders: Sequence[str],
+    ) -> list[NormalizedMessage]:
+        """The cached carried outside replies that aren't candidates already."""
+        wanted = carried_outside - known
+        if not wanted:
+            return []
+        provider = ProviderKind(account.provider)
+        messages = [
+            MessageRepository.to_domain(row, account.provider_account_id, provider)
+            for row in await self._message_repo.get_by_provider_ids(account.id, wanted)
+        ]
+        return [m for m in messages if not sender_excluded(m.sender.address, excluded_senders)]
+
     async def get_or_restore_account(self) -> AccountTable:
         """Connect or restore an existing account session and persist identity."""
         identity = await self._provider.connect()
@@ -147,6 +165,8 @@ class ApplicationService:
         shortlist_limit: int = MAX_SHORTLIST_SIZE,
         excluded_senders: tuple[str, ...] = (),
         local_date: date | None = None,
+        carried: Sequence[str] = (),
+        carried_outside: frozenset[str] = frozenset(),
     ) -> tuple[SyncResult, list[RankedMessage]]:
         """Connect, sync and rank one day, optionally reviewing all metadata before body access.
 
@@ -175,6 +195,14 @@ class ApplicationService:
         unchecks in the gate's review, or names in ``exclude_ids``, becomes declined. One that
         is merely pushed out by the limit, because ``include_ids`` named others, is not. Each
         message selected, by the gate or by ``include_ids``, has any earlier decline forgotten.
+
+        ``carried`` are the messages of the day's saved brief, in brief order (ADR 0017): runs
+        through a day are cumulative, so each still-eligible one stays selected ahead of the
+        automatic selection. One that was an ordinary Inbox message must still be in the day's
+        Inbox; one the brief listed as a reply from outside the Inbox (``carried_outside``)
+        keeps that status, archived or not, so it stays in its section even though, analyzed,
+        it no longer qualifies as an outside reply. Blocked, declined, uncached and archived
+        ones are silently dropped.
 
         Returns the terminal SyncResult and deterministic shortlisted RankedMessage items.
         """
@@ -244,6 +272,19 @@ class ApplicationService:
             else []
         )
 
+        # Carried outside replies keep that status; carried Inbox messages are already
+        # candidates if still in the Inbox, and dropped if archived.
+        outside = [
+            *outside,
+            *await self._carried_outside(
+                account,
+                carried_outside,
+                {m.provider_message_id for m in outside}
+                | {row.provider_message_id for row in rows},
+                excluded_senders,
+            ),
+        ]
+
         if not rows and not outside:
             review_shortlist(
                 [], include_ids=include_ids, exclude_ids=exclude_ids, limit=shortlist_limit
@@ -309,10 +350,17 @@ class ApplicationService:
             limit=shortlist_limit,
             blocked=blocked,
             declined=declined,
+            carried=carried,
         )
         # What the automatic selection alone picks, to tell what the owner then left out.
         automatic = (
-            review_shortlist(ranked, limit=shortlist_limit, blocked=blocked, declined=declined)
+            review_shortlist(
+                ranked,
+                limit=shortlist_limit,
+                blocked=blocked,
+                declined=declined,
+                carried=carried,
+            )
             if include_ids or exclude_ids
             else shortlist
         )

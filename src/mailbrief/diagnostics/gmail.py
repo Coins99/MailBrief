@@ -757,10 +757,10 @@ class _NeverAsks:
 def _ready_line(ready: int) -> str:
     """What an automatic run without permission found, in the CLI's own words."""
     if ready == 0:
-        return "No messages are ready to review."
+        return "Nothing new to review."
     if ready == 1:
-        return "1 message is ready to review; automatic analysis is off."
-    return f"{ready} messages are ready to review; automatic analysis is off."
+        return "1 new message is ready to review; automatic analysis is off."
+    return f"{ready} new messages are ready to review; automatic analysis is off."
 
 
 def _outcome(result: BriefRunResult) -> str:

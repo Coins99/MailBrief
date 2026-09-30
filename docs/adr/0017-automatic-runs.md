@@ -73,13 +73,17 @@ at any moment.
 - Migration 0012 adds `owner_preferences.refresh_on_launch` and `refresh_interval_minutes`,
   `ai_consents.auto_send_limit` and `auto_send_granted_at_utc`, `digests.deferred_count` and
   `messages.review_declined_at_utc`. Downgrading drops them and keeps every row.
-- An automatic run that saves a brief replaces today's saved brief, like any run, with the
-  automatic selection's messages. Messages the owner checked by hand that the automatic
-  selection would not pick leave that brief until the next review.
+- Runs through a day are cumulative (added in Part 9): a day keeps one brief, and every run
+  of that day, automatic or not, carries the saved brief's messages forward ahead of the
+  automatic selection, which fills the free slots within messages per brief. A carried
+  message drops out only when it is no longer cached, was an Inbox message that has been
+  archived, is now blocked or was declined; one the brief listed as a reply from outside
+  the Inbox keeps that status. So an automatic run never removes a message the owner chose
+  earlier in the day.
 - A run that only checks Gmail still writes cached metadata and ranks, and follows tracked
   threads; it sends nothing and changes no action.
-- "Ready to review" counts the automatic selection, including messages an earlier brief
-  already covers; the desktop does not know which cached analyses apply without the bodies,
-  which an automatic run without permission never downloads.
+- "Ready to review" counts only new messages: the automatic selection minus the ones the
+  day's saved brief already carries (Part 9). With none, an automatic run says "Nothing new
+  to review" and, even with permission, reads and saves nothing.
 - Wall-clock time drives the schedule, so a computer that sleeps runs once on waking rather
   than catching up.

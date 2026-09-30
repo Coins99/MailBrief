@@ -27,7 +27,7 @@ from tests.unit.providers.groq.groq_fixtures import sent_messages
 pytestmark = pytest.mark.respx(assert_all_called=False)
 
 NO_CONSENT = "Analyze once with Sync and review to give consent first."
-READY = "messages are ready to review; automatic analysis is off."
+READY = "new messages are ready to review; automatic analysis is off."
 
 
 def automatic(path: Path, *options: str) -> int:
@@ -90,8 +90,8 @@ def test_without_permission_an_automatic_run_only_counts_what_is_ready(
 @pytest.mark.parametrize(
     ("extra", "sentence"),
     [
-        (0, "No messages are ready to review."),
-        (1, "1 message is ready to review; automatic analysis is off."),
+        (0, "Nothing new to review."),
+        (1, "1 new message is ready to review; automatic analysis is off."),
     ],
 )
 def test_the_ready_sentence_handles_none_and_one(
@@ -127,11 +127,12 @@ def test_a_revoked_consent_leaves_an_automatic_run_with_only_a_count(
     capsys.readouterr()
     assert consent(path, "revoke") == 0
     capsys.readouterr()
+    mailbox.add("a2")
     sent = route.call_count
 
     assert automatic(path) == 0
 
-    assert "1 message is ready to review; automatic analysis is off." in capsys.readouterr().out
+    assert "1 new message is ready to review; automatic analysis is off." in capsys.readouterr().out
     assert route.call_count == sent  # Nothing more was sent.
     assert consent(path, "status") == 0
     assert "Groq consent not granted" in capsys.readouterr().out
@@ -193,8 +194,10 @@ def test_turning_the_permission_off_takes_effect_on_the_next_run(
     assert capsys.readouterr().out == "Automatic analysis is off. Every run asks you first.\n"
     assert automatic(path) == 0
 
-    # "Ready" counts the whole automatic selection, analyzed messages included.
-    assert f"3 {READY}" in capsys.readouterr().out
+    # a1 and a2 are in the day's brief; only a3 is new.
+    assert "1 new message is ready to review; automatic analysis is off." in (
+        capsys.readouterr().out
+    )
     assert route.call_count == sent
 
 
@@ -209,6 +212,7 @@ def test_an_automatic_run_can_show_what_it_saved(
     path = tmp_path / "auto.sqlite3"
     consented(path, monkeypatch, capsys)
     assert consent(path, "auto-send", "2", "--yes") == 0
+    mailbox.add("a2")
     capsys.readouterr()
 
     assert automatic(path, "--show") == 0
@@ -490,6 +494,5 @@ def test_a_declined_message_is_left_out_of_automatic_runs(
     assert automatic(path) == 0
 
     output = capsys.readouterr().out
-    assert "shortlisted 1, analyzed 0, reused 1" in output  # Only a1, already analyzed.
+    assert "Nothing new to review." in output  # a1 is in the day's brief; a2 was left out.
     assert route.call_count == sent
-    assert full_body_requests(respx_mock) == 2  # a1 twice (the first brief, then this run).

@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,6 +92,14 @@ class DigestService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._digests = DigestRepository(session)
+
+    async def carried(
+        self, account_id: int, local_date: date
+    ) -> tuple[tuple[str, ...], frozenset[str]]:
+        """The provider message IDs in that day's saved brief, in brief order, and which of
+        them are replies from outside today's Inbox; a later run that day carries them
+        forward."""
+        return await self._digests.message_ids_for_date(account_id, local_date)
 
     async def save(
         self,

@@ -366,6 +366,27 @@ class MessageRepository:
                 .values(is_in_inbox=True)
             )
 
+    async def get_by_provider_ids(
+        self, account_id: int, provider_message_ids: Iterable[str]
+    ) -> list[MessageTable]:
+        """The cached messages among these IDs, in any order; IDs no longer cached are
+        silently absent."""
+        found: list[MessageTable] = []
+        identifiers = sorted(set(provider_message_ids))
+        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+            result = await self._session.scalars(
+                select(MessageTable)
+                .where(
+                    MessageTable.account_id == account_id,
+                    MessageTable.provider_message_id.in_(
+                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
+                    ),
+                )
+                .execution_options(populate_existing=True)
+            )
+            found.extend(result)
+        return found
+
     async def declined_among(
         self, account_id: int, provider_message_ids: Iterable[str]
     ) -> frozenset[str]:
@@ -812,6 +833,24 @@ class DigestRepository:
         )
         result = await self._session.scalars(stmt)
         return result.first()
+
+    async def message_ids_for_date(
+        self, account_id: int, local_date: date
+    ) -> tuple[tuple[str, ...], frozenset[str]]:
+        """The provider message IDs in the saved brief of one account and day, in brief order,
+        and which of them the brief lists as replies from outside today's Inbox."""
+        result = await self._session.execute(
+            select(MessageTable.provider_message_id, DigestItemTable.section)
+            .join(DigestItemTable, DigestItemTable.message_id == MessageTable.id)
+            .join(DigestTable, DigestTable.id == DigestItemTable.digest_id)
+            .where(DigestTable.account_id == account_id, DigestTable.local_date == local_date)
+            .order_by(DigestItemTable.position)
+        )
+        rows = result.all()
+        return (
+            tuple(key for key, _ in rows),
+            frozenset(key for key, section in rows if section == DigestSection.FOLLOW_UPS.value),
+        )
 
     async def get_latest(self) -> DailyDigest | None:
         """Restore the brief for the newest local day across all local Gmail accounts,

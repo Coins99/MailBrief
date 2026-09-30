@@ -281,17 +281,18 @@ def thread_check_text(sync: SyncResult) -> str:
     return f"Checked {checked} of {tracked} tracked {noun}; {sync.threads_failed} failed."
 
 
-def _count_messages(count: int) -> str:
-    return f"{count} message" if count == 1 else f"{count} messages"
+def _count_messages(count: int, *, new: bool = False) -> str:
+    noun = "new message" if new else "message"
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _ready_text(ready: int) -> str:
-    """How many messages an automatic run without permission found ready to review."""
+    """How many new messages an automatic run found ready to review (ADR 0017)."""
     if ready == 0:
-        return "No messages are ready to review."
+        return "Nothing new to review."
     if ready == 1:
-        return "1 message is ready to review."
-    return f"{ready} messages are ready to review."
+        return "1 new message is ready to review."
+    return f"{ready} new messages are ready to review."
 
 
 class _ApprovedGate:
@@ -1668,7 +1669,9 @@ class MainWindow(QMainWindow):
         elif result.digest is not None:
             analyzed = 0 if result.coverage is None else result.coverage.analyzed
             text = f"Automatic brief at {stamp}: " + (
-                f"analyzed {_count_messages(analyzed)}" if analyzed else "nothing new to analyze"
+                f"analyzed {_count_messages(analyzed, new=True)}"
+                if analyzed
+                else "nothing new to analyze"
             )
             if result.deferred:
                 waiting = "waits" if result.deferred == 1 else "wait"

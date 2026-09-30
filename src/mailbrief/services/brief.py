@@ -164,14 +164,19 @@ class BriefService:
         sent. Once the brief is saved, its follow-up signals become proposals for the
         owner's actions (ADR 0016); a failure there never fails the saved brief.
 
+        Runs through a day are cumulative: the messages of the day's saved brief are carried
+        forward, so a later run, automatic or not, never drops one the owner chose unless it
+        is archived, newly blocked or declined; the day still has one brief.
+
         An ``automatic`` run (ADR 0017) briefs today only, takes no review and never asks
         for consent. It syncs, checks threads and ranks, then reads the automatic-analysis
         permission on the active consent for the current disclosure version. Without one, or
-        with nothing selected, it returns READY_FOR_REVIEW with the number of messages that
-        are ready, before any body is downloaded and with nothing sent or saved. With
-        permission it downloads the bodies, sends at most min(permission, ``shortlist_limit``)
-        messages in rank order, defers the rest (never sent, never cached, counted in the
-        coverage), then saves the brief and derives proposals as usual.
+        with nothing new selected, it returns READY_FOR_REVIEW with the number of new
+        messages (the selection minus the carried ones) that are ready, before any body is
+        downloaded and with nothing sent or saved. With permission it downloads the bodies,
+        sends at most min(permission, ``shortlist_limit``) messages in rank order, defers the
+        rest (never sent, never cached, counted in the coverage), then saves the brief and
+        derives proposals as usual.
         """
         if automatic and (shortlist_gate is not None or include_ids or exclude_ids):
             raise ValueError("An automatic run has no review.")
@@ -183,6 +188,8 @@ class BriefService:
         check_brief_date(local_date or today, today)
         window = day_window(local_date or today, zone)
         account = await self._application.get_or_restore_account()
+        # Runs through a day are cumulative: the day's saved brief is carried forward.
+        carried, carried_outside = await self._digests.carried(account.id, window.local_date)
         sync, shortlist = await self._application.prepare_daily_shortlist(
             tz_key=window.timezone_name,
             now_utc=now,
@@ -194,6 +201,8 @@ class BriefService:
             shortlist_limit=shortlist_limit,
             excluded_senders=excluded_senders,
             local_date=window.local_date,
+            carried=carried,
+            carried_outside=carried_outside,
         )
         if sync.status is SyncStatus.CANCELLED:
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
@@ -205,12 +214,11 @@ class BriefService:
         if cancel is not None and cancel.is_set():
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
         send_limit = await self._auto_send_limit(account.id) if automatic else 0
-        if automatic and (send_limit == 0 or not shortlist):
-            # Nothing may be sent, or nothing is selected: report, and leave the saved brief.
-            logger.info("Automatic run: %d messages ready, nothing sent", len(shortlist))
-            return BriefRunResult(
-                status=BriefStatus.READY_FOR_REVIEW, sync=sync, ready=len(shortlist)
-            )
+        new = sum(item.message.provider_message_id not in carried for item in shortlist)
+        if automatic and (send_limit == 0 or new == 0):
+            # Nothing may be sent, or nothing is new: report, and leave the saved brief.
+            logger.info("Automatic run: %d new messages ready, nothing sent", new)
+            return BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=sync, ready=new)
         prepared = await self._bodies.prepare(shortlist)
         plan = await self._analysis.plan(
             account_id=account.id,
