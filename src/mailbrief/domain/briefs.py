@@ -1,12 +1,13 @@
 """Brief-generation contracts shared by the analysis, digest and brief services."""
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Final, Self
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS
-from mailbrief.domain.common import DomainModel
+from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, SyncResult
 
 # The most messages an automatic run may send without asking (ADR 0017).
@@ -20,6 +21,7 @@ class AnalysisOutcome(StrEnum):
     REUSED = "reused"  # A valid cached analysis.
     FAILED = "failed"  # A body failure, or no valid result.
     SKIPPED = "skipped"  # An empty or unavailable body; never sent.
+    DEFERRED = "deferred"  # Over an automatic run's send limit; never sent or cached.
 
 
 # Sent for each message before the body; TransmissionPreview.fields adds the body with the
@@ -57,6 +59,30 @@ class TransmissionPreview(DomainModel):
         return self
 
 
+class AutoSendPermission(DomainModel):
+    """How many messages an automatic run may send without asking, on one account's active
+    consent (ADR 0017). ``limit`` 0 means none: every analysis asks first."""
+
+    account_email: str = Field(min_length=1, max_length=320)
+    limit: int = Field(ge=0, le=AUTO_SEND_LIMIT_MAX)
+    granted_at_utc: datetime | None = None
+
+    @field_validator("granted_at_utc")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else normalize_utc(value)
+
+
+class AutoSendStatus(AutoSendPermission):
+    """The permission with the disclosure it would rest on, for the desktop's dialog.
+
+    ``disclosure`` describes what one automatic run would send; its message count is at least
+    one, and the dialog sets it to the limit the owner is choosing.
+    """
+
+    disclosure: TransmissionPreview
+
+
 class BriefStatus(StrEnum):
     """Terminal state of one brief-generation run."""
 
@@ -65,6 +91,8 @@ class BriefStatus(StrEnum):
     CANCELLED = "cancelled"
     CONSENT_DECLINED = "consent_declined"
     ANALYSIS_FAILED = "analysis_failed"
+    # An automatic run without permission to send: it synced and ranked, nothing more.
+    READY_FOR_REVIEW = "ready_for_review"
 
 
 class BriefRunResult(DomainModel):
@@ -81,6 +109,10 @@ class BriefRunResult(DomainModel):
     # The HTTP status and sanitized provider code behind error_code, e.g. "HTTP 403".
     provider_detail: str | None = Field(default=None, max_length=100)
     proposals_created: int = Field(default=0, ge=0)  # Follow-up proposals made (ADR 0016).
+    # Messages an automatic run without permission found ready to review; it reads no body.
+    ready: int = Field(default=0, ge=0)
+    # Messages an automatic run deferred to the next review: over its send limit (ADR 0017).
+    deferred: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_digest(self) -> Self:

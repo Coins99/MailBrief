@@ -167,7 +167,8 @@ class ThreadService:
         tracked: Sequence[TrackedThread] | None = None,
     ) -> list[NormalizedMessage]:
         """Cached replies in tracked threads that ``window``'s Inbox sync can't see, newest
-        first, at most ``limit``.
+        first, at most ``limit``; replies the owner declined in a review (ADR 0017) come after
+        the others, so they fill a place only when no other reply wants it.
 
         A reply qualifies when it was received after its thread's baseline (TrackedThread),
         isn't the owner's own (is_own_message), isn't from a sender in ``excluded_senders``,
@@ -222,7 +223,7 @@ class ThreadService:
         )
         mine = own_addresses(account)
         provider = ProviderKind(account.provider)
-        found: list[NormalizedMessage] = []
+        found: list[tuple[bool, NormalizedMessage]] = []
         for row in result:
             baseline = since.get(row.conversation_id or "")
             if baseline is None or normalize_utc(row.received_at_utc) <= baseline:
@@ -232,9 +233,15 @@ class ThreadService:
                 message.sender.address, excluded_senders
             ):
                 continue
-            found.append(message)
-        found.sort(key=lambda item: (-item.received_at_utc.timestamp(), item.provider_message_id))
-        return found[:limit]
+            found.append((row.review_declined_at_utc is not None, message))
+        found.sort(
+            key=lambda item: (
+                item[0],
+                -item[1].received_at_utc.timestamp(),
+                item[1].provider_message_id,
+            )
+        )
+        return [message for _, message in found[:limit]]
 
     async def check(
         self, account: AccountTable, *, cancel: asyncio.Event | None = None

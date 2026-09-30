@@ -147,6 +147,7 @@ class Gate:
         *,
         blocked_ids: frozenset[str],
         outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None:
         self.candidates = tuple(keys(list(candidates)))

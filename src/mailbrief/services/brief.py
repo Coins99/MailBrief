@@ -28,7 +28,7 @@ from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.calendar import day_window, local_day_window, resolve_timezone
 from mailbrief.services.digest import DigestService
-from mailbrief.services.history import check_brief_date
+from mailbrief.services.history import BriefDateError, check_brief_date
 from mailbrief.services.proposals import ProposalService
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.services.ranking import ShortlistGate as ShortlistGate
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 CONSENT_DISCLOSURE_VERSION: Final = "2"
 _DISPLAY_NAMES: Final = {"openai": "OpenAI", "groq": "Groq"}
+_AUTOMATIC_TODAY: Final = "Automatic runs brief today only."
 
 
 class ConsentGate(Protocol):
@@ -77,6 +78,38 @@ def disclosure_lines(preview: TransmissionPreview) -> tuple[str, ...]:
     if preview.first_use:
         lines.append("Your consent is remembered for this account until you revoke it.")
     return tuple(lines)
+
+
+def permission_preview(
+    limit: int,
+    *,
+    provider_name: str,
+    model_name: str,
+    body_character_limit: int,
+    privacy_notice: str,
+) -> TransmissionPreview:
+    """What an automatic run with permission for ``limit`` messages (at least 1) may send,
+    as the transmission preview the disclosure lines describe (ADR 0017)."""
+    return TransmissionPreview(
+        provider_name=provider_name,
+        model_name=model_name,
+        message_count=limit,
+        truncated_count=0,
+        reused_count=0,
+        first_use=False,
+        body_character_limit=body_character_limit,
+        privacy_notice=privacy_notice,
+    )
+
+
+def permission_sentence(limit: int, account_email: str, provider_name: str) -> str:
+    """The plain sentence that says what the automatic-analysis permission allows."""
+    noun = "message" if limit == 1 else "messages"
+    return (
+        f"Automatic runs may send up to {limit} {noun} from {account_email} to "
+        f"{provider_display_name(provider_name)} without asking. "
+        "Revoke consent in Settings to stop."
+    )
 
 
 def _utc_now() -> datetime:
@@ -120,6 +153,7 @@ class BriefService:
         shortlist_limit: int = MAX_SHORTLIST_SIZE,
         excluded_senders: tuple[str, ...] = (),
         local_date: date | None = None,
+        automatic: bool = False,
     ) -> BriefRunResult:
         """Sync one day's Inbox, prepare bodies, confirm consent, analyze and save the brief.
 
@@ -129,10 +163,23 @@ class BriefService:
         Inbox now. Messages from ``excluded_senders`` are never selected, downloaded or
         sent. Once the brief is saved, its follow-up signals become proposals for the
         owner's actions (ADR 0016); a failure there never fails the saved brief.
+
+        An ``automatic`` run (ADR 0017) briefs today only, takes no review and never asks
+        for consent. It syncs, checks threads and ranks, then reads the automatic-analysis
+        permission on the active consent for the current disclosure version. Without one, or
+        with nothing selected, it returns READY_FOR_REVIEW with the number of messages that
+        are ready, before any body is downloaded and with nothing sent or saved. With
+        permission it downloads the bodies, sends at most min(permission, ``shortlist_limit``)
+        messages in rank order, defers the rest (never sent, never cached, counted in the
+        coverage), then saves the brief and derives proposals as usual.
         """
+        if automatic and (shortlist_gate is not None or include_ids or exclude_ids):
+            raise ValueError("An automatic run has no review.")
         now = self._clock()
         zone = resolve_timezone(tz_key)
         today = local_day_window(now, zone).local_date
+        if automatic and local_date not in (None, today):
+            raise BriefDateError(_AUTOMATIC_TODAY)
         check_brief_date(local_date or today, today)
         window = day_window(local_date or today, zone)
         account = await self._application.get_or_restore_account()
@@ -157,6 +204,13 @@ class BriefService:
 
         if cancel is not None and cancel.is_set():
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
+        send_limit = await self._auto_send_limit(account.id) if automatic else 0
+        if automatic and (send_limit == 0 or not shortlist):
+            # Nothing may be sent, or nothing is selected: report, and leave the saved brief.
+            logger.info("Automatic run: %d messages ready, nothing sent", len(shortlist))
+            return BriefRunResult(
+                status=BriefStatus.READY_FOR_REVIEW, sync=sync, ready=len(shortlist)
+            )
         prepared = await self._bodies.prepare(shortlist)
         plan = await self._analysis.plan(
             account_id=account.id,
@@ -164,6 +218,9 @@ class BriefService:
             bodies=prepared,
             timezone_name=window.timezone_name,
         )
+        if automatic:
+            # Rank order: the shortlist is sorted by rank, so the lowest-ranked wait.
+            plan.defer_after(min(send_limit, shortlist_limit))
         if cancel is not None and cancel.is_set():
             # Before the key check and consent, so a cancelled run writes no brief.
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
@@ -172,7 +229,8 @@ class BriefService:
             # messages still make a brief.
             run = self._analysis.fail_unsent(plan, KEY_MISSING)
         else:
-            if plan.to_send and not await self._consented(account.id, plan, now):
+            # An automatic run never asks: its permission is the owner's answer (ADR 0017).
+            if not automatic and plan.to_send and not await self._consented(account.id, plan, now):
                 return BriefRunResult(status=BriefStatus.CONSENT_DECLINED, sync=sync)
             run = await self._analysis.execute(plan, cancel=cancel, progress=progress)
             if run.cancelled:
@@ -198,6 +256,7 @@ class BriefService:
                 error_code=run.error_code or "ANALYSIS_FAILED",
                 ai_calls=run.requests_sent,
                 provider_detail=run.provider_detail,
+                deferred=coverage.deferred,
             )
         return BriefRunResult(
             status=BriefStatus.SAVED,
@@ -208,7 +267,16 @@ class BriefService:
             ai_calls=run.requests_sent,
             provider_detail=run.provider_detail,
             proposals_created=await self._derive(account, run, window.timezone_name),
+            deferred=coverage.deferred,
         )
+
+    async def _auto_send_limit(self, account_id: int) -> int:
+        """How many messages an automatic run may send without asking: the permission on the
+        active consent for the current disclosure version, 0 when there is none."""
+        consent = await self._consents.get_active(
+            account_id, self._analysis.provider_name, CONSENT_DISCLOSURE_VERSION
+        )
+        return 0 if consent is None else consent.auto_send_limit
 
     async def _derive(self, account: AccountTable, run: AnalysisRun, timezone_name: str) -> int:
         """Proposals from the saved brief's analyses; a failure is logged by type only."""
@@ -254,6 +322,7 @@ class BriefService:
             reused=counts[AnalysisOutcome.REUSED],
             failed=counts[AnalysisOutcome.FAILED],
             skipped=counts[AnalysisOutcome.SKIPPED],
+            deferred=counts[AnalysisOutcome.DEFERRED],
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             ai_provider=self._analysis.provider_name if used else None,

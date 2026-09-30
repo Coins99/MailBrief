@@ -643,6 +643,7 @@ class ReviewGate:
         *,
         blocked_ids: frozenset[str],
         outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None:
         return self.selected
@@ -663,6 +664,7 @@ async def test_review_can_replace_suggestion_with_other_inbox_message(
             *,
             blocked_ids: frozenset[str],
             outside_ids: frozenset[str],
+            declined_ids: frozenset[str],
             limit: int,
         ) -> tuple[str, ...]:
             assert len(candidates) == 12
@@ -799,6 +801,7 @@ class OfferedGate:
         *,
         blocked_ids: frozenset[str],
         outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None:
         self.offered = (

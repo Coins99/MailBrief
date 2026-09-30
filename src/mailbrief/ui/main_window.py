@@ -87,7 +87,12 @@ from mailbrief.services.preferences import (
     owner_zone,
 )
 from mailbrief.services.proposals import ProposalNotFoundError
-from mailbrief.services.ranking import MAX_SHORTLIST_SIZE, OUTSIDE_REPLY_TEXT, reason_text
+from mailbrief.services.ranking import (
+    DECLINED_TEXT,
+    MAX_SHORTLIST_SIZE,
+    OUTSIDE_REPLY_TEXT,
+    reason_text,
+)
 from mailbrief.ui.action_editor import ActionEditor
 from mailbrief.ui.actions_view import (
     COMPLETE,
@@ -1550,12 +1555,14 @@ class MainWindow(QMainWindow):
         *,
         blocked_ids: frozenset[str],
         outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None:
         """Blocked messages are listed but can't be checked; at most ``limit`` can be.
 
         Replies in tracked threads that aren't in today's Inbox (``outside_ids``) are labelled
-        as such and are otherwise like any other message."""
+        as such and are otherwise like any other message. Messages the owner left out of an
+        earlier review (``declined_ids``) start unchecked, with "you left this out earlier"."""
         if not candidates:
             return ()
         self._review = asyncio.get_running_loop().create_future()
@@ -1576,6 +1583,8 @@ class MainWindow(QMainWindow):
                 continue
             if message.provider_message_id in outside_ids:
                 label = f"{label} — {OUTSIDE_REPLY_TEXT}"
+            if message.provider_message_id in declined_ids:
+                label = f"{label} — {DECLINED_TEXT}"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
             item.setToolTip(

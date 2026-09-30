@@ -113,6 +113,26 @@ async def test_reset_before_any_save_writes_the_defaults(session: AsyncSession) 
     assert reset == OwnerPreferences(revision=1, updated_at_utc=AT)
 
 
+async def test_the_refresh_settings_save_reload_and_reset(
+    database: Database, session: AsyncSession
+) -> None:
+    preferences = service(session)
+    saved = await preferences.save(
+        PreferencesEdit(refresh_on_launch=True, refresh_interval_minutes=120), 0
+    )
+    assert (saved.refresh_on_launch, saved.refresh_interval_minutes) == (True, 120)
+    async with database.session() as other:
+        again = await PreferencesService(other).get()
+    assert again == saved
+
+    changed = await preferences.save(PreferencesEdit(refresh_interval_minutes=None), 1)
+    assert (changed.refresh_on_launch, changed.refresh_interval_minutes) == (False, None)
+
+    await preferences.save(PreferencesEdit(refresh_on_launch=True, refresh_interval_minutes=60), 2)
+    reset = await preferences.reset()  # No automatic refresh is the default.
+    assert (reset.refresh_on_launch, reset.refresh_interval_minutes) == (False, None)
+
+
 async def test_the_default_clock_is_utc(session: AsyncSession) -> None:
     before = datetime.now(UTC)
     reset = await PreferencesService(session).reset()

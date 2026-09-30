@@ -83,6 +83,8 @@ class DigestCoverage(DomainModel):
     - reused: valid cached analyses.
     - failed: body or analysis failures.
     - skipped: empty or unavailable bodies, which are never sent.
+    - deferred: messages an automatic run left for the next review because they were over
+      its send limit (ADR 0017); never sent and never cached.
     """
 
     sync_complete: bool
@@ -91,6 +93,7 @@ class DigestCoverage(DomainModel):
     reused: int = Field(ge=0)
     failed: int = Field(ge=0)
     skipped: int = Field(ge=0)
+    deferred: int = Field(default=0, ge=0)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     ai_provider: str | None = Field(default=None, max_length=64)
@@ -98,7 +101,8 @@ class DigestCoverage(DomainModel):
 
     @model_validator(mode="after")
     def validate_counts(self) -> Self:
-        if self.analyzed + self.reused + self.failed + self.skipped != self.shortlisted:
+        total = self.analyzed + self.reused + self.failed + self.skipped + self.deferred
+        if total != self.shortlisted:
             raise ValueError("coverage counts must add up to the shortlist size")
         return self
 

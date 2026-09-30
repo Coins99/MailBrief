@@ -42,6 +42,7 @@ AI_LIMIT_FIELDS: Final = (
 _REGION_ZONE: Final = re.compile(r"[A-Za-z]+(/[A-Za-z0-9_+-]+)+")
 _INVALID_RULE: Final = "A sender rule must be an address or @domain."
 _INVALID_ZONE: Final = "The time zone must be UTC or a region such as America/Toronto."
+_INVALID_INTERVAL: Final = "Refresh every 60, 120 or 240 minutes, or never."
 
 
 def is_region_zone(name: str) -> bool:
@@ -115,6 +116,16 @@ class PreferencesEdit(DomainModel):
     )
     ai_max_requests_per_run: int | None = Field(default=None, ge=1, le=AI_REQUESTS_MAX)
     ai_timeout_seconds: float | None = Field(default=None, ge=AI_TIMEOUT_MIN, le=AI_TIMEOUT_MAX)
+    # Automatic refresh while the desktop is open (ADR 0017): when it starts, and how often.
+    refresh_on_launch: bool = False
+    refresh_interval_minutes: int | None = None
+
+    @field_validator("refresh_interval_minutes")
+    @classmethod
+    def _interval(cls, value: int | None) -> int | None:
+        if value is not None and value not in REFRESH_INTERVALS:
+            raise ValueError(_INVALID_INTERVAL)
+        return value
 
     @field_validator("time_zone")
     @classmethod

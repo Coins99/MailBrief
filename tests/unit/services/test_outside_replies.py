@@ -333,3 +333,26 @@ async def test_the_number_of_queries_does_not_grow_with_the_data(
     selects.clear()
     assert len(await service.outside_replies(owner, TODAY, limit=10, tracked=every)) == 10
     assert len(selects) == 1
+
+
+async def test_replies_the_owner_declined_come_after_the_others(session: AsyncSession) -> None:
+    owner = await track(session)
+    await cache(
+        session,
+        owner,
+        reply("declined-newest", "deck", IN_TODAY + timedelta(hours=3), inbox=False),
+        reply("old", "deck", IN_TODAY, inbox=False),
+        reply("middle", "deck", IN_TODAY + timedelta(hours=1), inbox=False),
+        reply("new", "deck", IN_TODAY + timedelta(hours=2), inbox=False),
+    )
+    await MessageRepository(session).set_review_declined(owner.id, ["declined-newest"], START)
+    await session.commit()
+
+    # The declined reply is the newest, but it gives way: it only fills a place nobody wants.
+    assert await found(session, owner) == ["new", "middle", "old"]
+    assert await found(session, owner, limit=10) == ["new", "middle", "old", "declined-newest"]
+    assert await found(session, owner, limit=1) == ["new"]
+    # Taken back, it is the newest again.
+    await MessageRepository(session).set_review_declined(owner.id, ["declined-newest"], None)
+    await session.commit()
+    assert await found(session, owner) == ["declined-newest", "new", "middle"]

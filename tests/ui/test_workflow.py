@@ -70,6 +70,7 @@ class FakeBackend(FakeDrafts):
         self.candidates: tuple[str, ...] = ("message-1",)
         self.blocked: frozenset[str] = frozenset()
         self.outside: frozenset[str] = frozenset()
+        self.declined: frozenset[str] = frozenset()
         self.limit = 10
         self.closed = False
         self.cleaned = False
@@ -296,6 +297,7 @@ class FakeBackend(FakeDrafts):
                 tuple(key for key in self.candidates if key not in self.blocked),
                 blocked_ids=self.blocked,
                 outside_ids=self.outside,
+                declined_ids=self.declined,
                 limit=self.limit,
             )
             self.approved = await gate.confirm(

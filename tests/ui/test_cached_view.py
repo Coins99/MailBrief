@@ -35,6 +35,7 @@ async def test_keyboard_review_can_select_outside_suggestions_and_enforces_limit
             ("m0", "m1", "m2"),
             blocked_ids=frozenset(),
             outside_ids=frozenset(),
+            declined_ids=frozenset(),
             limit=10,
         )
     )

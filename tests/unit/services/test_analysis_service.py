@@ -14,7 +14,7 @@ from typing import cast
 import httpx
 import pytest
 import respx
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.config import Settings
@@ -51,6 +51,7 @@ from mailbrief.ports.errors import (
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.services.analysis import (
+    AnalysisPlan,
     AnalysisRun,
     AnalysisService,
     PlannedMessage,
@@ -1570,3 +1571,98 @@ def test_suggestions_get_what_the_follow_up_leaves_of_the_evidence_budget(
     (suggestion,) = analysis.suggestions
     assert len(quote) <= budget
     assert (suggestion.evidence == quote) is kept
+
+
+DEFERRED = AnalysisOutcome.DEFERRED
+
+
+async def planned(
+    session: AsyncSession, provider: AIProvider, shortlist: Sequence[RankedMessage], account_id: int
+) -> tuple[AnalysisService, AnalysisPlan]:
+    service = AnalysisService(session, provider, key_factory=counting_keys())
+    plan = await service.plan(
+        account_id=account_id, shortlist=shortlist, bodies=ready(shortlist), timezone_name=ZONE
+    )
+    return service, plan
+
+
+async def cached_rows(session: AsyncSession) -> int:
+    return await session.scalar(select(func.count()).select_from(AnalysisTable)) or 0
+
+
+async def test_deferring_keeps_the_top_messages_and_never_sends_or_caches_the_rest(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 5)  # In rank order: msg-0 ranks highest.
+    provider = FakeAIProvider([answer_all()])
+    service, plan = await planned(session, provider, shortlist, account_id)
+
+    assert plan.defer_after(2) == 3
+    assert [item.request.subject for item in plan.to_send if item.request] == [
+        "Budget item 0",
+        "Budget item 1",
+    ]
+    run = await service.execute(plan)
+
+    assert outcomes(run) == [ANALYZED, ANALYZED, DEFERRED, DEFERRED, DEFERRED]
+    (batch,) = provider.batches
+    assert [request.subject for request in batch] == ["Budget item 0", "Budget item 1"]
+    assert await cached_rows(session) == 2  # Nothing is cached for a deferred message.
+    for item in run.messages[2:]:
+        assert item.analysis is None and item.analysis_row_id is None
+
+
+async def test_messages_already_analyzed_are_not_counted_or_deferred(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 4)
+    await analyze(session, FakeAIProvider([answer_all()]), shortlist[:1], account_id=account_id)
+    provider = FakeAIProvider([answer_all()])
+    service, plan = await planned(session, provider, shortlist, account_id)
+    assert [item.outcome for item in plan.messages] == [AnalysisOutcome.REUSED, None, None, None]
+
+    assert plan.defer_after(1) == 2  # msg-0 is cached; msg-1 is the one new message sent.
+    run = await service.execute(plan)
+
+    assert outcomes(run) == [AnalysisOutcome.REUSED, ANALYZED, DEFERRED, DEFERRED]
+    assert sum(len(batch) for batch in provider.batches) == 1
+
+
+@pytest.mark.parametrize(("limit", "deferred"), [(0, 3), (1, 2), (3, 0), (4, 0), (50, 0)])
+async def test_the_number_deferred_is_what_is_over_the_limit(
+    session: AsyncSession, limit: int, deferred: int
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+    kept = min(limit, 3)
+    provider = FakeAIProvider([answer_all()] if kept else [])
+    service, plan = await planned(session, provider, shortlist, account_id)
+
+    assert plan.defer_after(limit) == deferred
+    run = await service.execute(plan)
+
+    assert outcomes(run).count(DEFERRED) == deferred
+    assert sum(len(batch) for batch in provider.batches) == kept
+    assert plan.defer_after(limit) == 0  # Again: nothing more is over it.
+
+
+async def test_a_negative_limit_is_a_mistake_and_changes_nothing(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 2)
+    _, plan = await planned(session, FakeAIProvider(), shortlist, account_id)
+
+    with pytest.raises(ValueError, match="negative"):
+        plan.defer_after(-1)
+
+    assert [item.outcome for item in plan.messages] == [None, None]
+
+
+async def test_a_failed_run_keeps_deferred_messages_deferred(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 4)
+    provider = FakeAIProvider([ProviderRateLimitError("limited")])
+    service, plan = await planned(session, provider, shortlist, account_id)
+    plan.defer_after(2)
+
+    run = await service.execute(plan)
+
+    # The provider stopped the run: what was to be sent failed, what was deferred stays so.
+    assert outcomes(run) == [FAILED, FAILED, DEFERRED, DEFERRED]
+    assert run.error_code == "AI_RATE_LIMITED"

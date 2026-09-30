@@ -71,6 +71,8 @@ def preferences_from_row(row: OwnerPreferencesTable | None) -> OwnerPreferences:
             ai_max_output_tokens=row.ai_max_output_tokens,
             ai_max_requests_per_run=row.ai_max_requests_per_run,
             ai_timeout_seconds=row.ai_timeout_seconds,
+            refresh_on_launch=row.refresh_on_launch,
+            refresh_interval_minutes=row.refresh_interval_minutes,
             revision=row.revision,
             updated_at_utc=row.updated_at_utc,
         )
@@ -90,3 +92,5 @@ def apply_edit(row: OwnerPreferencesTable, edit: PreferencesEdit) -> None:
     row.ai_max_output_tokens = edit.ai_max_output_tokens
     row.ai_max_requests_per_run = edit.ai_max_requests_per_run
     row.ai_timeout_seconds = edit.ai_timeout_seconds
+    row.refresh_on_launch = edit.refresh_on_launch
+    row.refresh_interval_minutes = edit.refresh_interval_minutes

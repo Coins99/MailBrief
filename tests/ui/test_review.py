@@ -39,9 +39,17 @@ async def start_review(
     blocked: frozenset[str],
     limit: int,
     outside: frozenset[str] = frozenset(),
+    declined: frozenset[str] = frozenset(),
 ) -> "asyncio.Task[tuple[str, ...] | None]":
     task = asyncio.create_task(
-        window.review(CANDIDATES, ("m1",), blocked_ids=blocked, outside_ids=outside, limit=limit)
+        window.review(
+            CANDIDATES,
+            ("m1",),
+            blocked_ids=blocked,
+            outside_ids=outside,
+            declined_ids=declined,
+            limit=limit,
+        )
     )
     await asyncio.sleep(0)
     return task
@@ -156,6 +164,7 @@ async def test_a_suggested_outside_reply_is_checked_by_default(window: MainWindo
             ("m2",),
             blocked_ids=frozenset(),
             outside_ids=frozenset({"m2"}),
+            declined_ids=frozenset(),
             limit=10,
         )
     )

@@ -22,6 +22,8 @@ _UNTRACKED: Final[Mapping[str, datetime]] = MappingProxyType({})
 _REASON_TEXT: Final = {RankReason.TRACKED_THREAD_REPLY: "reply in a thread you track"}
 # How the review and ``sync --show-metadata`` label a reply outside today's Inbox.
 OUTSIDE_REPLY_TEXT: Final = "reply in a tracked thread, not in today's Inbox"
+# How a review and ``sync --show-metadata`` mark a message the owner left out before.
+DECLINED_TEXT: Final = "you left this out earlier"
 
 
 def reason_text(reason: RankReason) -> str:
@@ -34,7 +36,9 @@ class ShortlistGate(Protocol):
 
     ``blocked_ids`` are messages from excluded senders: shown, but never selectable.
     ``outside_ids`` are replies in tracked threads that aren't in today's Inbox: selectable
-    like any other, and labelled so. At most ``limit`` messages may be selected.
+    like any other, and labelled so. ``declined_ids`` are messages the owner left out of an
+    earlier review: selectable, but not in ``selected_ids``, and labelled so. At most
+    ``limit`` messages may be selected.
     """
 
     async def review(
@@ -44,6 +48,7 @@ class ShortlistGate(Protocol):
         *,
         blocked_ids: frozenset[str],
         outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
         limit: int,
     ) -> tuple[str, ...] | None: ...
 
@@ -275,11 +280,15 @@ def review_shortlist(
     exclude_ids: tuple[str, ...] = (),
     limit: int = MAX_SHORTLIST_SIZE,
     blocked: frozenset[str] = frozenset(),
+    declined: frozenset[str] = frozenset(),
 ) -> list[RankedMessage]:
     """Apply explicit choices only within this account/day, at most ``limit`` messages.
 
     Per-run exclusions are not backfilled. Blocked messages (from excluded senders) can't
     be included and never take a slot: the automatic selection is made without them.
+    Declined messages (ones the owner left out of an earlier review, ADR 0017) also never
+    take a slot in the automatic selection, but unlike blocked ones an explicit choice can
+    include them again.
     """
     if not 1 <= limit <= MAX_SHORTLIST_SIZE:
         raise ValueError("The shortlist limit must be 1 to 10.")
@@ -294,7 +303,7 @@ def review_shortlist(
     if len(include) > limit:
         raise ShortlistReviewError("Too many manually included messages for one shortlist.")
     automatic = select_shortlist(
-        [item for item in ranked if item.message.provider_message_id not in blocked],
+        [item for item in ranked if item.message.provider_message_id not in blocked | declined],
         min_size=min(MIN_SHORTLIST_SIZE, limit),
         max_size=limit,
     )

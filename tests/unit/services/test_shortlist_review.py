@@ -109,3 +109,63 @@ def test_the_limit_caps_inclusions() -> None:
 def test_the_limit_must_be_one_to_ten(limit: int) -> None:
     with pytest.raises(ValueError, match="1 to 10"):
         review_shortlist(ranked_inbox(1), limit=limit)
+
+
+# Declined messages (ADR 0017)
+
+
+def test_declined_messages_never_take_a_slot_in_the_automatic_selection() -> None:
+    ranked = ranked_inbox(12)
+    declined = frozenset({"message-0", "message-3"})
+
+    selected = ids(review_shortlist(ranked, declined=declined))
+
+    assert len(selected) == 10
+    assert not declined & set(selected)
+    assert "message-10" in selected and "message-11" in selected  # Backfilled, like blocked.
+
+
+def test_a_declined_message_can_be_included_again() -> None:
+    ranked = ranked_inbox(12)
+    declined = frozenset({"message-0"})
+
+    selected = ids(review_shortlist(ranked, include_ids=("message-0",), declined=declined))
+
+    assert "message-0" in selected and len(selected) == 10
+    assert selected[0] == "message-0"  # It ranks first again, once chosen.
+
+
+def test_declined_and_excluded_messages_can_go_together() -> None:
+    selected = ids(
+        review_shortlist(
+            ranked_inbox(12),
+            exclude_ids=("message-1",),
+            declined=frozenset({"message-0"}),
+        )
+    )
+
+    # The decline is backfilled; the per-run exclusion still isn't.
+    assert len(selected) == 9 and not {"message-0", "message-1"} & set(selected)
+
+
+def test_a_blocked_message_that_was_also_declined_still_can_not_be_included() -> None:
+    with pytest.raises(ExcludedSenderError):
+        review_shortlist(
+            ranked_inbox(3),
+            include_ids=("message-1",),
+            blocked=frozenset({"message-1"}),
+            declined=frozenset({"message-1"}),
+        )
+
+
+def test_with_everything_declined_the_automatic_selection_is_empty() -> None:
+    ranked = ranked_inbox(4)
+    declined = frozenset(item.message.provider_message_id for item in ranked)
+
+    assert review_shortlist(ranked, declined=declined) == []
+
+
+def test_no_declines_changes_nothing() -> None:
+    ranked = ranked_inbox(12)
+
+    assert review_shortlist(ranked, declined=frozenset()) == review_shortlist(ranked)

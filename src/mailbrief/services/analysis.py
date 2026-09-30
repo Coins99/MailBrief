@@ -307,6 +307,22 @@ class AnalysisPlan:
         """Messages that still need a provider result, in shortlist order."""
         return [message for message in self.messages if message.outcome is None]
 
+    def defer_after(self, limit: int) -> int:
+        """Keep the first ``limit`` messages of ``to_send`` and defer the rest; returns how
+        many were deferred.
+
+        The shortlist is in rank order, so the lowest-ranked messages are the ones deferred.
+        A deferred message has an outcome, so it is never sent, never cached and never in the
+        brief; only the coverage counts it. Messages that already have an outcome, such as
+        cached analyses, cost nothing and are untouched.
+        """
+        if limit < 0:
+            raise ValueError("limit cannot be negative")
+        over = self.to_send[limit:]
+        for message in over:
+            message.outcome = AnalysisOutcome.DEFERRED
+        return len(over)
+
 
 @dataclass(frozen=True, slots=True)
 class AnalysisRun:

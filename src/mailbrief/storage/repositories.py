@@ -1,6 +1,6 @@
 """Database repositories implementing transactional persistence and domain mappings."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import cast
 
@@ -17,6 +17,7 @@ from mailbrief.domain.analysis import (
     FollowUpKind,
     MessageAnalysis,
 )
+from mailbrief.domain.briefs import AUTO_SEND_LIMIT_MAX
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.digests import (
     DailyDigest,
@@ -365,6 +366,55 @@ class MessageRepository:
                 .values(is_in_inbox=True)
             )
 
+    async def declined_among(
+        self, account_id: int, provider_message_ids: Iterable[str]
+    ) -> frozenset[str]:
+        """The IDs among these that the owner declined in a review (ADR 0017)."""
+        found: set[str] = set()
+        identifiers = sorted(set(provider_message_ids))
+        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+            result = await self._session.scalars(
+                select(MessageTable.provider_message_id).where(
+                    MessageTable.account_id == account_id,
+                    MessageTable.provider_message_id.in_(
+                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
+                    ),
+                    MessageTable.review_declined_at_utc.is_not(None),
+                )
+            )
+            found.update(result)
+        return frozenset(found)
+
+    async def set_review_declined(
+        self, account_id: int, provider_message_ids: Iterable[str], now_utc: datetime | None
+    ) -> int:
+        """Remember that the owner declined these messages (``now_utc``), or forget it
+        (None); returns how many rows changed.
+
+        Rows change as ORM objects, never by a bulk UPDATE, so messages already loaded in
+        the session show the change. The caller commits.
+        """
+        changed = 0
+        identifiers = sorted(set(provider_message_ids))
+        stamp = None if now_utc is None else normalize_utc(now_utc)
+        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+            result = await self._session.scalars(
+                select(MessageTable)
+                .where(
+                    MessageTable.account_id == account_id,
+                    MessageTable.provider_message_id.in_(
+                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
+                    ),
+                )
+                .execution_options(populate_existing=True)
+            )
+            for row in result:
+                if (row.review_declined_at_utc is None) != (stamp is None):
+                    row.review_declined_at_utc = stamp
+                    changed += 1
+        await self._session.flush()
+        return changed
+
     async def get_by_provider_message_id(
         self,
         account_id: int,
@@ -625,9 +675,10 @@ _COVERAGE_COLUMNS = (
 
 
 def _coverage_columns(coverage: DigestCoverage | None) -> dict[str, bool | int | str | None]:
-    """Map brief coverage onto digest columns; no coverage leaves every column NULL."""
+    """Map brief coverage onto digest columns; no coverage leaves every column NULL, except
+    the deferred count, which is never NULL."""
     if coverage is None:
-        return dict.fromkeys(_COVERAGE_COLUMNS)
+        return {**dict.fromkeys(_COVERAGE_COLUMNS), "deferred_count": 0}
     return {
         "sync_complete": coverage.sync_complete,
         "shortlisted_count": coverage.shortlisted,
@@ -635,6 +686,7 @@ def _coverage_columns(coverage: DigestCoverage | None) -> dict[str, bool | int |
         "reused_count": coverage.reused,
         "failed_count": coverage.failed,
         "skipped_count": coverage.skipped,
+        "deferred_count": coverage.deferred,
         "input_tokens": coverage.input_tokens,
         "output_tokens": coverage.output_tokens,
         "ai_provider": coverage.ai_provider,
@@ -677,6 +729,7 @@ def _coverage_from_row(digest: DigestTable) -> DigestCoverage | None:
         reused=digest.reused_count or 0,
         failed=digest.failed_count or 0,
         skipped=digest.skipped_count or 0,
+        deferred=digest.deferred_count,
         input_tokens=digest.input_tokens,
         output_tokens=digest.output_tokens,
         ai_provider=digest.ai_provider,
@@ -1010,8 +1063,57 @@ class ConsentRepository:
         assert consent is not None
         return consent
 
+    async def newest_active(
+        self, provider: str, disclosure_version: str, account_provider: str
+    ) -> tuple[AIConsentTable, AccountTable] | None:
+        """The most recently granted active consent to this provider and disclosure version
+        among the accounts of ``account_provider``, with its account; None when there is none."""
+        result = await self._session.execute(
+            select(AIConsentTable, AccountTable)
+            .join(AccountTable, AIConsentTable.account_id == AccountTable.id)
+            .where(
+                AIConsentTable.provider == provider,
+                AIConsentTable.disclosure_version == disclosure_version,
+                AIConsentTable.revoked_at_utc.is_(None),
+                AccountTable.provider == account_provider,
+            )
+            .order_by(AIConsentTable.granted_at_utc.desc(), AIConsentTable.id.desc())
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        found = result.first()
+        return None if found is None else (found[0], found[1])
+
+    async def set_auto_send(
+        self,
+        account_id: int,
+        provider: str,
+        disclosure_version: str,
+        limit: int,
+        now_utc: datetime,
+    ) -> AIConsentTable | None:
+        """Set how many messages an automatic run may send without asking (ADR 0017), on the
+        active consent for this disclosure version; None when there is no active consent.
+
+        A limit above 0 records when it was given; 0 clears both. Raises ValueError for a
+        limit outside 0 to AUTO_SEND_LIMIT_MAX. The consent changes as an ORM object, so a
+        loaded copy always shows it.
+        """
+        if not 0 <= limit <= AUTO_SEND_LIMIT_MAX:
+            raise ValueError(f"The limit must be 0 to {AUTO_SEND_LIMIT_MAX}.")
+        consent = await self.get_active(account_id, provider, disclosure_version)
+        if consent is None:
+            return None
+        consent.auto_send_limit = limit
+        consent.auto_send_granted_at_utc = normalize_utc(now_utc) if limit else None
+        await self._session.flush()
+        return consent
+
     async def revoke_all(self, account_id: int, provider: str, now_utc: datetime) -> int:
-        """Revoke every active consent for the provider and return how many were revoked."""
+        """Revoke every active consent for the provider and return how many were revoked.
+
+        A revoked consent keeps no automatic-analysis permission (ADR 0017).
+        """
         stmt = (
             update(AIConsentTable)
             .where(
@@ -1019,7 +1121,11 @@ class ConsentRepository:
                 AIConsentTable.provider == provider,
                 AIConsentTable.revoked_at_utc.is_(None),
             )
-            .values(revoked_at_utc=normalize_utc(now_utc))
+            .values(
+                revoked_at_utc=normalize_utc(now_utc),
+                auto_send_limit=0,
+                auto_send_granted_at_utc=None,
+            )
             .returning(AIConsentTable.id)
         )
         revoked = await self._session.scalars(stmt)

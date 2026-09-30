@@ -110,6 +110,22 @@ class ApplicationService:
             }
         )
 
+    async def _remember_declines(
+        self, account_id: int, *, left_out: set[str], taken_back: frozenset[str], now: datetime
+    ) -> None:
+        """Remember the owner's declines, and forget those they took back (ADR 0017)."""
+        if not left_out and not taken_back:
+            return
+        await self._message_repo.set_review_declined(account_id, left_out, now)
+        await self._message_repo.set_review_declined(account_id, taken_back, None)
+        if self._session:
+            await self._session.commit()
+        logger.info(
+            "Review left out %d messages and took back %d earlier declines",
+            len(left_out),
+            len(taken_back),
+        )
+
     async def get_or_restore_account(self) -> AccountTable:
         """Connect or restore an existing account session and persist identity."""
         identity = await self._provider.connect()
@@ -152,6 +168,13 @@ class ApplicationService:
         from a sender in ``excluded_senders``, and compete for the selection, the review and
         the limit like any other message; the result's ``outside_ids`` names the selected
         ones.
+
+        A message the owner left out of an earlier review (``review_declined_at_utc``) is
+        skipped by the automatic selection until they select it again (ADR 0017). Only an
+        active choice is remembered: a message the automatic selection picked that the owner
+        unchecks in the gate's review, or names in ``exclude_ids``, becomes declined. One that
+        is merely pushed out by the limit, because ``include_ids`` named others, is not. Each
+        message selected, by the gate or by ``include_ids``, has any earlier decline forgotten.
 
         Returns the terminal SyncResult and deterministic shortlisted RankedMessage items.
         """
@@ -276,12 +299,22 @@ class ApplicationService:
             len(blocked),
             len(outside_all),
         )
+        declined = frozenset(
+            row.provider_message_id for row in rows if row.review_declined_at_utc is not None
+        ) | await self._message_repo.declined_among(account.id, outside_all)
         shortlist = review_shortlist(
             ranked,
             include_ids=include_ids,
             exclude_ids=exclude_ids,
             limit=shortlist_limit,
             blocked=blocked,
+            declined=declined,
+        )
+        # What the automatic selection alone picks, to tell what the owner then left out.
+        automatic = (
+            review_shortlist(ranked, limit=shortlist_limit, blocked=blocked, declined=declined)
+            if include_ids or exclude_ids
+            else shortlist
         )
         if shortlist_gate is not None:
             candidates = tuple(
@@ -299,6 +332,7 @@ class ApplicationService:
                 tuple(item.message.provider_message_id for item in shortlist),
                 blocked_ids=blocked,
                 outside_ids=outside_all,
+                declined_ids=declined,
                 limit=shortlist_limit,
             )
             if selected is None or (cancel is not None and cancel.is_set()):
@@ -319,6 +353,18 @@ class ApplicationService:
                 item for item in candidates if item.message.provider_message_id in selected
             ]
         shortlist_keys = tuple(m.message.provider_message_id for m in shortlist)
+        picked = {item.message.provider_message_id for item in automatic}
+        await self._remember_declines(
+            account.id,
+            # The owner's review decides what was left out; without one, only --exclude does.
+            left_out=(
+                picked.difference(shortlist_keys)
+                if shortlist_gate is not None
+                else picked.intersection(exclude_ids)
+            ),
+            taken_back=declined.intersection(shortlist_keys),
+            now=now,
+        )
 
         return sync_result.model_copy(
             update={

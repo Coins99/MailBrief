@@ -126,6 +126,24 @@ def test_defaults() -> None:
         DraftLength.MEDIUM,
     )
     assert all(getattr(preferences, name) is None for name in AI_LIMIT_FIELDS)
+    # No automatic refresh until the owner chooses it (ADR 0017).
+    assert (preferences.refresh_on_launch, preferences.refresh_interval_minutes) == (False, None)
+
+
+@pytest.mark.parametrize("minutes", [None, 60, 120, 240])
+def test_the_refresh_interval_is_never_or_one_two_or_four_hours(minutes: int | None) -> None:
+    edit = PreferencesEdit(refresh_on_launch=True, refresh_interval_minutes=minutes)
+
+    assert (edit.refresh_on_launch, edit.refresh_interval_minutes) == (True, minutes)
+
+
+@pytest.mark.parametrize("minutes", [0, 1, 30, 59, 61, 90, 180, 241, 1440, -60])
+def test_any_other_refresh_interval_is_refused_without_echoing_it(minutes: int) -> None:
+    with pytest.raises(ValidationError) as caught:
+        PreferencesEdit(refresh_interval_minutes=minutes)
+
+    assert "Refresh every 60, 120 or 240 minutes, or never." in str(caught.value)
+    assert "input_value" not in str(caught.value)  # The value itself is never shown.
 
 
 @pytest.mark.parametrize(
