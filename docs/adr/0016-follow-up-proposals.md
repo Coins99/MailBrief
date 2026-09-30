@@ -30,7 +30,11 @@ sending anything about the owner's actions to the AI.
   - only live, open actions with a source in the email's thread in the same account, where
     the latest such source is older than the email, and the email isn't already a source;
   - only when applying would change something (a new deadline equal to the current one
-    proposes nothing), and for at most three actions per email, most urgent first;
+    proposes nothing and uses no slot), most urgent first, and for at most three actions
+    per email ever: the actions that already have a proposal from the email, in any state
+    and even if since closed, use up its slots, so applying one never frees a place;
+  - never from the owner's own messages (sent, or from one of the account's addresses);
+  - after any saved brief, a past day's included;
   - one proposal per action, email and kind. A newer analysis of the same email replaces a
     still-pending proposal of another kind for that action; applied and dismissed ones are
     kept;
@@ -53,6 +57,26 @@ sending anything about the owner's actions to the AI.
   sources and wasn't sent by the owner gets +20, "reply in a thread you track", so it is
   usually analyzed.
 
+## Replies outside today's Inbox
+
+A reply that proposes an update is often archived at once, or arrived on an earlier day, so
+today's Inbox sync never lists it and it could not be analyzed. The cache that thread
+tracking (ADR 0015) fills already holds it, so the run may offer it:
+
+- **Which and how many.** Cached messages in tracked threads that are newer than the
+  thread's baseline, not the owner's own, not yet analyzed at the current schema and not
+  both received in the day's window and in the Inbox. At most three per run, newest first,
+  and only in today's run, never a past day's.
+- **Same gates as any message.** They are ranked with the tracked-thread bonus and compete
+  for the automatic selection, the review, the consent preview and the messages-per-brief
+  limit; nothing is sent that the owner didn't approve, and the seven sent fields are
+  unchanged.
+- **Never excluded senders.** A message from an excluded sender is dropped before it is
+  counted, and again by the application, like any message.
+- **Labelled.** In the review ("reply in a tracked thread, not in today's Inbox"), in the
+  brief's own last section "Replies in threads you track", and in the coverage line.
+- Nothing is listed or read from Gmail to find them: only the cache is queried.
+
 ## Consequences
 
 - Migration 0011 adds `analyses.follow_up_kind` (default `none`) and `follow_up_evidence`,
@@ -61,4 +85,7 @@ sending anything about the owner's actions to the AI.
   existing consent.
 - A follow-up signal can come from any analyzed email, but becomes a proposal only for an
   open action whose thread it continues; the brief's own suggestions are unchanged.
-- The CLI lists, applies and dismisses proposals; the desktop shows them in Part 7.
+- The CLI lists, applies and dismisses proposals; the desktop shows them in the brief, in
+  the actions pane and in a Proposals dialog, with Undo (Part 7).
+- Part 7 needs no migration. The brief gains a section whose stored value is
+  `follow_ups`; an older app reading such a brief would not recognize it.

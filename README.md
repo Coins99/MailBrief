@@ -31,8 +31,9 @@ later use after Microsoft Entra access is resolved.
 - M8 in progress on `feat/m8-continuity` (draft PR #17); preferences (Parts 1–2)
   implemented, awaiting live acceptance: your time zone, messages per brief, excluded
   senders, drafting defaults and AI limits, shared by the desktop and CLI. Brief history
-  and catch-up for missed days (Part 3), and tracking the threads of open actions (Part 4),
-  implemented, awaiting live acceptance.
+  and catch-up for missed days (Part 3), tracking the threads of open actions (Part 4),
+  thread activity and proposed updates to actions in the desktop, with replies outside
+  today's Inbox offered in review (Parts 5–7), implemented, awaiting live acceptance.
   See [M8 daily operation](docs/m8-daily-operation.md).
 
 ## Start here

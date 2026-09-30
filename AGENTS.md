@@ -42,7 +42,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   backend (Part 6) implemented, awaiting live acceptance: analysis schema 7's follow-up
   signal, proposals the owner applies or dismisses (`actions proposals`,
   `apply-proposal`, `dismiss-proposal`) and a ranking bonus for replies in tracked threads.
-  See ADR 0016.
+  See ADR 0016. Follow-up proposals in the desktop and replies outside today's Inbox
+  (Part 7) implemented, awaiting live acceptance: proposals in the brief, the actions pane
+  and a Proposals dialog with Undo, and up to 3 tracked replies that aren't in today's
+  Inbox joining the review and the brief.
 
 ## Layout (ports and adapters)
 
@@ -62,7 +65,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/services/history.py`: saved briefs by day, missed days, the catch-up date
   rule (`check_brief_date`) and each brief's `coverage_line`.
 - `src/mailbrief/services/threads.py`: checks the threads of open actions and caches their
-  later messages' metadata (ADR 0015).
+  later messages' metadata (ADR 0015), and finds the cached replies today's Inbox sync can't
+  see (`outside_replies`, ADR 0016).
 - `src/mailbrief/services/proposals.py`: derives follow-up proposals from a saved brief's
   analyses, and applies, undoes, dismisses and restores them (ADR 0016).
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
@@ -78,8 +82,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
   (`drafting_panel.py`), the Settings Preferences tab (`preferences_view.py`) and the
-  Briefs… dialog for saved briefs and missed days (`history_view.py`); `lists.py` holds
-  `ActivatingList`, where Return or Enter activates a row once on every platform.
+  Briefs… dialog for saved briefs and missed days (`history_view.py`), the Proposals dialog
+  for one action and the wording of a proposal's effect (`proposals_view.py`); `lists.py`
+  holds `ActivatingList`, where Return or Enter activates a row once on every platform.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -148,6 +153,15 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   applies them; applying never touches title, notes, steps or ownership, and never moves a
   target date the owner changed. Deriving proposals never changes an action, applying and
   undoing make one revision each, and a dismissed proposal is never proposed again.
+- An email proposes to at most 3 actions ever: the actions that already have a proposal
+  from it, in any state, use up its slots; a message the owner sent, or that comes from one
+  of the account's addresses, proposes nothing.
+- Replies outside today's Inbox (ADR 0016) join only today's run, only when a thread
+  service is composed: cached messages in tracked threads, newer than the thread's
+  baseline, never the owner's own, never from an excluded sender, not yet analyzed at the
+  current schema, at most 3 a run, found from the cache with no Gmail call. They go
+  through the same review, consent and messages-per-brief limit, and are labelled in the
+  review, in their own last brief section and in the coverage line.
 - Only the owner adds an email to an existing action (`accept_into`), and only to a live,
   open one; the brief offers it only for actions with a source in the email's thread in the
   same account, it makes one revision, and its undo works only while the action is

@@ -15,7 +15,7 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Done |
 | 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None | Done |
 | 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7, ADR 0016 | Done |
-| 7. Follow-up proposals in the desktop; earlier tracked replies offered in review | Reviewing and applying proposals | None expected | Planned |
+| 7. Follow-up proposals in the desktop; earlier tracked replies offered in review | Reviewing and applying proposals; up to 3 tracked replies outside today's Inbox join the review | None | Done |
 | 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, ADR 0017 | Planned |
 | 9. Closeout | Acceptance, documentation and cleanup | None expected | Planned |
 
@@ -399,8 +399,13 @@ desktop shows proposals from Part 7.
 - **Proposals.** After a brief is saved, each signal becomes a pending proposal for the open
   actions (yours and those you wait for) whose thread the email continues in the same
   account, when the action's latest email in that thread is older and the email isn't
-  already one of its sources. At most 3 actions per email, most urgent first. A new
-  deadline equal to the action's current one proposes nothing.
+  already one of its sources, most urgent first. An email proposes to at most 3 actions
+  ever: the actions that already have a proposal from it, in any state and even if since
+  closed, use up its slots, so applying one never frees a place for a fourth. A new deadline
+  equal to the action's current one proposes nothing and uses no slot.
+- **Your own mail proposes nothing.** A message you sent, or that comes from one of your
+  account's addresses, is skipped.
+- **Any saved brief makes proposals**, a past day's included.
 - **One proposal per action, email and kind.** Running the brief again doesn't repeat it. A
   newer analysis replaces a still-pending proposal of another kind for the same action and
   email; applied and dismissed ones stay, and a dismissed proposal never comes back.
@@ -449,6 +454,8 @@ desktop shows proposals from Part 7.
 - Proposals are made when a brief is saved, from the brief's shortlist; a reply that isn't
   analyzed proposes nothing.
 - Undo is the desktop's (Part 7); the CLI has no undo for an applied proposal.
+- Proposals are for open actions only: an action you complete or delete no longer shows
+  them, and its pending ones can't be applied.
 
 ### Live acceptance
 
@@ -480,3 +487,125 @@ desktop shows proposals from Part 7.
 - Migration 0011 rebuilds `analyses` (`follow_up_kind`, default `none`, and
   `follow_up_evidence`) and adds `action_proposals`, whose snapshot also keeps the email's
   thread.
+
+## Proposals in the desktop, and replies outside the Inbox (Part 7)
+
+Part 7 is implemented and awaits live acceptance. It adds no migration (the head is still
+`20260930_0011`). The policy is [ADR 0016](adr/0016-follow-up-proposals.md), including
+"Replies outside today's Inbox".
+
+### What shows where
+
+- **In the brief**, under the email that proposes, for each pending proposal:
+  `Proposes for “Send the deck”: “Can we move this to next Monday?”`, then two links. The
+  first is named by what it does:
+  - `Set the deadline to 2026-10-05 17:00`: an exact time, in the brief's own time zone;
+  - `Set the deadline to 2026-10-05`: a date;
+  - `Set the deadline to “when the board meets”`: a deadline given only in words;
+  - `Complete it (cancelled)` or `Complete it (delivered)`.
+
+  The second is `Dismiss`. Clicking applies or dismisses at once, and Undo is offered.
+- **In Your actions**, an open action's line ends with "· N proposals". **Proposals…** (Alt+R
+  on Windows) opens a dialog listing that action's pending proposals: what each would
+  change, the email's quote, its sender and when it arrived in your time zone. The button
+  above the list is labelled with the selected row's effect and applies it (Return on a row
+  does the same); **Dismiss** dismisses it; **Close** closes the dialog. A completed action
+  shows no proposals.
+- **After a run**, the status line adds "Proposed N updates to your actions." when a brief
+  made any.
+
+### Applying, dismissing and undoing
+
+- Applying, dismissing and undoing each run as one operation, like every other change, so
+  only one runs at a time; a click while MailBrief is busy says so and does nothing.
+- **Applying** is exactly Part 6's rule, at the action revision the screen showed: it
+  changes only the deadline and suggested target date, or completes the action, and makes
+  the email a source. It never touches the title, notes, steps or owner, and never moves a
+  target date you changed.
+- **Undo apply** restores the previous deadline, targets and status, and removes the source
+  the apply added unless it is the last, while the action is unchanged since the apply. If
+  you edited it in between, the status says "Can't undo: it has changed since then."
+- **Undo dismiss** makes the proposal pending again. A dismissed proposal is otherwise never
+  proposed again.
+- If the action changed since the screen was loaded (or was deleted), nothing is applied:
+  the status shows the reason and the brief, the actions and an open dialog reload.
+- Only the latest change can be undone, and an edit, Mark seen or a new brief clears the
+  offer, as elsewhere.
+
+### Replies outside today's Inbox
+
+A reply to an action's thread is often archived, or arrives on an earlier day, so today's
+Inbox sync never lists it. Sync and review now also offers such replies from the local
+cache, so they can be analyzed and propose updates.
+
+- **Which.** Cached messages in the threads of your open actions that:
+  - arrived after that thread's baseline (the action's latest email there);
+  - are not your own (sent, or from one of your account's addresses);
+  - are not from a sender you excluded in Settings;
+  - have not been analyzed at the current analysis schema;
+  - are not both received today and still in the Inbox, which today's sync already covers.
+- **Bounds.** At most 3 a run, newest first. Only today's run brings them in, never a
+  past day's. They come from the cache the thread check fills, so nothing extra is read
+  from Gmail to find them.
+- **Review.** They are listed as `<sender> — <subject> — reply in a tracked thread, not in
+  today's Inbox`. They get the same +20 rank bonus as any reply in a tracked thread, so they
+  are usually checked. You can check or uncheck them, they count toward messages per brief,
+  and `--include` or `--exclude` can name them. A checked one's body is downloaded, shown in
+  the consent preview and sent only after you approve, exactly like any other message:
+  nothing extra is sent without it.
+- **In the brief.** They form their own last section, "Replies in threads you track",
+  whatever their category, and the coverage line adds "Also includes N replies from threads
+  you track that weren't in today's Inbox." `briefs list` says the same.
+- Once a reply is analyzed it is not offered again. One you left unchecked is offered again
+  on the next run.
+
+### CLI
+
+- `sync --show-metadata` lists the outside replies after today's Inbox messages, each as
+  `[selected]` or `[omitted]` with a line "reply in a tracked thread, not in today's Inbox".
+- `brief --show` and `briefs show` print them under `[follow_ups]`; the coverage line and
+  `briefs list` carry the sentence above.
+
+### Limits
+
+- More than 3 outside replies wait for later runs, as earlier ones are analyzed.
+- If the thread check stopped early (for example a rate limit), replies it didn't reach are
+  missing until the next run.
+- A reply is offered only while its action is open; completing the action stops it.
+- Proposals still come only from analyzed emails, for actions whose thread the email
+  continues, at most 3 actions per email.
+
+### Live acceptance
+
+1. Reply in an action's thread from another account with a new deadline, archive the reply
+   in Gmail, then Sync and review: it is listed as "reply in a tracked thread, not in
+   today's Inbox" and is checked by default.
+2. The brief shows it under "Replies in threads you track", and the coverage line mentions
+   it.
+3. Click "Set the deadline to …": the action's deadline changes. Undo apply restores it.
+4. Dismiss a proposal from the Proposals… dialog, then Undo dismiss: it is pending again.
+5. Your own reply in the thread never gets a proposal.
+
+### For developers
+
+- `services/threads.py`: `ThreadService.outside_replies(account, window, *, limit,
+  excluded_senders, tracked)` runs two queries however much there is (one when the caller
+  passes `tracked`); `MAX_OUTSIDE_REPLIES`; `own_addresses()` and `is_own_message()`, the
+  one rule for "the owner's own", shared with `ProposalService.derive`.
+- `services/application.py` `prepare_daily_shortlist` adds them for today's window when a
+  thread service is composed, persists their ranks, drops blocked senders again, and sets
+  `SyncResult.outside_ids` to the selected ones. `ShortlistGate.review(...,
+  outside_ids)` is a required keyword so every implementer labels them.
+- `domain/digests.py`: `DigestSection.FOLLOW_UPS`, `SECTION_TITLES` (used by `DigestView`;
+  the CLI prints the raw value) and `SavedBriefSummary.follow_up_count`.
+  `DigestService.save(..., outside_ids)`; `services/history.py` `coverage_line()`.
+- `services/proposals.py` `derive`: `ProposalRepository.proposed_actions()` counts the
+  actions that already have a proposal from an email, for the exact cap.
+- `domain/actions.py` `ActionProposal.action_revision`. `ui/runtime.py`:
+  `brief_proposals`, `apply_proposal`, `undo_apply_proposal`, `dismiss_proposal` and
+  `restore_proposal`, mirrored on `DesktopBackend` and the test fakes.
+- `ui/proposals_view.py`: `ProposalsDialog`, `effect_text()` and `pending_proposals()`;
+  `ui/digest_view.py` `proposal_requested(kind, proposal_id, action_revision)`;
+  `ui/actions_view.py` `PROPOSALS` and `action_with_id()`.
+- macOS runs UI tests only with `MACOS_GUI_AVAILABLE` set; `QT_QPA_PLATFORM=offscreen` needs
+  no window server.

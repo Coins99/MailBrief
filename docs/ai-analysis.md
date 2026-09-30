@@ -4,6 +4,11 @@
 memory, asks for your consent, sends minimized messages to Groq, validates every answer
 in Python and saves the day's brief to SQLite. Bodies are never stored.
 
+Since M8 the shortlist can also include up to 3 replies in the threads of your open actions
+that aren't in today's Inbox (archived, or from an earlier day). They are reviewed,
+consented to and limited like any other message
+([M8 Part 7](m8-daily-operation.md#proposals-in-the-desktop-and-replies-outside-the-inbox-part-7)).
+
 ## Setup
 
 Create a key in [Groq Console](https://console.groq.com/keys). Keep the organization on
