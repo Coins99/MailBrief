@@ -78,6 +78,10 @@ def test_show_on_a_fresh_database_prints_the_defaults_and_creates_nothing(
         "Messages per brief: 10",
         "Excluded senders: none",
         "Drafting defaults: tone neutral, length medium",
+        "Refresh when MailBrief starts: no",
+        "Refresh while running: off",
+        "Automatic analysis: unavailable until you give consent "
+        "(analyze once with Sync and review)",
         "AI limits (a MAILBRIEF_AI_* variable wins over a saved value):",
         "  Messages per AI request: 1 (default)",
         "  Body characters sent: 4000 (default)",

@@ -33,7 +33,12 @@ from mailbrief.domain.actions import (
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, FollowUpKind
 from mailbrief.domain.bodies import BodyStatus, MessageBody, PreparedBody
-from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
+from mailbrief.domain.briefs import (
+    AUTO_SEND_LIMIT_MAX,
+    BriefRunResult,
+    BriefStatus,
+    TransmissionPreview,
+)
 from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncResult, SyncStatus
 from mailbrief.domain.drafting import (
     DraftContextPart,
@@ -62,7 +67,7 @@ from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
 from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
 from mailbrief.providers.groq.factory import groq_provider
-from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PROVIDER_NAME
+from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PRIVACY_NOTICE, PROVIDER_NAME
 from mailbrief.services.actions import (
     COMPLETED_LIST_LIMIT,
     ActionConflictError,
@@ -77,6 +82,8 @@ from mailbrief.services.brief import (
     CONSENT_DISCLOSURE_VERSION,
     BriefService,
     disclosure_lines,
+    permission_preview,
+    permission_sentence,
     provider_display_name,
 )
 from mailbrief.services.calendar import (
@@ -85,6 +92,7 @@ from mailbrief.services.calendar import (
     local_day_window,
     resolve_timezone,
 )
+from mailbrief.services.consent import NO_CONSENT, auto_send_permission, set_auto_send
 from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
@@ -110,6 +118,7 @@ from mailbrief.services.preferences import (
 )
 from mailbrief.services.proposals import ProposalNotFoundError, ProposalService
 from mailbrief.services.ranking import (
+    DECLINED_TEXT,
     OUTSIDE_REPLY_TEXT,
     ExcludedSenderError,
     ShortlistReviewError,
@@ -342,6 +351,8 @@ async def sync(
                         reasons = ", ".join(_reason_words(value) for value in row.rank_reasons_json)
                         if reasons:
                             print(f"  reasons: {reasons}")
+                        if row.review_declined_at_utc is not None:
+                            print(f"  {DECLINED_TEXT}")
                         print(f"  {row.web_link}")
                     # Replies in tracked threads that today's Inbox sync can't see (ADR 0016).
                     # Excluded senders never appear, like in the review.
@@ -357,6 +368,8 @@ async def sync(
                             f"{reply.subject}"
                         )
                         print(f"  {OUTSIDE_REPLY_TEXT}")
+                        if stored is not None and stored.review_declined_at_utc is not None:
+                            print(f"  {DECLINED_TEXT}")
                         print(f"  {reply.web_link}")
                 return 0 if result.status is SyncStatus.COMPLETE else 4
         finally:
@@ -453,14 +466,70 @@ def _granted(when: datetime | None) -> str:
     return f"granted {when:%Y-%m-%d %H:%M} UTC" if when is not None else "not granted"
 
 
-async def ai_consent(action: str, *, database_path: Path | None) -> int:
-    """Show or revoke recorded Groq consent: each account's for briefs, and the owner's for
-    AI drafting. Needs no Gmail connection."""
+def _permission_text(limit: int, granted: datetime | None) -> str:
+    """The automatic-analysis permission in a few words, for ai-consent status."""
+    if limit == 0 or granted is None:
+        return "automatic analysis off"
+    noun = "message" if limit == 1 else "messages"
+    return f"automatic analysis up to {limit} {noun} per run since {granted:%Y-%m-%d %H:%M} UTC"
+
+
+async def _auto_send(session: AsyncSession, limit: int, *, assume_yes: bool) -> int:
+    """Give, change or withdraw the permission for automatic runs to send up to ``limit``
+    messages without asking (ADR 0017).
+
+    It needs an active consent (ConfigurationError otherwise, exit 3). A limit above 0 shows
+    the disclosure and the permission sentence, then asks for a typed "yes" unless ``--yes``;
+    declining changes nothing (exit 6). 0 turns it off without asking.
+    """
+    permission = await auto_send_permission(
+        session, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+    )
+    if permission is None:
+        raise ConfigurationError(NO_CONSENT)
+    if limit == 0:
+        await set_auto_send(session, 0, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION)
+        print("Automatic analysis is off. Every run asks you first.")
+        return 0
+    settings = effective_settings(_load_settings(), await PreferencesService(session).get())
+    preview = permission_preview(
+        limit,
+        provider_name=PROVIDER_NAME,
+        model_name=(settings.groq_model or "").strip() or "the model you choose",
+        body_character_limit=settings.ai_body_character_limit,
+        privacy_notice=PRIVACY_NOTICE,
+    )
+    for line in disclosure_lines(preview):
+        print(line)
+    print(permission_sentence(limit, permission.account_email, PROVIDER_NAME))
+    if not assume_yes and await _ask('Type "yes" to allow this: ') != "yes":
+        print("Nothing was changed.")
+        return 6
+    await set_auto_send(session, limit, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION)
+    noun = "message" if limit == 1 else "messages"
+    print(f"Saved. Automatic runs may now send up to {limit} {noun} without asking.")
+    print("Turn it off with: mailbrief-gmail-diagnostic ai-consent auto-send 0")
+    return 0
+
+
+async def ai_consent(
+    action: str,
+    *,
+    database_path: Path | None,
+    limit: int | None = None,
+    assume_yes: bool = False,
+) -> int:
+    """Show or revoke recorded Groq consent, each account's for briefs and the owner's for AI
+    drafting, or set how many messages automatic runs may send without asking (auto-send).
+    Needs no Gmail connection."""
     path = database_path or AppPaths.from_qt().database_path
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
     try:
         async with database.session() as session:
+            if action == "auto-send":
+                assert limit is not None
+                return await _auto_send(session, limit, assume_yes=assume_yes)
             accounts = await AccountRepository(session).list_all()
             consents = ConsentRepository(session)
             owner = OwnerConsentRepository(session)
@@ -472,7 +541,12 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
                         account.id, PROVIDER_NAME, CONSENT_DISCLOSURE_VERSION
                     )
                     when = None if active is None else active.granted_at_utc
-                    print(f"Account {account.id}: Groq consent {_granted(when)}")
+                    line = f"Account {account.id}: Groq consent {_granted(when)}"
+                    if active is not None:
+                        line += "; " + _permission_text(
+                            active.auto_send_limit, active.auto_send_granted_at_utc
+                        )
+                    print(line)
                 drafting = await owner.get_active(
                     PROVIDER_NAME, DRAFTING_SCOPE, DRAFTING_DISCLOSURE_VERSION
                 )
@@ -672,6 +746,23 @@ def _count(value: int | None) -> str:
     return "?" if value is None else str(value)
 
 
+class _NeverAsks:
+    """The consent gate of an automatic run, which has nobody to ask: it is never called, and
+    if it were, nothing would be sent."""
+
+    async def confirm(self, preview: TransmissionPreview) -> bool:
+        return False
+
+
+def _ready_line(ready: int) -> str:
+    """What an automatic run without permission found, in the CLI's own words."""
+    if ready == 0:
+        return "No messages are ready to review."
+    if ready == 1:
+        return "1 message is ready to review; automatic analysis is off."
+    return f"{ready} messages are ready to review; automatic analysis is off."
+
+
 def _outcome(result: BriefRunResult) -> str:
     if result.status is BriefStatus.SAVED:
         return "Saved. Bodies were not stored."
@@ -710,8 +801,9 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
     if coverage is not None:
         print(
             f"Coverage: shortlisted {coverage.shortlisted}, analyzed {coverage.analyzed}, "
-            f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}; "
-            f"sync complete: {'yes' if coverage.sync_complete else 'no'}"
+            f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}"
+            + (f", deferred {coverage.deferred}" if coverage.deferred else "")
+            + f"; sync complete: {'yes' if coverage.sync_complete else 'no'}"
         )
     if coverage is not None or result.ai_calls > 0:
         print(_ai_line(result, model=model))
@@ -845,11 +937,17 @@ async def brief(
     assume_yes: bool,
     show: bool,
     date_text: str | None = None,
+    automatic: bool = False,
 ) -> int:
     """Sync, ask consent, analyze the shortlist with Groq and save the day's brief.
 
     The day is today, or ``date_text``: today or one of the previous seven days, checked
     before Gmail is contacted.
+
+    ``automatic`` is exactly what the desktop's automatic refresh does (ADR 0017), with no
+    prompt: it brings the day's Inbox up to date and follows tracked threads, then sends
+    only what the permission on the active consent allows (see ai-consent auto-send), and
+    with none only counts the messages ready to review. It takes no date, choices or --yes.
     """
     day = None if date_text is None else parse_brief_date(date_text)
     owner = await _owner(database_path, timezone)
@@ -879,7 +977,9 @@ async def brief(
                     bodies=BodyService(provider, limit=settings.ai_body_character_limit),
                     analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),
                     digests=DigestService(session),
-                    consent_gate=CliConsentGate(assume_yes=assume_yes),
+                    consent_gate=(
+                        _NeverAsks() if automatic else CliConsentGate(assume_yes=assume_yes)
+                    ),
                     clock=lambda: now,
                 )
                 result = await service.generate(
@@ -889,6 +989,7 @@ async def brief(
                     shortlist_limit=owner.preferences.shortlist_limit,
                     excluded_senders=owner.preferences.excluded_senders,
                     local_date=window.local_date,
+                    automatic=automatic,
                 )
                 links, proposals = (
                     await _brief_extras(session, result.digest)
@@ -899,11 +1000,17 @@ async def brief(
             await database.dispose()
         model = ai.model_name
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
+    if result.status is BriefStatus.READY_FOR_REVIEW:
+        _print_threads(result.sync)
+        print(_ready_line(result.ready))
+        return 0
     _print_result(result, model=model)
     _print_threads(result.sync)
     created = result.proposals_created
     if created:
         print(f"Proposed {created} {'update' if created == 1 else 'updates'} to your actions.")
+    if result.deferred:
+        print(f"{result.deferred} deferred to your next review.")
     if show and result.digest is not None:
         print(coverage_line(result.digest))
         _print_items(result.digest, links, proposals)
@@ -1298,6 +1405,38 @@ def _number(value: float) -> str:
     return f"{value:g}" if isinstance(value, float) else str(value)
 
 
+def _refresh_text(minutes: int | None) -> str:
+    """How often an open desktop refreshes on its own, as the desktop's choices read."""
+    if minutes is None:
+        return "off"
+    hours = minutes // 60
+    return "every hour" if hours == 1 else f"every {hours} hours"
+
+
+async def _automatic_analysis_text(path: Path, *, exists: bool) -> str:
+    """The automatic-analysis permission on the active consent, read locally; nothing is
+    created when there is no database."""
+    database = await _open_existing(path) if exists else None
+    permission = None
+    if database is not None:
+        try:
+            async with database.session() as session:
+                permission = await auto_send_permission(
+                    session, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+                )
+        finally:
+            await database.dispose()
+    if permission is None:
+        return "unavailable until you give consent (analyze once with Sync and review)"
+    if permission.limit == 0 or permission.granted_at_utc is None:
+        return "off, every run asks you first"
+    noun = "message" if permission.limit == 1 else "messages"
+    return (
+        f"up to {permission.limit} {noun} per run, since "
+        f"{permission.granted_at_utc:%Y-%m-%d %H:%M} UTC"
+    )
+
+
 async def preferences_show(*, database_path: Path | None) -> int:
     """Print the owner's preferences and where each AI limit comes from; no network.
 
@@ -1324,10 +1463,24 @@ async def preferences_show(*, database_path: Path | None) -> int:
         f"Drafting defaults: tone {preferences.draft_tone.value}, "
         f"length {preferences.draft_length.value}"
     )
+    print(f"Refresh when MailBrief starts: {'yes' if preferences.refresh_on_launch else 'no'}")
+    print(f"Refresh while running: {_refresh_text(preferences.refresh_interval_minutes)}")
+    print(f"Automatic analysis: {await _automatic_analysis_text(path, exists=exists)}")
     print("AI limits (a MAILBRIEF_AI_* variable wins over a saved value):")
     for limit in ai_limits(settings, preferences):
         print(f"  {_LIMIT_LABELS[limit.name]}: {_number(limit.value)} ({limit.source})")
     return 0
+
+
+def _auto_send_limit(text: str) -> int:
+    """A LIMIT of 0 to 10 messages."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a whole number from 0 to 10") from None
+    if not 0 <= value <= AUTO_SEND_LIMIT_MAX:
+        raise argparse.ArgumentTypeError("use a whole number from 0 to 10")
+    return value
 
 
 def _brief_count(text: str) -> int:
@@ -1349,7 +1502,14 @@ def _add_day_options(parser: argparse.ArgumentParser) -> None:
         "--include", action="append", default=[], help="Include a message ID in this shortlist."
     )
     parser.add_argument(
-        "--exclude", action="append", default=[], help="Exclude a message ID from this shortlist."
+        "--exclude",
+        action="append",
+        default=[],
+        help=(
+            "Exclude a message ID from this shortlist. If the automatic selection would have "
+            "picked it, it is remembered as declined and skipped from now on; --include "
+            "selects it again."
+        ),
     )
 
 
@@ -1402,6 +1562,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "and their pending or accepted suggestions."
         ),
     )
+    brief_parser.add_argument(
+        "--automatic",
+        action="store_true",
+        help=(
+            "Run as the desktop's automatic refresh does, with no prompt: sync today's Inbox "
+            "and follow tracked threads, then analyze only as many messages as your "
+            "permission (ai-consent auto-send) allows, or just count those ready to review. "
+            "Not with --date, --include, --exclude or --yes."
+        ),
+    )
     key_parser = commands.add_parser(
         "ai-key", help="Save, check or remove the Groq API key in the OS credential store."
     )
@@ -1411,10 +1581,33 @@ def main(arguments: Sequence[str] | None = None) -> int:
         help="set prompts without echoing; status never shows the key; clear is safe to repeat.",
     )
     consent_parser = commands.add_parser(
-        "ai-consent", help="Show or revoke your recorded consent to send email to Groq."
+        "ai-consent",
+        help=(
+            "Show or revoke your recorded consent to send email to Groq, or allow automatic "
+            "runs to send a few messages without asking."
+        ),
     )
     consent_parser.add_argument(
-        "action", choices=("status", "revoke"), help="Show or revoke consent for every account."
+        "action",
+        choices=("status", "revoke", "auto-send"),
+        help=(
+            "status shows consent and the automatic-analysis permission, revoke withdraws "
+            "both for every account, and auto-send LIMIT sets the permission."
+        ),
+    )
+    consent_parser.add_argument(
+        "limit",
+        nargs="?",
+        type=_auto_send_limit,
+        help=(
+            "With auto-send: how many messages an automatic run may send without asking, "
+            "0 to 10; 0 turns it off."
+        ),
+    )
+    consent_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="With auto-send: skip the typed yes; the disclosure is still printed.",
     )
     consent_parser.add_argument(
         "--database", type=Path, help="Optional SQLite path; defaults to app data."
@@ -1577,6 +1770,24 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--database", type=Path, help="Optional SQLite path; defaults to app data."
     )
     args = parser.parse_args(arguments)
+    if args.command == "brief" and args.automatic:
+        conflicts = [
+            flag
+            for flag, given in (
+                ("--date", args.date_text is not None),
+                ("--include", bool(args.include)),
+                ("--exclude", bool(args.exclude)),
+                ("--yes", args.yes),
+            )
+            if given
+        ]
+        if conflicts:
+            brief_parser.error(f"--automatic can't be used with {', '.join(conflicts)}")
+    if args.command == "ai-consent":
+        if args.action == "auto-send" and args.limit is None:
+            consent_parser.error("auto-send needs a number of messages, 0 to 10")
+        if args.action != "auto-send" and (args.limit is not None or args.yes):
+            consent_parser.error(f"{args.action} takes no number and no --yes")
     # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
     for name in ("httpx", "httpcore", "groq"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
@@ -1592,6 +1803,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     assume_yes=args.yes,
                     show=args.show,
                     date_text=args.date_text,
+                    automatic=args.automatic,
                 )
             )
         if args.command == "ai-key":
@@ -1635,7 +1847,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 )
             )
         if args.command == "ai-consent":
-            return asyncio.run(ai_consent(args.action, database_path=args.database))
+            return asyncio.run(
+                ai_consent(
+                    args.action,
+                    database_path=args.database,
+                    limit=args.limit,
+                    assume_yes=args.yes,
+                )
+            )
         if args.command == "preferences":
             return asyncio.run(preferences_show(database_path=args.database))
         if args.command == "briefs" and args.action == "list":
