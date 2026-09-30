@@ -13,6 +13,8 @@ import pytest
 import respx
 
 from mailbrief.diagnostics import gmail
+from mailbrief.domain.drafts import DraftLength, DraftTone
+from mailbrief.domain.preferences import PreferencesEdit
 from mailbrief.providers.groq.provider import DRAFT_INSTRUCTIONS
 from mailbrief.services.drafts import DraftService
 from mailbrief.storage.database import Database
@@ -26,6 +28,7 @@ from tests.integration.test_brief_cli import (  # noqa: F401 - fixtures used by 
     run_brief,
     vault,
 )
+from tests.integration.test_preferences_cli import save_preferences
 from tests.unit.providers.groq.groq_fixtures import (
     CHAT_URL,
     answer_every_message,
@@ -251,3 +254,43 @@ def test_generate_help_lists_its_options(capsys: pytest.CaptureFixture[str]) -> 
         "--database",
     ):
         assert option in shown
+
+
+def test_tone_and_length_default_to_the_saved_preferences(
+    seeded: tuple[Path, str, respx.Route],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path, public_id, route = seeded
+    save_preferences(
+        path, PreferencesEdit(draft_tone=DraftTone.FORMAL, draft_length=DraftLength.LONG)
+    )
+    replies(monkeypatch, "yes", "y")
+
+    assert generate(path, public_id, "--use-text") == 0
+    assert generate(path, public_id, "--use-text", "--tone", "direct") == 0
+
+    capsys.readouterr()
+    saved, flagged = (
+        json.loads(json.loads(call.content)["messages"][1]["content"])
+        for call in drafting_calls(route)
+    )
+    assert (saved["tone"], saved["length"]) == ("formal", "long")
+    assert (flagged["tone"], flagged["length"]) == ("direct", "long")
+
+
+def test_an_excluded_sender_s_email_is_refused_before_download(
+    seeded: tuple[Path, str, respx.Route],
+    respx_mock: respx.MockRouter,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path, public_id, route = seeded
+    save_preferences(path, PreferencesEdit(excluded_senders=("@example.com",)))
+    downloads = sum(call.request.url.params.get("format") == "full" for call in respx_mock.calls)
+
+    assert generate(path, public_id, "--use-email") == 3
+
+    assert capsys.readouterr().out == "That context is no longer available; choose again.\n"
+    after = sum(call.request.url.params.get("format") == "full" for call in respx_mock.calls)
+    assert after == downloads
+    assert drafting_calls(route) == []

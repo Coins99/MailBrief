@@ -20,7 +20,8 @@ from mailbrief.providers.gmail.auth import GmailAuth
 from mailbrief.providers.gmail.cache import GmailCredentialStore
 from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.services.calendar import InvalidTimezoneError
-from mailbrief.services.ranking import ShortlistReviewError
+from mailbrief.services.preferences import PreferencesUnavailableError
+from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
 from tests.unit.providers.gmail.test_cache import MemoryVault, credential
 
 
@@ -60,6 +61,8 @@ def test_disconnect_needs_no_client_file(monkeypatch: pytest.MonkeyPatch) -> Non
         (ProviderResponseError("Google unavailable."), 4, "Google unavailable."),
         (InvalidTimezoneError("sensitive zone"), 3, "Invalid timezone or shortlist choices"),
         (ShortlistReviewError("sensitive IDs"), 3, "Invalid timezone or shortlist choices"),
+        (ExcludedSenderError(), 3, "A message from an excluded sender can't be included"),
+        (PreferencesUnavailableError(), 3, "Saved preferences could not be read."),
         (ValueError("sensitive detail"), 1, "Unexpected error (ValueError)."),
         (KeyboardInterrupt(), 130, "Cancelled."),
     ],

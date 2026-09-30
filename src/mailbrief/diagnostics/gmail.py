@@ -9,6 +9,7 @@ import logging
 import threading
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -44,6 +45,7 @@ from mailbrief.domain.drafts import (
     placeholders,
     still_to_fill,
 )
+from mailbrief.domain.preferences import OwnerPreferences, sender_excluded
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.paths import AppPaths
@@ -80,7 +82,14 @@ from mailbrief.services.drafting import (
 )
 from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftNotFoundError, DraftService
-from mailbrief.services.ranking import ShortlistReviewError
+from mailbrief.services.preferences import (
+    PreferencesService,
+    PreferencesUnavailableError,
+    ai_limits,
+    effective_settings,
+    owner_zone,
+)
+from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -94,7 +103,15 @@ from mailbrief.text.prepare import clean_generated_text
 
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 # Commands whose setup errors are shown as they are: static, actionable messages.
-_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts"}
+_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts", "preferences"}
+_TIMEZONE_HELP = "IANA time zone; defaults to your saved preference, else the system time zone."
+_LIMIT_LABELS = {
+    "ai_batch_size": "Messages per AI request",
+    "ai_body_character_limit": "Body characters sent",
+    "ai_max_output_tokens": "Output tokens",
+    "ai_max_requests_per_run": "Requests per run",
+    "ai_timeout_seconds": "Timeout (seconds)",
+}
 _ACTION_REFUSED = "That suggestion or action was not found or cannot change now."
 _DRAFT_NOT_FOUND = "That draft was not found."
 _FILE_EXISTS = "That file already exists; nothing was written. Choose another --out path."
@@ -156,6 +173,49 @@ def _load_settings() -> Settings:
         raise SettingsError(f"Invalid setting: {listed}. See docs/ai-analysis.md.") from None
 
 
+async def _preferences(path: Path) -> OwnerPreferences:
+    """The owner's saved preferences; a missing database gives the defaults without
+    creating it. Raises PreferencesUnavailableError when they can't be read."""
+    if not await asyncio.to_thread(path.exists):
+        return OwnerPreferences.defaults()
+    await asyncio.to_thread(upgrade_database, path)
+    database = Database.from_path(path)
+    try:
+        async with database.session() as session:
+            return await PreferencesService(session).get()
+    finally:
+        await database.dispose()
+
+
+@dataclass(frozen=True, slots=True)
+class _Owner:
+    """What a command needs before it builds any provider."""
+
+    path: Path
+    preferences: OwnerPreferences
+    settings: Settings
+    zone: ZoneInfo
+
+
+async def _owner(database_path: Path | None, timezone: str | None) -> _Owner:
+    """Settings, then the owner's preferences and zone, before any provider is built.
+
+    Invalid settings or an unknown --timezone fail before the database is touched. Saved
+    AI limits apply where no MAILBRIEF_* variable is set, and --timezone wins over the
+    saved zone, which wins over the system time zone.
+    """
+    settings = _load_settings()
+    explicit = resolve_timezone(timezone) if timezone else None
+    path = database_path or AppPaths.from_qt().database_path
+    preferences = await _preferences(path)
+    return _Owner(
+        path=path,
+        preferences=preferences,
+        settings=effective_settings(settings, preferences),
+        zone=explicit or owner_zone(preferences),
+    )
+
+
 async def run(command: str, *, silent_only: bool) -> int:
     """Verify a profile or forget credentials; output contains no mailbox identity."""
     if command == "disconnect":
@@ -179,11 +239,12 @@ async def sync(
     show_metadata: bool,
 ) -> int:
     """Persist daily metadata and report coverage without printing mail by default."""
-    tz = resolve_timezone(timezone)
+    owner = await _owner(database_path, timezone)
+    rules = owner.preferences.excluded_senders
     now = datetime.now(UTC)
-    window = local_day_window(now, tz)
-    path = database_path or AppPaths.from_qt().database_path
-    async with gmail_provider(_load_settings(), silent_only=silent_only) as provider:
+    window = local_day_window(now, owner.zone)
+    path = owner.path
+    async with gmail_provider(owner.settings, silent_only=silent_only) as provider:
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
         database = Database.from_path(path)
@@ -195,7 +256,12 @@ async def sync(
                     provider, messages, SyncRunRepository(session), accounts
                 )
                 result, shortlist = await application.prepare_daily_shortlist(
-                    tz_key=tz.key, now_utc=now, include_ids=include_ids, exclude_ids=exclude_ids
+                    tz_key=owner.zone.key,
+                    now_utc=now,
+                    include_ids=include_ids,
+                    exclude_ids=exclude_ids,
+                    shortlist_limit=owner.preferences.shortlist_limit,
+                    excluded_senders=rules,
                 )
                 identity = await provider.current_account()
                 assert identity is not None
@@ -224,7 +290,13 @@ async def sync(
                         account.id, window.start_utc, window.end_utc, inbox_only=True
                     )
                     for row in rows:
-                        marker = "selected" if row.provider_message_id in selected else "omitted"
+                        marker = (
+                            "excluded"
+                            if sender_excluded(row.sender_address, rules)
+                            else "selected"
+                            if row.provider_message_id in selected
+                            else "omitted"
+                        )
                         print(
                             f"{row.provider_message_id} [{marker}] score={row.rank_score} "
                             f"{row.sender_address}: {row.subject}"
@@ -262,10 +334,9 @@ async def bodies(
     show_text: bool,
 ) -> int:
     """Sync today's metadata, then read and prepare the shortlist in memory only."""
-    settings = _load_settings()
-    tz = resolve_timezone(timezone)
+    owner = await _owner(database_path, timezone)
+    settings, tz, path = owner.settings, owner.zone, owner.path
     now = datetime.now(UTC)
-    path = database_path or AppPaths.from_qt().database_path
     async with gmail_provider(settings, silent_only=silent_only) as provider:
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
@@ -279,7 +350,12 @@ async def bodies(
                     AccountRepository(session),
                 )
                 result, shortlist = await application.prepare_daily_shortlist(
-                    tz_key=tz.key, now_utc=now, include_ids=include_ids, exclude_ids=exclude_ids
+                    tz_key=tz.key,
+                    now_utc=now,
+                    include_ids=include_ids,
+                    exclude_ids=exclude_ids,
+                    shortlist_limit=owner.preferences.shortlist_limit,
+                    excluded_senders=owner.preferences.excluded_senders,
                 )
         finally:
             await database.dispose()
@@ -459,15 +535,19 @@ async def drafts_generate(
     *,
     database_path: Path | None,
     parts: frozenset[DraftContextPart],
-    tone: str,
-    length: str,
+    tone: str | None,
+    length: str | None,
     instructions: str,
     assume_yes: bool,
     silent_only: bool,
 ) -> int:
-    """Write a new version of a draft with Groq after the owner approves what is sent."""
-    settings = _load_settings()
-    path = database_path or AppPaths.from_qt().database_path
+    """Write a new version of a draft with Groq after the owner approves what is sent.
+
+    Tone and length default to the saved preferences, and an excluded sender's email is
+    never offered.
+    """
+    owner = await _owner(database_path, None)
+    settings, path, preferences = owner.settings, owner.path, owner.preferences
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
     bodies = (
@@ -480,11 +560,17 @@ async def drafts_generate(
     )
     try:
         async with groq_provider(settings) as ai, database.session() as session:
-            service = DraftingService(session, ai, bodies, zone=resolve_timezone(None))
+            service = DraftingService(
+                session,
+                ai,
+                bodies,
+                zone=owner.zone,
+                excluded_senders=preferences.excluded_senders,
+            )
             options = DraftingOptions(
                 parts=parts,
-                tone=DraftTone(tone),
-                length=DraftLength(length),
+                tone=preferences.draft_tone if tone is None else DraftTone(tone),
+                length=preferences.draft_length if length is None else DraftLength(length),
                 instructions=instructions,
             )
             plan = await service.prepare(public_id, options)
@@ -689,11 +775,10 @@ async def brief(
     show: bool,
 ) -> int:
     """Sync, ask consent, analyze the shortlist with Groq and save today's brief."""
-    settings = _load_settings()
-    tz = resolve_timezone(timezone)
+    owner = await _owner(database_path, timezone)
+    settings, tz, path = owner.settings, owner.zone, owner.path
     now = datetime.now(UTC)
     window = local_day_window(now, tz)
-    path = database_path or AppPaths.from_qt().database_path
     async with (
         gmail_provider(settings, silent_only=silent_only) as provider,
         groq_provider(settings) as ai,
@@ -718,7 +803,11 @@ async def brief(
                     clock=lambda: now,
                 )
                 result = await service.generate(
-                    tz_key=tz.key, include_ids=include_ids, exclude_ids=exclude_ids
+                    tz_key=tz.key,
+                    include_ids=include_ids,
+                    exclude_ids=exclude_ids,
+                    shortlist_limit=owner.preferences.shortlist_limit,
+                    excluded_senders=owner.preferences.excluded_senders,
                 )
         finally:
             await database.dispose()
@@ -738,13 +827,23 @@ async def actions(
     timezone: str | None,
     suggestion_id: int | None,
 ) -> int:
-    """List actions, or accept or dismiss a stored suggestion; needs no Gmail or AI access."""
-    zone = resolve_timezone(timezone)
+    """List actions, or accept or dismiss a stored suggestion; needs no Gmail or AI access.
+
+    The list shows dates in --timezone, else the saved time zone. Listing only displays
+    local data, so unreadable preferences fall back to the system time zone.
+    """
+    zone = resolve_timezone(timezone) if timezone else None
     path = database_path or AppPaths.from_qt().database_path
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
     try:
         async with database.session() as session:
+            if zone is None and action == "list":
+                try:
+                    zone = owner_zone(await PreferencesService(session).get())
+                except PreferencesUnavailableError:
+                    await session.rollback()
+                    print("Saved preferences could not be read; showing the system time zone.")
             service = ActionService(session)
             if action == "accept":
                 assert suggestion_id is not None
@@ -767,6 +866,7 @@ async def actions(
     if not listed:
         print("No actions.")
         return 0
+    zone = zone or resolve_timezone(None)
     now = datetime.now(UTC)
     today = now.astimezone(zone).date()
     for item in listed:
@@ -843,10 +943,46 @@ async def drafts(
     return 0
 
 
+def _number(value: float) -> str:
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+async def preferences_show(*, database_path: Path | None) -> int:
+    """Print the owner's preferences and where each AI limit comes from; no network.
+
+    Sender rules are the owner's own text and are shown here, to the owner only.
+    """
+    settings = _load_settings()
+    path = database_path or AppPaths.from_qt().database_path
+    exists = await asyncio.to_thread(path.exists)
+    preferences = await _preferences(path)
+    if not exists:
+        print("No database yet: these are the defaults.")
+    elif preferences.updated_at_utc is None:
+        print("Never saved: these are the defaults.")
+    else:
+        print(f"Saved {preferences.updated_at_utc:%Y-%m-%d %H:%M} UTC.")
+    zone = preferences.time_zone or f"system ({owner_zone(preferences).key})"
+    print(f"Time zone: {zone}")
+    print(f"Messages per brief: {preferences.shortlist_limit}")
+    rules = preferences.excluded_senders
+    print(f"Excluded senders: {len(rules) or 'none'}")
+    for rule in rules:
+        print(f"  {rule}")
+    print(
+        f"Drafting defaults: tone {preferences.draft_tone.value}, "
+        f"length {preferences.draft_length.value}"
+    )
+    print("AI limits (a MAILBRIEF_AI_* variable wins over a saved value):")
+    for limit in ai_limits(settings, preferences):
+        print(f"  {_LIMIT_LABELS[limit.name]}: {_number(limit.value)} ({limit.source})")
+    return 0
+
+
 def _add_day_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--silent-only", action="store_true", help="Never open a browser.")
     parser.add_argument("--database", type=Path, help="Optional SQLite path; defaults to app data.")
-    parser.add_argument("--timezone", help="IANA timezone; defaults to the system timezone.")
+    parser.add_argument("--timezone", help=_TIMEZONE_HELP)
     parser.add_argument(
         "--include", action="append", default=[], help="Include a message ID in this shortlist."
     )
@@ -928,7 +1064,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         default=ActionFilter.OPEN.value,
         help="open (yours), waiting (on others) or completed; default open.",
     )
-    list_parser.add_argument("--timezone", help="IANA timezone; defaults to the system timezone.")
+    list_parser.add_argument("--timezone", help=_TIMEZONE_HELP)
     accept_parser = action_commands.add_parser(
         "accept", help="Accept a pending suggestion shown by brief --show."
     )
@@ -976,12 +1112,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--use-text", action="store_true", help="Send the draft's current title and body."
     )
     drafts_generate_parser.add_argument(
-        "--tone", choices=[tone.value for tone in DraftTone], default=DraftTone.NEUTRAL.value
+        "--tone",
+        choices=[tone.value for tone in DraftTone],
+        help="Defaults to your saved drafting tone, else neutral.",
     )
     drafts_generate_parser.add_argument(
         "--length",
         choices=[length.value for length in DraftLength],
-        default=DraftLength.MEDIUM.value,
+        help="Defaults to your saved drafting length, else medium.",
     )
     drafts_generate_parser.add_argument(
         "--instructions", default="", help="What you want written (at most 1,000 characters)."
@@ -1000,6 +1138,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
+    preferences_parser = commands.add_parser(
+        "preferences", help="Show your saved preferences; set them in the desktop's Settings."
+    )
+    preference_commands = preferences_parser.add_subparsers(dest="action", required=True)
+    preferences_show_parser = preference_commands.add_parser(
+        "show", help="Time zone, messages per brief, sender rules, drafting and AI limits."
+    )
+    preferences_show_parser.add_argument(
+        "--database", type=Path, help="Optional SQLite path; defaults to app data."
+    )
     args = parser.parse_args(arguments)
     # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
     for name in ("httpx", "httpcore", "groq"):
@@ -1056,6 +1204,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
         if args.command == "ai-consent":
             return asyncio.run(ai_consent(args.action, database_path=args.database))
+        if args.command == "preferences":
+            return asyncio.run(preferences_show(database_path=args.database))
         if args.command == "sync":
             return asyncio.run(
                 sync(
@@ -1088,6 +1238,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except SettingsError as exc:
         print(str(exc))
         return 3
+    except PreferencesUnavailableError as exc:
+        print(str(exc))  # Static and actionable; nothing is sent while it lasts.
+        return 3
     except ConfigurationError as exc:
         # AI setup errors (model, key, vault) carry static, actionable messages.
         print(str(exc) if args.command in _OWN_MESSAGE_COMMANDS else _SETUP_UNAVAILABLE)
@@ -1114,6 +1267,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError):
         # Before ValueError: ActionConflictError is one. Messages stay static.
         print(_ACTION_REFUSED)
+        return 3
+    except ExcludedSenderError as exc:
+        print(str(exc))  # Static: names no sender, rule or message.
         return 3
     except (InvalidTimezoneError, ShortlistReviewError):
         if args.command == "actions":
