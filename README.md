@@ -30,7 +30,8 @@ later use after Microsoft Entra access is resolved.
   See [M7 drafts, notes and messages](docs/m7-drafts.md).
 - M8 in progress on `feat/m8-continuity` (draft PR #17); preferences (Parts 1–2)
   implemented, awaiting live acceptance: your time zone, messages per brief, excluded
-  senders, drafting defaults and AI limits, shared by the desktop and CLI.
+  senders, drafting defaults and AI limits, shared by the desktop and CLI. Brief history
+  and catch-up for missed days (Part 3) implemented, awaiting live acceptance.
   See [M8 daily operation](docs/m8-daily-operation.md).
 
 ## Start here

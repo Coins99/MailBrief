@@ -34,8 +34,9 @@ exceptions. Usage metadata is retained even with ZDR. See
 | `MAILBRIEF_AI_BATCH_SIZE` | 1 | 1-10 | Messages per call |
 
 Then run `uv run mailbrief-gmail-diagnostic brief`. It accepts the same `--timezone`,
-`--include`, `--exclude`, `--database` and `--silent-only` options as `sync`, plus `--yes`
-and `--show` (below).
+`--include`, `--exclude`, `--database` and `--silent-only` options as `sync`, plus `--yes`,
+`--show` (below) and `--date YYYY-MM-DD`, which briefs one of the previous 7 days instead
+of today ([brief history](m8-daily-operation.md#brief-history-and-catch-up-part-3)).
 
 PowerShell example (replace the model and Gmail client path with your own):
 

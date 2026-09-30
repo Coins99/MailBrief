@@ -32,7 +32,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   (`docs/m8-daily-operation.md`); preferences (Parts 1–2) implemented, awaiting live
   acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
   limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
-  See ADR 0014.
+  See ADR 0014. Brief history and bounded catch-up (Part 3) implemented, awaiting live
+  acceptance: the desktop Briefs… dialog and `brief --date`, `briefs list` and
+  `briefs show`.
 
 ## Layout (ports and adapters)
 
@@ -49,6 +51,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   owner's preferences, time zone rule and sender rules.
 - `src/mailbrief/services/preferences.py`: read, save and reset preferences, apply the
   saved AI limits (`effective_settings`) and the owner's zone (`owner_zone`).
+- `src/mailbrief/services/history.py`: saved briefs by day, missed days, the catch-up date
+  rule (`check_brief_date`) and each brief's `coverage_line`.
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
   `actions.py` for suggestions, decisions and accepted actions, `drafts.py` for drafts,
   their versions and source snapshots, and `preferences.py` for the preferences row.
@@ -60,7 +64,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
-  (`drafting_panel.py`), and the Settings Preferences tab (`preferences_view.py`).
+  (`drafting_panel.py`), the Settings Preferences tab (`preferences_view.py`) and the
+  Briefs… dialog for saved briefs and missed days (`history_view.py`).
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -113,6 +118,11 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   preference, then the default; only `AI_LIMIT_FIELDS` are read from preferences, and only
   when absent from `Settings.model_fields_set`. For CLI `--timezone`, `--tone` and
   `--length`, the flag, then the saved preference, then the default.
+- A brief covers one local day in the owner's zone. Briefing a past day is explicit, one
+  day per run, at most 7 days back, and its coverage line says what it covers; nothing
+  briefs past days automatically. `BriefService` enforces the date bounds before Gmail is
+  contacted or anything is written, and only today's window advances the account's last
+  complete sync.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
@@ -184,7 +194,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts, drafting and preferences services.
+  drafts, drafting, preferences and history services.
 
 ## Dormant Microsoft notes
 

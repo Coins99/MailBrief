@@ -11,7 +11,7 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | --- | --- | --- | --- |
 | 1. Preferences core | Time zone, messages per brief, sender exclusions, drafting defaults, AI limits in SQLite; CLI | 0009, ADR 0014 | Done |
 | 2. Preferences in the desktop | The Settings Preferences tab; the owner's zone and drafting defaults in the window | None | Done |
-| 3. Brief history and bounded catch-up | Browse saved briefs; brief one missed day (within the last 7) per explicit run | None | In progress |
+| 3. Brief history and bounded catch-up | Browse saved briefs; brief one missed day (within the last 7) per explicit run | None | Done |
 | 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Planned |
 | 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None expected | Planned |
 | 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7 | Planned |
@@ -129,3 +129,88 @@ At most 200 excluded senders of at most 320 characters each; a time zone name of
   messages never take a shortlist slot.
 - Sender rules are the owner's text: `preferences show` and Settings display them, but
   logs carry only their count.
+
+## Brief history and catch-up (Part 3)
+
+Part 3 is implemented and awaits live acceptance. It needs no migration.
+
+### What it does
+
+- **Saved briefs by day.** Every saved brief can be opened again, newest day first. The
+  brief shown at startup is the one for the newest day, not the newest save, so catching
+  up on yesterday never hides today's brief.
+- **Bounded catch-up.** A day with no brief within the last 7 days is a missed day. You can
+  brief one missed day at a time, and briefing a day that already has a brief replaces it
+  after you confirm. Nothing briefs a past day by itself.
+- **What each brief covers.** Every brief says so under its heading, in its own zone:
+  - made on its own day: "Covers messages received on 2026-09-29 up to 09:14
+    (America/Toronto) that were in your Inbox then.";
+  - made later: "Covers messages received on 2026-09-28 (America/Toronto) that were still
+    in your Inbox on 2026-09-29 at 10:02."
+- A past day's brief uses the same review, consent, messages per brief and sender rules as
+  today's. Its messages are ranked with the real current time.
+
+### Desktop
+
+- **Briefs…** opens a dialog with **Saved briefs** (date · status · items · account;
+  Return or a double-click opens one) and **Missed days** for the connected account. Without
+  a connection it reads "Connect Gmail to brief missed days."
+- **Open** shows a saved brief. Unless it is the latest, a banner reads "Viewing the brief
+  for <date>." with **Back to latest**. Accept, Dismiss and Undo keep you on that brief.
+- **Brief this day…** is offered for a missed day, or for a saved brief within the last 7
+  days other than today's; it briefs the connected account, so another account's brief
+  can't be replaced from here. For a saved day it asks first: "This replaces the saved
+  brief for <date>." It needs a connected Gmail account, like **Sync and review**; offline
+  it says so.
+- **Sync and review** always briefs today and returns to the latest brief.
+
+### CLI
+
+- `brief --date YYYY-MM-DD` briefs one of the previous 7 days. An unreadable date, or one
+  outside today and the previous 7 days, exits 3 before Gmail is contacted. With `--show`,
+  the brief's coverage line comes before its items.
+- `briefs list [--database PATH] [--limit N]` lists saved briefs, newest first (default
+  30), each with its coverage line, then each Gmail account's missed days. It is offline and
+  never creates a missing database.
+- `briefs show DATE [--account EMAIL] [--database PATH]` prints one saved brief as
+  `brief --show` does, with its coverage line. No brief exits 3 with "No saved brief for
+  that date."; briefs from several accounts exit 3 until you pass `--account`.
+- "Today" is in the `--timezone` zone, else your saved time zone, else the system's.
+
+### Limits
+
+- At most 7 days back, one day per run, and never automatic.
+- A past day covers only the messages still in the Inbox when its brief is made; messages
+  archived or deleted since are not in it.
+- Only today's sync moves the account's last complete sync time. A past day's sync still
+  records which of that day's cached messages are still in the Inbox.
+
+### Live acceptance
+
+1. Brief today, then brief yesterday from Briefs…: after a restart, today's brief shows,
+   not yesterday's.
+2. Yesterday's brief says it covers the messages still in the Inbox when it was made.
+3. Archive one of yesterday's messages in Gmail and brief yesterday again: the replace
+   confirmation appears first, and the archived message is gone.
+4. Accept a suggestion while viewing a past brief, then Undo: the view stays on that brief.
+5. `briefs list` shows the same briefs and missed days; `brief --date` for 8 days back exits
+   3.
+6. Offline: Briefs… still opens saved briefs, and "Brief this day…" says a connection is
+   needed.
+
+### For developers
+
+- `services/calendar.py`: `day_window(local_date, zone)` gives any local day's UTC bounds;
+  `local_day_window()` delegates to it.
+- `services/history.py`: `CATCH_UP_DAYS`, `check_brief_date` (raises `BriefDateError` with a
+  static message), `catch_up_days`, `coverage_line` and `BriefHistory` (`list_saved`, `get`,
+  `accounts_for`, `missed_days`). Any saved brief, even an empty or partial one, counts as
+  saved.
+- `DigestRepository.get_latest()` orders by local date, then save time; `list_summaries()`
+  counts items in one grouped query.
+- `BriefService.generate(local_date=...)` checks the date before contacting Gmail;
+  `ApplicationService.prepare_daily_shortlist(local_date=...)` syncs that day's window and
+  passes `record_last_sync` to `SyncService.sync_day`, true only for the window containing
+  now.
+- The desktop window remembers the connected account and the brief shown (`None` for the
+  latest); `_reload_brief()` reloads the shown brief.
