@@ -169,9 +169,9 @@ Part 3 is implemented and awaits live acceptance. It needs no migration.
 - `brief --date YYYY-MM-DD` briefs one of the previous 7 days. An unreadable date, or one
   outside today and the previous 7 days, exits 3 before Gmail is contacted. With `--show`,
   the brief's coverage line comes before its items.
-- `briefs list [--database PATH] [--limit N]` lists saved briefs, newest first (default
-  30), each with its coverage line, then each Gmail account's missed days. It is offline and
-  never creates a missing database.
+- `briefs list [--database PATH] [--limit N] [--timezone ZONE]` lists saved briefs, newest
+  first (default 30), each with its coverage line, then each Gmail account's missed days. It
+  is offline and never creates a missing database.
 - `briefs show DATE [--account EMAIL] [--database PATH]` prints one saved brief as
   `brief --show` does, with its coverage line. No brief exits 3 with "No saved brief for
   that date."; briefs from several accounts exit 3 until you pass `--account`.

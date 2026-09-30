@@ -223,3 +223,24 @@ def test_the_timezone_flag_decides_today(
     assert code == 3
     assert capsys.readouterr().out.strip() == OUT_OF_RANGE
     assert not respx_mock.calls
+
+
+def test_briefs_list_counts_missed_days_in_the_timezone_given(
+    tmp_path: Path, offline: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """At 12:00 UTC on the 16th it's already the 17th in Kiritimati, so the last 7 days
+    there end on the 10th rather than the 9th."""
+    path = tmp_path / "zone.sqlite3"
+    asyncio.run(seed(path))
+    base = ["briefs", "list", "--database", str(path)]
+
+    def owner_missed() -> str:
+        return [line for line in capsys.readouterr().out.splitlines() if "owner@" in line][-1]
+
+    assert gmail.main(base) == 0
+    assert owner_missed().endswith("2026-09-10, 2026-09-09")  # The system zone: UTC.
+    assert gmail.main([*base, "--timezone", "Pacific/Kiritimati"]) == 0
+    assert owner_missed().endswith("2026-09-11, 2026-09-10")
+
+    assert gmail.main([*base, "--timezone", "Mars/Base"]) == 3
+    assert "Invalid timezone" in capsys.readouterr().out

@@ -852,11 +852,15 @@ async def _open_existing(path: Path) -> Database | None:
     return Database.from_path(path)
 
 
-async def briefs_list(*, database_path: Path | None, limit: int) -> int:
+async def briefs_list(
+    *, database_path: Path | None, limit: int, timezone: str | None = None
+) -> int:
     """Saved briefs, newest day first, then each Gmail account's missed days; offline.
 
-    Missed days are the previous seven days, in the saved time zone, without a brief.
+    Missed days are the previous seven days without a brief, in --timezone, else the saved
+    time zone, else the system's.
     """
+    explicit = resolve_timezone(timezone) if timezone and timezone.strip() else None
     path = database_path or AppPaths.from_qt().database_path
     database = await _open_existing(path)
     if database is None:
@@ -864,12 +868,15 @@ async def briefs_list(*, database_path: Path | None, limit: int) -> int:
         return 0
     try:
         async with database.session() as session:
-            try:
-                zone = owner_zone(await PreferencesService(session).get())
-            except PreferencesUnavailableError:
-                await session.rollback()
-                print("Saved preferences could not be read; using the system time zone.")
-                zone = resolve_timezone(None)
+            if explicit is not None:
+                zone = explicit
+            else:
+                try:
+                    zone = owner_zone(await PreferencesService(session).get())
+                except PreferencesUnavailableError:
+                    await session.rollback()
+                    print("Saved preferences could not be read; using the system time zone.")
+                    zone = resolve_timezone(None)
             today = datetime.now(UTC).astimezone(zone).date()
             history = BriefHistory(session)
             summaries = await history.list_saved(limit)
@@ -1274,6 +1281,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     briefs_list_parser.add_argument(
         "--limit", type=_brief_count, default=30, help="How many briefs to list; default 30."
     )
+    briefs_list_parser.add_argument("--timezone", help=_TIMEZONE_HELP)
     briefs_show_parser = brief_commands.add_parser(
         "show", help="Print one saved brief and what it covers."
     )
@@ -1355,7 +1363,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
         if args.command == "preferences":
             return asyncio.run(preferences_show(database_path=args.database))
         if args.command == "briefs" and args.action == "list":
-            return asyncio.run(briefs_list(database_path=args.database, limit=args.limit))
+            return asyncio.run(
+                briefs_list(database_path=args.database, limit=args.limit, timezone=args.timezone)
+            )
         if args.command == "briefs":
             return asyncio.run(
                 briefs_show(args.date_text, account=args.account, database_path=args.database)
