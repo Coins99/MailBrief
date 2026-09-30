@@ -205,7 +205,7 @@ async def _owner(database_path: Path | None, timezone: str | None) -> _Owner:
     saved zone, which wins over the system time zone.
     """
     settings = _load_settings()
-    explicit = resolve_timezone(timezone) if timezone else None
+    explicit = resolve_timezone(timezone) if timezone and timezone.strip() else None
     path = database_path or AppPaths.from_qt().database_path
     preferences = await _preferences(path)
     return _Owner(
@@ -832,7 +832,7 @@ async def actions(
     The list shows dates in --timezone, else the saved time zone. Listing only displays
     local data, so unreadable preferences fall back to the system time zone.
     """
-    zone = resolve_timezone(timezone) if timezone else None
+    zone = resolve_timezone(timezone) if timezone and timezone.strip() else None
     path = database_path or AppPaths.from_qt().database_path
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)

@@ -151,6 +151,10 @@ def test_sync_uses_the_saved_zone_unless_timezone_is_given(
     assert gmail.main(arguments) == 0
     assert "Inbox date: 2026-09-16 (UTC)" in capsys.readouterr().out
 
+    blank = ["sync", "--silent-only", "--database", str(path), "--timezone", " "]
+    assert gmail.main(blank) == 0  # A blank flag is no flag.
+    assert "Inbox date: 2026-09-17 (Pacific/Kiritimati)" in capsys.readouterr().out
+
 
 def test_sync_labels_excluded_messages(
     tmp_path: Path,
