@@ -58,6 +58,14 @@ def _new_public_id() -> str:
     return str(uuid.uuid4())
 
 
+def urgency(
+    target_date: date | None, due_at_utc: datetime | None, created_at_utc: datetime
+) -> tuple[date, datetime, datetime]:
+    """How open actions are ordered: by target date, then due time, then creation, with
+    undated actions last."""
+    return (target_date or date.max, due_at_utc or _LATEST, created_at_utc)
+
+
 def _touch(row: ActionTable, now: datetime) -> None:
     row.revision += 1
     row.updated_at_utc = now
@@ -416,10 +424,8 @@ class ActionService:
         # The rows arrive in ID order and sorted() is stable, so equal keys keep that order.
         ordered = sorted(
             actions,
-            key=lambda action: (
-                action.target_date or date.max,
-                action.due_at_utc() or _LATEST,
-                action.created_at_utc,
+            key=lambda action: urgency(
+                action.target_date, action.due_at_utc(), action.created_at_utc
             ),
         )
         return tuple(ordered if limit is None else ordered[:limit])

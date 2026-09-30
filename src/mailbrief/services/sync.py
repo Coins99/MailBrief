@@ -31,7 +31,7 @@ MAX_SINGLE_WAIT_SECONDS = 60.0
 MAX_TOTAL_WAIT_SECONDS = 120.0
 
 
-def _sanitize_error_code(exc: Exception) -> str:
+def sanitize_error_code(exc: Exception) -> str:
     """Map exception types to closed, non-sensitive audit error codes."""
     if isinstance(exc, AuthenticationRequiredError):
         return "AUTH_REQUIRED"
@@ -248,7 +248,7 @@ class SyncService:
 
         except Exception as exc:
             await self._rollback()
-            error_code = _sanitize_error_code(exc)
+            error_code = sanitize_error_code(exc)
             logger.error("Synchronization failed for account %s: %s", account_id, error_code)
             status = SyncStatus.PARTIAL if pages_count > 0 else SyncStatus.FAILED
             return await finish(status, error_code)
