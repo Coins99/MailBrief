@@ -28,6 +28,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   autosave, versions, copy and export, and AI drafting with Groq from context the owner
   chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
   ADR 0012 and ADR 0013.
+- M8 in progress, in stages (`docs/m8-daily-operation.md`). M8.1 implemented, awaiting live
+  acceptance: owner preferences (time zone, messages per brief, sender exclusions, drafting
+  defaults, AI limits) in the Settings Preferences tab and `mailbrief-gmail-diagnostic
+  preferences show`. See ADR 0014.
 
 ## Layout (ports and adapters)
 
@@ -40,10 +44,13 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   analysis, deadlines, digest and brief; for M6: actions; for M7: drafts and drafting
   (AI drafting: parts, preview, consent, validation).
 - `src/mailbrief/domain/drafts.py`: draft kinds, limits, placeholders and exports;
-  `domain/drafting.py`: what AI drafting sends and gets back.
+  `domain/drafting.py`: what AI drafting sends and gets back; `domain/preferences.py`: the
+  owner's preferences, time zone rule and sender rules.
+- `src/mailbrief/services/preferences.py`: read, save and reset preferences, apply the
+  saved AI limits (`effective_settings`) and the owner's zone (`owner_zone`).
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
-  `actions.py` for suggestions, decisions and accepted actions, and `drafts.py` for drafts,
-  their versions and source snapshots.
+  `actions.py` for suggestions, decisions and accepted actions, `drafts.py` for drafts,
+  their versions and source snapshots, and `preferences.py` for the preferences row.
   Alembic revisions live in `migrations/versions/`.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
@@ -52,7 +59,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
-  (`drafting_panel.py`).
+  (`drafting_panel.py`), and the Settings Preferences tab (`preferences_view.py`).
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -94,6 +101,17 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   mailbox, has no "sent" state and never changes an action. Every change needs the
   revision the caller saw, except restoring a deleted draft; drafts and versions change
   only through ORM objects.
+- Owner preferences are one revisioned SQLite row (ADR 0014); every save needs the revision
+  the caller saw, and the row changes only through ORM objects. Sender exclusions are
+  enforced by services, never only the UI: a message from an excluded sender is never
+  selected, included, downloaded, analyzed or offered to AI drafting. Sender rules are the
+  owner's text: show them to the owner, but log only their count. Unreadable preferences
+  fail closed (`PreferencesUnavailableError`) wherever data could be sent; display-only
+  views fall back to the system time zone.
+- Precedence: for AI limits, an explicit `MAILBRIEF_*` variable, then the saved
+  preference, then the default; only `AI_LIMIT_FIELDS` are read from preferences, and only
+  when absent from `Settings.model_fields_set`. For CLI `--timezone`, `--tone` and
+  `--length`, the flag, then the saved preference, then the default.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
@@ -165,7 +183,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts and drafting services.
+  drafts, drafting and preferences services.
 
 ## Dormant Microsoft notes
 

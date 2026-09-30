@@ -21,7 +21,9 @@ exceptions. Usage metadata is retained even with ZDR. See
    models for low reasoning effort, because their reasoning shares the output limit with
    the answer; other models get no reasoning setting, since Groq rejects values a model
    does not support.
-3. Optional settings:
+3. Optional settings. When a variable is unset, your saved preference applies, else the
+   default; set them in Settings > Preferences and check them with
+   `mailbrief-gmail-diagnostic preferences show` ([M8.1](m8-daily-operation.md#m81-preferences)).
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
