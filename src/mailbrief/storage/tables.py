@@ -21,6 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
+from mailbrief.domain.briefs import AUTO_SEND_LIMIT_MAX
 from mailbrief.domain.preferences import (
     AI_BODY_CHARS_MAX,
     AI_OUTPUT_TOKENS_MAX,
@@ -28,6 +29,7 @@ from mailbrief.domain.preferences import (
     AI_REQUESTS_MAX,
     AI_TIMEOUT_MAX,
     AI_TIMEOUT_MIN,
+    REFRESH_INTERVALS,
     SHORTLIST_LIMIT_MAX,
 )
 from mailbrief.storage.types import UTCDateTime
@@ -57,6 +59,10 @@ _DEFAULT_LENGTH_CHECK = "draft_length IN ('short','medium','long')"
 _FOLLOW_UP_CHECK = "follow_up_kind IN ('none','new_deadline','cancelled','delivered')"
 _PROPOSAL_KIND_CHECK = "kind IN ('new_deadline','cancelled','delivered')"
 _PROPOSAL_STATE_CHECK = "state IN ('pending','applied','dismissed')"
+_REFRESH_INTERVAL_CHECK = (
+    "refresh_interval_minutes IS NULL OR refresh_interval_minutes IN "
+    f"({', '.join(str(minutes) for minutes in REFRESH_INTERVALS)})"
+)
 
 
 class Base(DeclarativeBase):
@@ -135,6 +141,8 @@ class MessageTable(Base):
     is_sent: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    # When the owner unchecked this message in a review that had picked it (ADR 0017).
+    review_declined_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
     has_attachments: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -237,6 +245,10 @@ class DigestTable(Base):
     reused_count: Mapped[int | None] = mapped_column(Integer)
     failed_count: Mapped[int | None] = mapped_column(Integer)
     skipped_count: Mapped[int | None] = mapped_column(Integer)
+    # Messages an automatic run left for the next review (ADR 0017); 0 for older briefs.
+    deferred_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     ai_provider: Mapped[str | None] = mapped_column(String(64))
@@ -254,6 +266,9 @@ class AIConsentTable(Base):
             "disclosure_version",
             name="uq_ai_consents_scope",
         ),
+        CheckConstraint(
+            f"auto_send_limit BETWEEN 0 AND {AUTO_SEND_LIMIT_MAX}", name="auto_send_limit_range"
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -265,6 +280,12 @@ class AIConsentTable(Base):
     disclosure_version: Mapped[str] = mapped_column(String(32), nullable=False)
     granted_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     revoked_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    # How many messages an automatic run may send without asking, and since when (ADR 0017).
+    # It belongs to this consent: revoking the consent, or a new disclosure version, ends it.
+    auto_send_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    auto_send_granted_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class DigestItemTable(Base):
@@ -704,6 +725,7 @@ class OwnerPreferencesTable(Base):
         ),
         CheckConstraint(_DEFAULT_TONE_CHECK, name="draft_tone_known"),
         CheckConstraint(_DEFAULT_LENGTH_CHECK, name="draft_length_known"),
+        CheckConstraint(_REFRESH_INTERVAL_CHECK, name="refresh_interval_known"),
         _range_check("ai_batch_size", 1, MAX_ANALYSIS_BATCH),
         _range_check("ai_body_character_limit", 1, AI_BODY_CHARS_MAX),
         _range_check("ai_max_output_tokens", AI_OUTPUT_TOKENS_MIN, AI_OUTPUT_TOKENS_MAX),
@@ -729,6 +751,11 @@ class OwnerPreferencesTable(Base):
     ai_max_output_tokens: Mapped[int | None] = mapped_column(Integer)
     ai_max_requests_per_run: Mapped[int | None] = mapped_column(Integer)
     ai_timeout_seconds: Mapped[float | None] = mapped_column(Float)
+    # Automatic refresh while the desktop is open (ADR 0017): on launch, and every N minutes.
+    refresh_on_launch: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    refresh_interval_minutes: Mapped[int | None] = mapped_column(Integer)
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )

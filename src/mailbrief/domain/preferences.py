@@ -19,6 +19,8 @@ from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.drafts import DraftLength, DraftTone
 
 SHORTLIST_LIMIT_MAX: Final = 10
+# How often, in minutes, an open MailBrief may refresh on its own (ADR 0017); None is never.
+REFRESH_INTERVALS: Final = (60, 120, 240)
 EXCLUSIONS_MAX: Final = 200
 EXCLUSION_MAX_CHARS: Final = 320
 TIME_ZONE_MAX_CHARS: Final = 64

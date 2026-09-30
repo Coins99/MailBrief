@@ -9,6 +9,9 @@ from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS
 from mailbrief.domain.common import DomainModel
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, SyncResult
 
+# The most messages an automatic run may send without asking (ADR 0017).
+AUTO_SEND_LIMIT_MAX: Final = 10
+
 
 class AnalysisOutcome(StrEnum):
     """What happened to one shortlisted message during brief generation."""

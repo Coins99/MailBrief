@@ -1104,3 +1104,95 @@ def test_follow_up_proposals_upgrade_and_downgrade_keeping_rows(tmp_path: Path) 
     assert _schema(path) == _schema(fresh)
     command.upgrade(config, "head")
     assert _query(path, "SELECT count(*) FROM action_proposals") == [(0,)]
+
+
+_CONSENT = (
+    "INSERT INTO ai_consents(account_id,provider,disclosure_version,granted_at_utc,"
+    "revoked_at_utc) VALUES(1,'groq',?,'2026-09-25 00:00:00',?)"
+)
+
+
+def test_daily_operation_columns_upgrade_with_defaults_and_downgrade_keeping_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "m8-daily.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260929_0009")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO owner_preferences(id,excluded_senders_json,updated_at_utc) "
+            "VALUES(1,'[\"@example.org\"]','2026-09-29 00:00:00')"
+        )
+        connection.execute(_CONSENT, ("2", None))  # An active consent...
+        connection.execute(_CONSENT, ("1", "2026-09-26 00:00:00"))  # ...and a revoked one.
+        connection.commit()
+    command.upgrade(config, "20260930_0011")
+    kept = (*_OLD_ROWS, "ai_consents", "owner_preferences")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260930_0012")
+
+    # Every existing row keeps its values and reads the new defaults: no refresh, no
+    # automatic-analysis permission, nothing deferred or declined.
+    assert _earlier_columns(_rows(path, kept), before) == before
+    assert _query(
+        path, "SELECT refresh_on_launch,refresh_interval_minutes,revision FROM owner_preferences"
+    ) == [(0, None, 1)]
+    assert _query(
+        path, "SELECT auto_send_limit,auto_send_granted_at_utc FROM ai_consents ORDER BY id"
+    ) == [(0, None), (0, None)]
+    assert _query(path, "SELECT deferred_count FROM digests") == [(0,)]
+    assert _query(path, "SELECT review_declined_at_utc FROM messages") == [(None,)]
+    schema = _schema(path)
+    assert {
+        "ck_owner_preferences_refresh_interval_known",
+        "ck_owner_preferences_shortlist_limit_range",  # The rebuild kept the old CHECKs.
+        "ck_owner_preferences_revision_positive",
+    } <= schema["owner_preferences"]["checks"]  # type: ignore[operator]
+    assert schema["ai_consents"]["constraints"] == {
+        "pk_ai_consents",
+        "uq_ai_consents_scope",
+        "fk_ai_consents_account_id_accounts",
+        "ck_ai_consents_auto_send_limit_range",
+    }
+    assert _foreign_keys(path, "ai_consents") == {("accounts", "account_id", "id", "CASCADE")}
+    with closing(sqlite3.connect(path)) as connection:
+        for minutes in ("NULL", "60", "120", "240"):
+            connection.execute(f"UPDATE owner_preferences SET refresh_interval_minutes={minutes}")
+        for limit in (0, 1, 10):
+            connection.execute(f"UPDATE ai_consents SET auto_send_limit={limit}")
+        for rejected in (
+            "UPDATE owner_preferences SET refresh_interval_minutes=0",
+            "UPDATE owner_preferences SET refresh_interval_minutes=30",
+            "UPDATE owner_preferences SET refresh_interval_minutes=90",
+            "UPDATE owner_preferences SET refresh_interval_minutes=-60",
+            "UPDATE ai_consents SET auto_send_limit=-1",
+            "UPDATE ai_consents SET auto_send_limit=11",
+            "UPDATE owner_preferences SET refresh_on_launch=NULL",
+            "UPDATE ai_consents SET auto_send_limit=NULL",
+            "UPDATE digests SET deferred_count=NULL",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(rejected)
+        connection.execute(
+            "UPDATE owner_preferences SET refresh_on_launch=1, refresh_interval_minutes=60"
+        )
+        connection.execute(
+            "UPDATE ai_consents SET auto_send_limit=3, "
+            "auto_send_granted_at_utc='2026-09-30 10:00:00'"
+        )
+        connection.execute("UPDATE digests SET deferred_count=2")
+        connection.execute("UPDATE messages SET review_declined_at_utc='2026-09-30 11:00:00'")
+        connection.commit()
+
+    command.downgrade(config, "20260930_0011")
+
+    # Everything the revision added is gone, and nothing else, rows included.
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0011.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260930_0011")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT auto_send_limit FROM ai_consents ORDER BY id") == [(0,), (0,)]
