@@ -13,6 +13,7 @@ from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
 from mailbrief.domain.digests import SyncResult, SyncStatus
+from mailbrief.domain.drafting import DraftingOutcome, DraftingStatus
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
 from mailbrief.providers.gmail.auth import GmailAuth
@@ -203,3 +204,18 @@ def test_an_internal_validation_error_is_unexpected_only_in_ai_commands(
 
     assert gmail.main([command]) == code
     assert capsys.readouterr().out.startswith(message)
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (DraftingStatus.DECLINED, 6),
+        (DraftingStatus.CANCELLED, 130),
+        (DraftingStatus.FAILED, 4),
+    ],
+)
+def test_drafting_exit_codes_match_brief(status: DraftingStatus, code: int) -> None:
+    outcome = DraftingOutcome(
+        status=status, error_code="AI_TIMEOUT" if status is DraftingStatus.FAILED else None
+    )
+    assert gmail._drafting_exit_code(outcome) == code

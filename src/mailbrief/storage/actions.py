@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic import HttpUrl
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.actions import (
@@ -419,24 +419,40 @@ class ActionRepository:
         )
         return count or 0
 
-    async def list_rows(self, view: ActionFilter, *, limit: int) -> list[ActionTable]:
-        """Live actions for a view: completed ones newest first, others in ID order."""
-        stmt = select(ActionTable).where(ActionTable.deleted_at_utc.is_(None))
+    @staticmethod
+    def _in_view(view: ActionFilter) -> list[ColumnElement[bool]]:
+        """The conditions for a live action to appear in ``view``."""
+        live = ActionTable.deleted_at_utc.is_(None)
         if view is ActionFilter.COMPLETED:
-            stmt = (
-                stmt.where(ActionTable.status == ActionStatus.COMPLETED.value)
-                .order_by(ActionTable.completed_at_utc.desc(), ActionTable.id.desc())
-                .limit(limit)
-            )
+            return [live, ActionTable.status == ActionStatus.COMPLETED.value]
+        ownership = (
+            ActionOwnership.MINE if view is ActionFilter.OPEN else ActionOwnership.WAITING_FOR
+        )
+        return [
+            live,
+            ActionTable.status == ActionStatus.OPEN.value,
+            ActionTable.ownership == ownership.value,
+        ]
+
+    async def list_rows(self, view: ActionFilter, *, limit: int | None) -> list[ActionTable]:
+        """Live actions for a view: completed ones newest first, others in ID order.
+
+        ``limit`` caps only the completed view here; the service sorts and caps the others.
+        """
+        stmt = select(ActionTable).where(*self._in_view(view))
+        if view is ActionFilter.COMPLETED:
+            stmt = stmt.order_by(ActionTable.completed_at_utc.desc(), ActionTable.id.desc())
+            if limit is not None:
+                stmt = stmt.limit(limit)
         else:
-            ownership = (
-                ActionOwnership.MINE if view is ActionFilter.OPEN else ActionOwnership.WAITING_FOR
-            )
-            stmt = stmt.where(
-                ActionTable.status == ActionStatus.OPEN.value,
-                ActionTable.ownership == ownership.value,
-            ).order_by(ActionTable.id)
+            stmt = stmt.order_by(ActionTable.id)
         return list((await self._session.scalars(stmt)).all())
+
+    async def count_rows(self, view: ActionFilter) -> int:
+        count = await self._session.scalar(
+            select(func.count()).select_from(ActionTable).where(*self._in_view(view))
+        )
+        return count or 0
 
     async def load(self, rows: Sequence[ActionTable]) -> list[Action]:
         """Domain actions for rows, reading steps and sources with one chunked query each."""

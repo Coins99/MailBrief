@@ -34,6 +34,7 @@ _NOT_FOUND: Final = "That action was not found."
 _SUGGESTION_NOT_FOUND: Final = "That suggestion was not found."
 _STALE: Final = "The action changed since it was loaded; reload it and try again."
 _LATEST: Final = datetime.max.replace(tzinfo=UTC)
+COMPLETED_LIST_LIMIT: Final = 200  # The newest completed actions a list shows by default.
 
 
 class ActionNotFoundError(LookupError):
@@ -394,14 +395,20 @@ class ActionService:
         """A live action; deleted actions are not found."""
         return await self._load(await self._live(public_id, None))
 
-    async def list_actions(self, view: ActionFilter, *, limit: int = 200) -> tuple[Action, ...]:
+    async def list_actions(
+        self, view: ActionFilter, *, limit: int | None = None
+    ) -> tuple[Action, ...]:
         """Live actions for a view.
 
         Open and waiting actions come by target date, then due time, then creation, with
-        undated ones last; completed actions come newest first.
+        undated ones last, and are never capped unless ``limit`` is given. Completed actions
+        come newest first, at most COMPLETED_LIST_LIMIT unless ``limit`` says otherwise;
+        count_actions() says how many there are.
         """
-        if limit < 1:
+        if limit is not None and limit < 1:
             raise ValueError("limit must be at least 1")
+        if limit is None and view is ActionFilter.COMPLETED:
+            limit = COMPLETED_LIST_LIMIT
         actions = await self._repository.load(await self._repository.list_rows(view, limit=limit))
         if view is ActionFilter.COMPLETED:
             return tuple(actions)
@@ -414,4 +421,8 @@ class ActionService:
                 action.created_at_utc,
             ),
         )
-        return tuple(ordered[:limit])
+        return tuple(ordered if limit is None else ordered[:limit])
+
+    async def count_actions(self, view: ActionFilter) -> int:
+        """How many live actions a view holds, however many list_actions() shows."""
+        return await self._repository.count_rows(view)

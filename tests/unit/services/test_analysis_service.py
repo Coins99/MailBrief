@@ -1418,3 +1418,73 @@ def test_validate_candidate_cleans_text_the_model_wrote_itself() -> None:
     assert analysis.summary == "Budget[2J approval needed"
     assert analysis.action_text == "Approve it soon"
     assert analysis.suggestions[0].steps == ("Check[31m totals",)
+
+
+def cut_off(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(400, json=error_body("json_validate_failed"))
+
+
+async def test_an_answer_groq_could_not_finish_is_retried_once_then_reported(
+    session: AsyncSession, respx_mock: respx.MockRouter
+) -> None:
+    account_id, shortlist = await seed(session, 1)
+    route = respx_mock.post(CHAT_URL).mock(side_effect=cut_off)
+
+    async with groq_provider(Settings(groq_model="test-model"), key_store=groq_key_store()) as ai:
+        run = await analyze(session, ai, shortlist, account_id=account_id)
+
+    assert outcomes(run) == [FAILED]
+    assert run.error_code == "AI_OUTPUT_INCOMPLETE"
+    assert run.provider_detail is None
+    assert run.calls == route.call_count == run.requests_sent == 2
+
+
+async def test_a_batch_groq_could_not_finish_is_split(
+    session: AsyncSession, respx_mock: respx.MockRouter
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+
+    def cut_off_batches(request: httpx.Request) -> httpx.Response:
+        if len(sent_messages(request)) > 1:
+            return cut_off(request)
+        return answer_every_message(request)
+
+    route = respx_mock.post(CHAT_URL).mock(side_effect=cut_off_batches)
+
+    async with groq_provider(Settings(groq_model="test-model"), key_store=groq_key_store()) as ai:
+        run = await analyze(session, ai, shortlist, account_id=account_id, batch_size=3)
+
+    assert outcomes(run) == [ANALYZED, ANALYZED, ANALYZED]
+    assert run.error_code is None  # Nothing failed, so there is nothing to explain.
+    assert run.calls == route.call_count == 4
+
+
+async def test_a_rejection_explains_more_than_an_incomplete_answer(
+    session: AsyncSession, respx_mock: respx.MockRouter
+) -> None:
+    account_id, shortlist = await seed(session, 2)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        if "Reference 0." in sent_messages(request)[0]["body"]:
+            return cut_off(request)
+        return httpx.Response(400, json=error_body("invalid_prompt"))
+
+    respx_mock.post(CHAT_URL).mock(side_effect=reply)
+
+    async with groq_provider(Settings(groq_model="test-model"), key_store=groq_key_store()) as ai:
+        run = await analyze(session, ai, shortlist, account_id=account_id, batch_size=1)
+
+    assert outcomes(run) == [FAILED, FAILED]
+    assert run.error_code == "AI_REQUEST_REJECTED"
+    assert run.provider_detail == "HTTP 400, code invalid_prompt"
+
+
+async def test_an_incomplete_answer_from_any_provider_counts(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 1)
+    cut = AnalysisResponse(problem=AnalysisProblem.INCOMPLETE)
+    provider = FakeAIProvider([cut, cut])
+
+    run = await analyze(session, provider, shortlist, account_id=account_id)
+
+    assert run.error_code == "AI_OUTPUT_INCOMPLETE"
+    assert provider.calls == 2

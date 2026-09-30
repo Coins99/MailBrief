@@ -38,7 +38,10 @@ implemented and awaiting live acceptance, with [ai-analysis.md](ai-analysis.md).
 approved starting M4 before M3's acceptance. M5 desktop implementation and Windows
 package checks are complete; macOS and human acceptance remain in
 [m5-acceptance.md](m5-acceptance.md). M6 (accepted actions, target dates and editable
-plans) is implemented in PR #15 and awaiting live acceptance, with
+plans) is merged from PR #15 and awaiting live acceptance, with
 [m6-actions.md](m6-actions.md).
+M7 implemented, awaiting live acceptance: local drafts and notes, and AI drafting. See
+[m7-drafts.md](m7-drafts.md), [ADR 0012](adr/0012-drafts-and-notes.md) and
+[ADR 0013](adr/0013-ai-drafting.md).
 General tasks, calendar, analytics and website directions are intentionally rough
 in [ecosystem-roadmap.md](ecosystem-roadmap.md).

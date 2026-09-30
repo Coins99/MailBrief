@@ -33,6 +33,7 @@ from mailbrief.domain.analysis import (
     ActionSuggestion,
     AIUsage,
     AnalysisCandidate,
+    AnalysisProblem,
     AnalysisRequest,
     AnalysisResponse,
     DeadlinePrecision,
@@ -74,6 +75,7 @@ _KEY_ATTEMPTS = 64
 _QUOTES = "\"'‘’“”"
 _ELLIPSES = ("...", "…")
 REQUEST_REJECTED = "AI_REQUEST_REJECTED"
+OUTPUT_INCOMPLETE = "AI_OUTPUT_INCOMPLETE"
 _DETAIL_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 KEY_MISSING = "AI_KEY_MISSING"
 _WHITESPACE = re.compile(r"\s+")
@@ -283,7 +285,8 @@ class AnalysisRun:
     ``calls`` counts logical provider calls; ``requests_sent`` counts the HTTP attempts they
     made, including failed and retried ones. ``error_code`` is the code of the error that
     stopped the run; otherwise AI_REQUEST_REJECTED when a rejected request left a message
-    out; otherwise None.
+    out; otherwise AI_OUTPUT_INCOMPLETE when a message failed and an answer was cut off;
+    otherwise None.
     """
 
     messages: tuple[PlannedMessage, ...]
@@ -300,6 +303,7 @@ class _Tally:
     calls: int = 0
     rejected: int = 0  # Messages left out because the provider rejected their request.
     rejected_detail: str | None = None  # The first such rejection's provider detail.
+    incomplete: int = 0  # Answers the provider couldn't finish, usually at the output limit.
     reported: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -347,7 +351,8 @@ def provider_detail(exc: ProviderError) -> str | None:
     return ", ".join(parts) or None
 
 
-def _error_code(exc: ProviderError) -> str:
+def provider_error_code(exc: ProviderError) -> str:
+    """The AI_* code for an expected provider error; shared with AI drafting."""
     if isinstance(exc, ProviderUsageLimitError):
         return "AI_USAGE_LIMIT"
     if isinstance(exc, AICredentialsMissingError):
@@ -561,11 +566,13 @@ class AnalysisService:
             error_code = stop.error_code
             detail = stop.detail
             _fail(item for item in plan.messages if item.outcome is None)
+        analyzed = sum(item.outcome is AnalysisOutcome.ANALYZED for item in plan.messages)
+        failed = sum(item.outcome is AnalysisOutcome.FAILED for item in plan.messages)
         if error_code is None and tally.rejected:
             error_code = REQUEST_REJECTED
             detail = tally.rejected_detail
-        analyzed = sum(item.outcome is AnalysisOutcome.ANALYZED for item in plan.messages)
-        failed = sum(item.outcome is AnalysisOutcome.FAILED for item in plan.messages)
+        elif error_code is None and tally.incomplete and failed:
+            error_code = OUTPUT_INCOMPLETE
         requests_sent = self._provider.requests_sent - requests_before
         logger.info(
             "AI analysis: %d calls, %d requests, %d analyzed, %d failed, cancelled=%s, error=%s",
@@ -601,7 +608,7 @@ class AnalysisService:
         try:
             response = await self._provider.analyze(requests)
         except ProviderError as exc:
-            code = _error_code(exc)
+            code = provider_error_code(exc)
             # INFO: the CLI already reports the failure and its detail to the owner.
             logger.info("AI provider call failed: %s", code)
             if code != REQUEST_REJECTED:
@@ -616,6 +623,8 @@ class AnalysisService:
                 retry = []
         else:
             tally.add(response.usage)
+            if response.problem is AnalysisProblem.INCOMPLETE:
+                tally.incomplete += 1
             retry = await self._persist(batch, response)
             await self._session.commit()
         emit_progress(

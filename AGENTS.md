@@ -7,7 +7,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 ## Product and status
 
 - Personal desktop app for Windows and macOS that turns today's important Gmail into a
-  short brief. Both platforms are supported: run from source now, packaged apps in M5.
+  short brief. Both platforms are supported, from source or as native packages (M5).
 - Gmail is the active provider. Microsoft (Outlook/Graph) code is dormant: keep it
   compiling and its tests passing, but do not extend it unless a task says so.
 - Done: M1 Gmail OAuth and secure restore; M2 Inbox metadata sync, ranking and
@@ -24,25 +24,36 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   editable plans and target dates, open/waiting/completed lists and undo (desktop, plus
   `brief --show` and `mailbrief-gmail-diagnostic actions`). See `docs/m6-actions.md` and
   ADR 0011.
+- M7 implemented, awaiting live acceptance: replies, emails, notes and messages with
+  autosave, versions, copy and export, and AI drafting with Groq from context the owner
+  chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
+  ADR 0012 and ADR 0013.
 
 ## Layout (ports and adapters)
 
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
-- `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` protocols and provider-neutral errors.
+- `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` / `DraftingProvider` protocols
+  (`drafting.py`) and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
   `providers/groq/`: active AI adapter (Structured Outputs), API key store and factory.
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
-  analysis, deadlines, digest and brief; for M6: actions.
-- `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`, and
-  `actions.py` for suggestions, decisions and accepted actions.
+  analysis, deadlines, digest and brief; for M6: actions; for M7: drafts and drafting
+  (AI drafting: parts, preview, consent, validation).
+- `src/mailbrief/domain/drafts.py`: draft kinds, limits, placeholders and exports;
+  `domain/drafting.py`: what AI drafting sends and gets back.
+- `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
+  `actions.py` for suggestions, decisions and accepted actions, and `drafts.py` for drafts,
+  their versions and source snapshots.
   Alembic revisions live in `migrations/versions/`.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
-- `src/mailbrief/infra/`: HTTP retry classification and `vault.py`, the explicit OS
-  credential vault.
+- `src/mailbrief/infra/`: HTTP retry classification, `vault.py`, the explicit OS
+  credential vault, and `files.py`, atomic writes for exports the owner chooses.
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
-  desktop service composition, saved-brief display, the actions pane and editor; `app.py`
-  owns the qasync loop.
+  desktop service composition, saved-brief display, the actions pane and editor, the
+  drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
+  (`drafting_panel.py`).
+- `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
 
@@ -72,6 +83,17 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   the action's revision, and every change except restoring a deleted action needs the
   revision the caller saw. Change decisions and actions through ORM objects, never bulk
   UPDATE or DELETE statements, which leave loaded rows stale.
+- Drafts and notes belong to the owner (ADR 0012). They may store the owner's writing
+  (title or subject, recipients as typed, body and its versions), a source-email snapshot
+  (subject, sender address, link, received time) and an action link with a title snapshot.
+  They never store a downloaded incoming body, and MailBrief never inserts quoted incoming
+  history; text the owner types or pastes is stored as entered. They have no account
+  foreign key and survive message, cache, account and action deletion; delete is soft and
+  restorable. A draft keeps at most 100 versions. Draft text never reaches logs,
+  exceptions or files other than an export the owner chooses. Drafting never writes to the
+  mailbox, has no "sent" state and never changes an action. Every change needs the
+  revision the caller saw, except restoring a deleted draft; drafts and versions change
+  only through ORM objects.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
@@ -81,8 +103,6 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Email content is untrusted input. It can never authorize actions, settings changes,
   mail writes or sending other messages to the AI.
 - Schema changes need a new additive Alembic revision; never edit an existing revision.
-  (Revision 0001 was restored to its originally released content on 2026-09-25 as a
-  one-time repair.)
 - No blocking network or database work on the Qt main thread (M5).
 
 ## AI analysis rules (M4)
@@ -101,10 +121,39 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   whose evidence does not quote the email is dropped; a deadline phrase that does not quote
   it drops only that suggestion's deadline. Target dates come from Python, never the model.
 
+## AI drafting rules (M7, ADR 0013)
+
+- Send only the parts the owner ticks for that generation: the email being replied to
+  (subject, sender name only, received time in the owner's zone, and its body, downloaded
+  then, prepared like the brief's and never stored); the linked action (title, ownership,
+  target date, deadline phrase, steps in order up to 2,000 characters in all, at most 2,000
+  characters of notes); the draft's current title and body (at most 8,000 characters).
+  Always: kind, tone, length, the owner's instructions (at most 1,000 characters) and
+  today's date.
+- Never send the sender's address, To or Cc, other emails, attachments, other drafts or
+  actions, Gmail or MailBrief IDs, or credentials. The chosen parts are sent as written, so
+  addresses, links or numbers inside them are sent too, and the consent text says so.
+- Every generation shows a preview of every part with its size and waits for approval.
+  First use needs explicit consent, recorded per provider for the owner (not per account)
+  before anything is sent; revoking AI consent revokes it too. Declining sends nothing.
+- The output schema has no recipients. Python cleans the text, removes quoted history,
+  bounds it (body 1 to 8,000 characters, subject 200 and only for emails and notes, at most
+  five missing-context items of 200) and rejects a body that copies 200 or more characters
+  of the source email. Missing facts stay as `[[placeholders]]`.
+- The owner's text is saved as a version before the call; a result becomes a "generated"
+  version with its generation record. A failed, declined or cancelled generation leaves the
+  text unchanged.
+- Groq's HTTP 400 `json_validate_failed` is an incomplete answer (retried once), not a
+  rejected request, for briefs and drafting alike.
+
 ## Dependencies
 
 - Python 3.13 only, managed with `uv`; direct dependencies in `pyproject.toml`, exact
   versions in `uv.lock`. Update both together.
+- Development environment: keep the checkout and its `.venv` out of folders synced by
+  iCloud Drive (Desktop & Documents), OneDrive or Dropbox. Those tools set the macOS hidden
+  flag on `.venv` files, and then Python 3.13 skips hidden `.pth` files and Qt skips hidden
+  plugins.
 - Do not add: Google API client libraries, the Microsoft Graph SDK, `python-dotenv`,
   generic retry libraries, HTML parsing libraries (use the standard library if
   HTML-to-text is needed), or local-model libraries.
@@ -115,8 +164,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Tests mirror `src/` under `tests/`. Use `tests/factories.py`, `respx` for HTTP and
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
-- Coverage: at least 80% overall and 90% for the synchronization, ranking, body and digest
-  services.
+- Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
+  drafts and drafting services.
 
 ## Dormant Microsoft notes
 

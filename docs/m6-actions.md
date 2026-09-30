@@ -1,6 +1,6 @@
 # M6 actions, target dates and plans
 
-M6 is implemented on `feat/m6-actions` (PR #15) and awaits live acceptance. Decisions are
+M6 is merged into `main` from PR #15; live acceptance is still pending. Decisions are
 recorded in [ADR 0011](adr/0011-actions-and-suggestions.md).
 
 ## What it does
@@ -67,6 +67,9 @@ never evidence.
 - Accept and dismiss decisions are kept per Gmail account and message, so they survive
   removing the email from the local cache, and disconnecting and reconnecting the same
   account: when the email is synced again, it shows the same decisions.
+- Open and Waiting list every action. Completed shows the newest 200; when there are
+  more, its tab reads "Completed (200+)" and `actions list --view completed` ends with a
+  line saying how many there are.
 - In the desktop app, a deleted action comes back only through Undo. Deleted actions,
   and decisions whose email is gone, stay in the database until M9's retention controls.
 - Migrations 0005 and 0006 run automatically, after the usual pre-upgrade backup. The app

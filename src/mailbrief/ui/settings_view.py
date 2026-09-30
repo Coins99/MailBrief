@@ -58,7 +58,7 @@ class SettingsDialog(QDialog):
         self.remove_key_button = QPushButton("&Remove stored Groq key")
         form.addRow(self.key_button)
         form.addRow(self.remove_key_button)
-        self.revoke_button = QPushButton("Revoke AI consent for all local &Gmail accounts")
+        self.revoke_button = QPushButton("Revoke AI consent (briefs and &drafting)")
         form.addRow(self.revoke_button)
         layout.addWidget(self.fields)
         notice = QLabel(

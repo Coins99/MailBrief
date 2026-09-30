@@ -11,6 +11,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import Action, ActionFilter, ActionSource, ActionStatus, ActionStep
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
+from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPanel
 from tests.factories import make_action
 
@@ -211,3 +212,24 @@ def test_only_a_gmail_source_can_be_opened(
     assert panel.source_button.isEnabled()
     panel.source_button.click()
     opened.assert_called_once_with(QUrl(GMAIL))
+
+
+def test_a_reply_draft_needs_an_email_in_local_mail(qtbot: QtBot) -> None:
+    panel = ActionsPanel()
+    qtbot.addWidget(panel)
+    found: list[tuple[object, object]] = []
+    panel.draft_requested.connect(lambda kind, action: found.append((kind, action)))
+    action = make_action()
+    panel.show_actions(
+        ActionFilter.OPEN,
+        (action,),
+        today=date(2026, 9, 28),
+        zone=ZoneInfo("UTC"),
+        now=datetime(2026, 9, 28, tzinfo=UTC),
+    )
+
+    panel._request_draft(DraftKind.REPLY)
+    panel._request_draft(DraftKind.NOTE)
+
+    assert not panel.reply_draft.isEnabled()
+    assert found == [(DraftKind.NOTE, action)]

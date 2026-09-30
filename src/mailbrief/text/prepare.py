@@ -54,6 +54,24 @@ def clean_generated_text(text: str) -> str:
     return " ".join(kept.split())
 
 
+_BLANK_RUN = re.compile(r"\n{4,}")
+
+
+def clean_generated_block(text: str) -> str:
+    """AI-written multi-line text made safe to show and store, keeping its paragraphs.
+
+    Every kind of line break becomes "\n"; tabs stay; other control characters, format
+    characters (such as bidirectional overrides) and invisible padding are removed. Each
+    line loses its trailing spaces, three or more blank lines become two, and blank lines
+    at the start and end are dropped.
+    """
+    lines = [
+        "".join(ch for ch in line if ch == "\t" or _keep(ch)).rstrip() for line in text.splitlines()
+    ]
+    joined = "\n".join(lines)
+    return _BLANK_RUN.sub("\n\n\n", joined).strip("\n")
+
+
 def looks_like_forward(subject: str | None) -> bool:
     """True for subjects such as "Fwd:", "FW:", "WG:" or "转发:"."""
     return bool(subject and _FORWARD_SUBJECT.match(subject))

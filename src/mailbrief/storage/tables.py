@@ -38,6 +38,10 @@ NAMING_CONVENTION = {
 
 _PRECISION_CHECK = "deadline_precision IN ('none','unresolved','date','datetime')"
 _OWNERSHIP_CHECK = "ownership IN ('mine','waiting_for')"
+_DRAFT_KIND_CHECK = "kind IN ('reply','email','note','message')"
+_DRAFT_ORIGIN_CHECK = "origin IN ('created','edited','restored','generated')"
+_DRAFT_TONE_CHECK = "tone IN ('neutral','warm','formal','direct')"
+_DRAFT_LENGTH_CHECK = "length IN ('short','medium','long')"
 
 
 class Base(DeclarativeBase):
@@ -460,3 +464,128 @@ class SuggestionDecisionTable(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"))
     decided_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class DraftTable(Base):
+    """A draft or note the owner is writing (ADR 0012).
+
+    Drafts have no account foreign key: they belong to the owner. Their action link is
+    SET NULL, and the action's title is kept as a snapshot, so they outlive the action.
+    """
+
+    __tablename__ = "drafts"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_drafts_public_id"),
+        CheckConstraint(_DRAFT_KIND_CHECK, name="kind_known"),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        Index("ix_drafts_updated_at_utc", "updated_at_utc"),
+        Index("ix_drafts_action_id", "action_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    to_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    cc_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"))
+    action_title: Mapped[str | None] = mapped_column(Text)
+    created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    deleted_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+
+
+class DraftVersionTable(Base):
+    """One saved version of a draft's text; numbers only grow, so pruning leaves gaps."""
+
+    __tablename__ = "draft_versions"
+    __table_args__ = (
+        UniqueConstraint("draft_id", "number", name="uq_draft_versions_number"),
+        CheckConstraint("number >= 1", name="number_positive"),
+        CheckConstraint(_DRAFT_ORIGIN_CHECK, name="origin_known"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("drafts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    to_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    cc_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class DraftSourceTable(Base):
+    """A snapshot of an email a draft came from; it stays when the message goes."""
+
+    __tablename__ = "draft_sources"
+    __table_args__ = (
+        UniqueConstraint("draft_id", "provider_message_id", name="uq_draft_sources_message"),
+        Index("ix_draft_sources_message_id", "message_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("drafts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))
+    provider_message_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sender_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    web_link: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class OwnerConsentTable(Base):
+    """The owner's consent to one use of an AI provider, such as drafting (ADR 0013).
+
+    It mirrors ``ai_consents`` without an account: drafting consent belongs to the owner.
+    A consent is active until it is revoked.
+    """
+
+    __tablename__ = "owner_consents"
+    __table_args__ = (
+        UniqueConstraint("provider", "scope", "disclosure_version", name="uq_owner_consents_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    disclosure_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    granted_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    revoked_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class DraftGenerationTable(Base):
+    """How a generated draft version was made; it goes when its version is pruned."""
+
+    __tablename__ = "draft_generations"
+    __table_args__ = (
+        UniqueConstraint("version_id", name="uq_draft_generations_version"),
+        CheckConstraint(_DRAFT_TONE_CHECK, name="tone_known"),
+        CheckConstraint(_DRAFT_LENGTH_CHECK, name="length_known"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version_id: Mapped[int] = mapped_column(
+        ForeignKey("draft_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    tone: Mapped[str] = mapped_column(String(16), nullable=False)
+    length: Mapped[str] = mapped_column(String(16), nullable=False)
+    parts_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    missing_context_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

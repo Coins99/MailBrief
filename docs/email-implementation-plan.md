@@ -245,7 +245,7 @@ works from the package, and restart restores the session and saved brief.
 
 ## M6 — Persistent actions, target dates and plans
 
-**Status:** implemented in PR #15, awaiting live acceptance ([m6-actions.md](m6-actions.md)).
+**Status:** merged from PR #15, awaiting live acceptance ([m6-actions.md](m6-actions.md)).
 Proposed revisions for changed sources moved to M8, which handles thread updates
 ([ADR 0011](adr/0011-actions-and-suggestions.md)).
 
@@ -275,6 +275,10 @@ and independent step completion.
 next day without regeneration changing those decisions.
 
 ## M7 — Local drafts, notes and messages
+
+**Status:** M7 implemented, awaiting live acceptance: local drafts and notes, and AI drafting
+([m7-drafts.md](m7-drafts.md), [ADR 0012](adr/0012-drafts-and-notes.md),
+[ADR 0013](adr/0013-ai-drafting.md)).
 
 **Work**
 

@@ -122,6 +122,16 @@ control or format characters. See [M6 actions](m6-actions.md).
 - `ai-consent status` shows each account's consent; `ai-consent revoke` withdraws it, and
   the next brief asks again. Both work without a Gmail connection.
 
+## AI drafting (M7)
+
+Drafts can be written with Groq from context you choose; see [M7 drafts](m7-drafts.md) and
+[ADR 0013](adr/0013-ai-drafting.md). Drafting uses its own prompt,
+`groq-draft-2026-09-28.1` (the brief's is `groq-2026-09-28.1`), a strict schema with no
+field for recipients, and the same model, `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` limit and
+request cap. Its consent is separate from the brief's: it belongs to you rather than an
+account, is asked for the first time you draft with AI, and `ai-consent revoke` withdraws
+both.
+
 ## Moving from OpenAI
 
 Save a new Groq key and replace `MAILBRIEF_OPENAI_MODEL` with `MAILBRIEF_GROQ_MODEL`.
@@ -237,6 +247,12 @@ error code, when Groq sent a safe one; Groq's own error text is never shown or s
   support Structured Outputs. Choose one that does.
 - **"Incomplete" results**: the answer hit the output limit. Raise
   `MAILBRIEF_AI_MAX_OUTPUT_TOKENS`, or lower `MAILBRIEF_AI_BATCH_SIZE`.
+- **"Groq couldn't finish some answers within the output limit"** (`AI_OUTPUT_INCOMPLETE`):
+  Groq answered HTTP 400 `json_validate_failed`, which means it couldn't finish a valid
+  answer, usually because it ran out of output tokens. MailBrief treats this as an
+  incomplete answer, not a rejected request: a batch is split and a single message is
+  tried once more. Try again, or raise `MAILBRIEF_AI_MAX_OUTPUT_TOKENS`. Every other 400
+  is still reported as a rejected request.
 - **Rate limits**: waits of up to 30 seconds are retried automatically, at most 3 times;
   longer waits stop the run, so retry later.
 

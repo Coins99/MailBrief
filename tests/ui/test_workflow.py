@@ -22,10 +22,12 @@ from mailbrief.services.brief import ConsentGate, ShortlistGate
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
 from tests.factories import make_action, make_digest_item, make_message
+from tests.ui.fake_drafts import FakeDrafts
 
 
-class FakeBackend:
+class FakeBackend(FakeDrafts):
     def __init__(self) -> None:
+        super().__init__()
         self.saved = DailyDigest(
             account_id="owner@example.com",
             local_date=date(2026, 9, 4),
@@ -46,6 +48,8 @@ class FakeBackend:
         self.list_calls = 0
         self.list_fail: Exception | None = None
         self.actions: dict[ActionFilter, tuple[Action, ...]] = {}
+        self.action_counts: dict[ActionFilter, int] = {}
+        self.count_calls: list[ActionFilter] = []
         self.candidates: tuple[str, ...] = ("message-1",)
         self.closed = False
         self.cleaned = False
@@ -82,6 +86,10 @@ class FakeBackend:
         if self.list_fail is not None:
             raise self.list_fail
         return self.actions.get(view, ())
+
+    async def count_actions(self, view: ActionFilter) -> int:
+        self.count_calls.append(view)
+        return self.action_counts.get(view, len(self.actions.get(view, ())))
 
     async def accept_suggestion(self, suggestion_id: int) -> Action:
         await self._act("accept_suggestion", suggestion_id)
