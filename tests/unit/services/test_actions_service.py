@@ -1119,7 +1119,7 @@ async def test_an_action_survives_closing_and_reopening_the_database(tmp_path: P
 
 @pytest.fixture
 def failing_source(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    async def fail(self: ActionRepository, action_id: int, message: Any) -> bool:
+    async def fail(self: ActionRepository, action_id: int, message: Any, account: Any) -> bool:
         raise RuntimeError("disk full")
 
     monkeypatch.setattr(ActionRepository, "add_source", fail)

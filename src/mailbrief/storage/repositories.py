@@ -197,6 +197,7 @@ class MessageRepository:
                     "received_at_utc": m.received_at_utc,
                     "is_read": m.is_read,
                     "is_in_inbox": m.is_in_inbox,
+                    "is_sent": m.is_sent,
                     "importance": (
                         m.importance.value
                         if isinstance(m.importance, MessageImportance)
@@ -224,6 +225,7 @@ class MessageRepository:
                     "received_at_utc": base_stmt.excluded.received_at_utc,
                     "is_read": base_stmt.excluded.is_read,
                     "is_in_inbox": base_stmt.excluded.is_in_inbox,
+                    "is_sent": base_stmt.excluded.is_sent,
                     "importance": base_stmt.excluded.importance,
                     "has_attachments": base_stmt.excluded.has_attachments,
                     "body_preview": base_stmt.excluded.body_preview,
@@ -231,6 +233,8 @@ class MessageRepository:
                     "synced_at_utc": base_stmt.excluded.synced_at_utc,
                 },
             ).returning(MessageTable)
+            # Refresh rows already loaded in this session instead of returning them stale.
+            stmt = stmt.execution_options(populate_existing=True)
 
             result = await self._session.scalars(stmt)
             saved_rows.extend(result.all())
@@ -399,6 +403,7 @@ class MessageRepository:
             received_at_utc=row.received_at_utc,
             is_read=row.is_read,
             is_in_inbox=row.is_in_inbox,
+            is_sent=row.is_sent,
             importance=MessageImportance(row.importance),
             has_attachments=row.has_attachments,
             body_preview=row.body_preview,

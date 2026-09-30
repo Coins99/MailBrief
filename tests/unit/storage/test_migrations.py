@@ -408,6 +408,17 @@ def _rows(path: Path, tables: Sequence[str]) -> dict[str, list[tuple[object, ...
         }
 
 
+def _earlier_columns(
+    rows: dict[str, list[tuple[object, ...]]], earlier: dict[str, list[tuple[object, ...]]]
+) -> dict[str, list[tuple[object, ...]]]:
+    """``rows`` cut to the columns ``earlier`` had: later revisions append columns."""
+    widths = {table: len(found[0]) for table, found in earlier.items() if found}
+    return {
+        table: [row[: widths.get(table, len(row))] for row in found]
+        for table, found in rows.items()
+    }
+
+
 def _foreign_keys(path: Path, table: str) -> set[tuple[str, str, str, str]]:
     """(target table, column, target column, on_delete) for each foreign key."""
     with closing(sqlite3.connect(path)) as connection:
@@ -690,7 +701,7 @@ def test_stable_decisions_keep_every_decision_and_never_reuse_suggestion_ids(
     assert _identity_decisions(path) == identified
     assert _query(path, "SELECT id FROM action_suggestions ORDER BY id") == [(4,), (9,)]
     assert _query(path, "PRAGMA foreign_key_check") == []
-    assert _rows(path, kept) == before
+    assert _earlier_columns(_rows(path, kept), before) == before
     assert _foreign_keys(path, "suggestion_decisions") == {
         ("actions", "action_id", "id", "SET NULL")
     }
@@ -990,3 +1001,52 @@ def test_owner_preferences_table_upgrades_empty_and_downgrades(tmp_path: Path) -
     assert _schema(path) == _schema(fresh)
     command.upgrade(config, "head")
     assert _query(path, "SELECT count(*) FROM owner_preferences") == [(0,)]
+
+
+def test_thread_tracking_backfills_sources_and_downgrades_keeping_rows(tmp_path: Path) -> None:
+    path = tmp_path / "m8-threads.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)
+    command.upgrade(config, "20260929_0009")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE messages SET conversation_id = 'thread-1'")
+        connection.executemany(
+            "INSERT INTO action_sources(action_id,message_id,provider_message_id,subject,"
+            "sender_address,web_link,received_at_utc) VALUES(?,?,?,'Subject',"
+            "'sender@example.com','https://example.com','2026-09-25 00:00:00')",
+            [(action_id, 1, "message-1"), (action_id, None, "message-gone")],
+        )
+        connection.commit()
+    kept = ("accounts", "messages", "actions", "action_sources")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260930_0010")
+
+    assert _query(
+        path,
+        "SELECT provider_message_id,provider,provider_account_id,provider_thread_id "
+        "FROM action_sources ORDER BY id",
+    ) == [
+        ("message-1", "gmail", "account-1", "thread-1"),
+        ("message-gone", None, None, None),  # Its email had left local mail: untracked.
+    ]
+    assert _query(path, "SELECT is_sent FROM messages") == [(0,)]
+    assert _query(path, "SELECT thread_seen_until_utc FROM actions") == [(None,)]
+    assert ("ix_messages_account_conversation", ("account_id", "conversation_id")) in _schema(path)[
+        "messages"
+    ]["indexes"]  # type: ignore[operator]
+    assert _earlier_columns(_rows(path, kept), before) == before
+
+    command.downgrade(config, "20260929_0009")
+
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0009.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260929_0009")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT provider FROM action_sources WHERE message_id IS NOT NULL") == [
+        ("gmail",)
+    ]

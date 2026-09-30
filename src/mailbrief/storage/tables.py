@@ -98,6 +98,7 @@ class MessageTable(Base):
         ),
         Index("ix_messages_account_received", "account_id", "received_at_utc"),
         Index("ix_messages_account_rank", "account_id", "rank_score"),
+        Index("ix_messages_account_conversation", "account_id", "conversation_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -126,6 +127,10 @@ class MessageTable(Base):
     importance: Mapped[str] = mapped_column(String(16), nullable=False)
     is_in_inbox: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("1")
+    )
+    # Sent from this account; cached only inside tracked threads (ADR 0015).
+    is_sent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
     has_attachments: Mapped[bool] = mapped_column(
         Boolean,
@@ -359,6 +364,8 @@ class ActionTable(Base):
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
+    # The owner's "seen" watermark for later messages in the action's threads (ADR 0015).
+    thread_seen_until_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class ActionSuggestionTable(Base):
@@ -446,6 +453,11 @@ class ActionSourceTable(Base):
     sender_address: Mapped[str] = mapped_column(String(320), nullable=False)
     web_link: Mapped[str] = mapped_column(Text, nullable=False)
     received_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    # The message's provider, account and thread, so its thread can be tracked (ADR 0015).
+    # NULL for sources whose email had left local mail before revision 0010.
+    provider: Mapped[str | None] = mapped_column(String(32))
+    provider_account_id: Mapped[str | None] = mapped_column(String(255))
+    provider_thread_id: Mapped[str | None] = mapped_column(String(512))
 
 
 class SuggestionDecisionTable(Base):

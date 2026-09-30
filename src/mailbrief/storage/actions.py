@@ -388,8 +388,11 @@ class ActionRepository:
     async def delete_step(self, row: ActionStepTable) -> None:
         await self._session.delete(row)
 
-    async def add_source(self, action_id: int, message: MessageTable) -> bool:
-        """Link a message snapshot; False when the action already has this message."""
+    async def add_source(
+        self, action_id: int, message: MessageTable, account: AccountTable
+    ) -> bool:
+        """Link a message snapshot, with its provider, account and thread so the thread can
+        be tracked (ADR 0015); False when the action already has this message."""
         existing = await self._session.scalar(
             select(ActionSourceTable.id).where(
                 ActionSourceTable.action_id == action_id,
@@ -407,6 +410,9 @@ class ActionRepository:
                 sender_address=message.sender_address,
                 web_link=message.web_link,
                 received_at_utc=message.received_at_utc,
+                provider=account.provider,
+                provider_account_id=account.provider_account_id,
+                provider_thread_id=message.conversation_id,
             )
         )
         return True

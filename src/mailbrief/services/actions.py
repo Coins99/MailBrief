@@ -24,6 +24,7 @@ from mailbrief.domain.analysis import ActionSuggestion
 from mailbrief.domain.common import normalize_utc
 from mailbrief.storage.actions import ActionRepository, DecisionKey, suggestion_from_row
 from mailbrief.storage.tables import (
+    AccountTable,
     ActionStepTable,
     ActionTable,
     MessageTable,
@@ -126,8 +127,8 @@ class ActionService:
 
     async def _suggestion(
         self, suggestion_id: int
-    ) -> tuple[ActionSuggestion, MessageTable, DecisionKey]:
-        """The suggestion, its message and the key its decision is kept under."""
+    ) -> tuple[ActionSuggestion, MessageTable, AccountTable, DecisionKey]:
+        """The suggestion, its message and account, and the key its decision is kept under."""
         found = await self._repository.get_suggestion(suggestion_id)
         if found is None:
             raise SuggestionNotFoundError(_SUGGESTION_NOT_FOUND)
@@ -142,7 +143,7 @@ class ActionService:
             provider_message_id=message.provider_message_id,
             fingerprint=suggestion.fingerprint,
         )
-        return suggestion, message, key
+        return suggestion, message, account, key
 
     async def _live(self, public_id: str, expected_revision: int | None) -> ActionTable:
         row = await self._repository.get_action(public_id)
@@ -181,7 +182,7 @@ class ActionService:
         """
 
         async def run(now: datetime) -> Action:
-            suggestion, message, key = await self._suggestion(suggestion_id)
+            suggestion, message, account, key = await self._suggestion(suggestion_id)
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id is not None:
@@ -217,7 +218,7 @@ class ActionService:
             )
             for position, text in enumerate(suggestion.steps):
                 self._repository.add_step(row.id, position, text, None)
-            await self._repository.add_source(row.id, message)
+            await self._repository.add_source(row.id, message, account)
             await self._repository.save_decision(
                 key, decision=SuggestionState.ACCEPTED, action_id=row.id, decided_at_utc=now
             )
@@ -235,7 +236,7 @@ class ActionService:
         """
 
         async def run(now: datetime) -> Action:
-            _, message, key = await self._suggestion(suggestion_id)
+            _, message, account, key = await self._suggestion(suggestion_id)
             target = await self._live(public_id, None)
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
@@ -247,7 +248,7 @@ class ActionService:
                     raise ActionConflictError("That suggestion already belongs to another action.")
             if target.revision != expected_revision:
                 raise ActionConflictError(_STALE)
-            await self._repository.add_source(target.id, message)
+            await self._repository.add_source(target.id, message, account)
             await self._repository.save_decision(
                 key, decision=SuggestionState.ACCEPTED, action_id=target.id, decided_at_utc=now
             )
@@ -260,7 +261,7 @@ class ActionService:
         """Hide a suggestion from later briefs; repeating it changes nothing."""
 
         async def run(now: datetime) -> None:
-            _, _, key = await self._suggestion(suggestion_id)
+            _, _, _, key = await self._suggestion(suggestion_id)
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id is not None:
@@ -283,7 +284,7 @@ class ActionService:
         """Undo a dismissal: the suggestion is pending again, or its deleted action returns."""
 
         async def run(now: datetime) -> None:
-            _, _, key = await self._suggestion(suggestion_id)
+            _, _, _, key = await self._suggestion(suggestion_id)
             decision = await self._repository.get_decision(key)
             if decision is None:
                 return
