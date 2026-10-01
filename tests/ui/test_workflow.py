@@ -607,6 +607,36 @@ async def test_failure_guidance(
     assert window.status.text().count(expected) == 1
 
 
+_REFRESH_FAILED = "Refresh failed. The displayed saved brief is unchanged."
+# What Sync and review says for each way a run can end without saving a brief.
+_UNSAVED = {
+    BriefStatus.CANCELLED: "Cancelled. The displayed saved brief is unchanged.",
+    BriefStatus.CONSENT_DECLINED: "Transmission declined. No messages sent to AI in this run.",
+    BriefStatus.SYNC_FAILED: _REFRESH_FAILED,
+    BriefStatus.ANALYSIS_FAILED: _REFRESH_FAILED,
+    # Only an automatic run ends this way; from Sync and review it would read as a failure.
+    BriefStatus.READY_FOR_REVIEW: _REFRESH_FAILED,
+}
+
+
+@pytest.mark.parametrize("status", list(_UNSAVED), ids=[status.value for status in _UNSAVED])
+async def test_a_run_from_sync_and_review_that_saves_no_brief_says_how_it_ended(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, status: BriefStatus
+) -> None:
+    assert isinstance(window.backend, FakeBackend)
+    result = BriefRunResult(status=status, sync=window.backend.sync)
+    monkeypatch.setattr(window.backend, "generate", AsyncMock(return_value=result))
+
+    window.start(window._generate)
+    await finish(window)
+
+    assert window.status.text() == _UNSAVED[status]
+
+
+def test_every_status_but_saved_has_its_text_above() -> None:
+    assert {*_UNSAVED, BriefStatus.SAVED} == set(BriefStatus)
+
+
 async def test_startup_storage_failure_can_retry(
     window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:

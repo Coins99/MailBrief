@@ -750,7 +750,8 @@ and saves no brief. Reviewing and analyzing stay a click away (Sync and review).
   never saves a brief that would lose one of the brief's messages: if more of them need
   analysis than it may send, or one can't be read or fails in analysis, it saves nothing
   (what it did analyze stays cached), and the status line and `brief --automatic` say
-  "Today's brief needs your review: N messages from it couldn't be refreshed automatically."
+  "Today's brief needs your review: N messages from it couldn't be refreshed automatically.",
+  then "M new messages are also ready." when there are any.
 
 ### Declines
 
@@ -764,9 +765,9 @@ it, or `--include`, forgets the decline. Being pushed out by a limit is not a de
 - `brief --automatic` runs one automatic run: no prompts, today only, and it rejects
   `--date`, `--include`, `--exclude` and `--yes`. Without permission it prints "N messages are
   ready to review; automatic analysis is off."; with it, the usual result plus "N deferred to
-  your next review." when messages wait. A run that needs your review prints that sentence; if
-  its analysis ran and a carried message failed, it also prints the usual counts and the
-  reason, and exits 4.
+  your next review." when messages wait. A run that needs your review prints that sentence. If
+  it only stopped over its permission, it exits 0; if a carried message couldn't be read, or
+  its analysis failed, it also prints the usual result lines and the reason, and exits 4.
 - `ai-consent auto-send N` shows the disclosure and asks for a typed "yes" (`--yes` skips the
   question, not the disclosure). `auto-send 0` turns it off without asking, and works even with no consent. `ai-consent
   status` and `preferences show` show it, and `preferences show` the refresh settings.

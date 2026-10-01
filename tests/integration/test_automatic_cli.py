@@ -13,6 +13,7 @@ import respx
 
 from mailbrief.diagnostics import gmail
 from mailbrief.domain.preferences import PreferencesEdit
+from mailbrief.providers.gmail.client import MESSAGES_URL
 from tests.integration.test_brief_cli import (  # noqa: F401 - fixtures used by name
     Mailbox,
     groq_answers,
@@ -200,10 +201,10 @@ def test_a_permission_too_small_for_the_carried_messages_sends_nothing_and_says_
 
     output = capsys.readouterr().out
     assert (
-        "Today's brief needs your review: 2 messages from it couldn't be refreshed automatically."
-        in output.splitlines()
+        "Today's brief needs your review: 2 messages from it couldn't be refreshed automatically. "
+        "1 new message is also ready." in output.splitlines()
     )
-    assert "ready to review" not in output and "Brief:" not in output
+    assert "ready to review" not in output and "Brief:" not in output  # It exits 0: no failure.
     assert route.call_count == sent  # Nothing was sent, and the day's brief is as it was.
     assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
     assert "Brief for 2026-09-16 (me@example.com): complete; items: 2" in capsys.readouterr().out
@@ -245,7 +246,8 @@ def test_a_carried_message_that_fails_keeps_the_earlier_brief_and_exits_4(
     assert any("analyzed 1, reused 0, failed 1" in line for line in lines)
     assert "AI: Groq / another-model; requests: 2; tokens in/out: 1200 / 300" in lines
     sentence = lines.index(
-        "Today's brief needs your review: 1 message from it couldn't be refreshed automatically."
+        "Today's brief needs your review: 1 message from it couldn't be refreshed automatically. "
+        "1 new message is also ready."
     )
     assert lines[sentence + 1 :] == [
         "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set",
@@ -259,6 +261,43 @@ def test_a_carried_message_that_fails_keeps_the_earlier_brief_and_exits_4(
     route.mock(side_effect=answer_every_message)
     assert run_brief(path, "--yes") == 0
     assert "analyzed 1, reused 1, failed 0" in capsys.readouterr().out
+
+
+def test_a_carried_message_that_can_t_be_read_exits_4_and_sends_nothing(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = groq_answers(respx_mock)
+    path = tmp_path / "auto.sqlite3"
+    consented(path, monkeypatch, capsys)  # a1 is in the day's brief.
+    assert consent(path, "auto-send", "5", "--yes") == 0
+    mailbox.add("a2")
+    # Gmail now answers for a1's body with another message, which can't be read as a1's.
+    respx_mock.get(f"{MESSAGES_URL}/a1", params__contains={"format": "full"}).respond(
+        json={"id": "other", "payload": {}}
+    )
+    capsys.readouterr()
+    sent = route.call_count
+
+    assert automatic(path) == 4
+
+    lines = capsys.readouterr().out.splitlines()
+    assert route.call_count == sent  # The permission covers a2, yet nothing was sent.
+    assert "Brief: ready_for_review; items: 0" in lines
+    assert not any(line.startswith(("Coverage:", "AI:")) for line in lines)
+    sentence = lines.index(
+        "Today's brief needs your review: 1 message from it couldn't be refreshed automatically. "
+        "1 new message is also ready."
+    )
+    assert lines[sentence + 1 :] == [
+        "A message in today's brief couldn't be read.",
+        "Your last saved brief for today is unchanged.",
+    ]
+    assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
+    assert "Brief for 2026-09-16 (me@example.com): complete; items: 1" in capsys.readouterr().out
 
 
 def test_turning_the_permission_off_takes_effect_on_the_next_run(

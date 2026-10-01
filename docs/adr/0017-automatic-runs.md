@@ -73,8 +73,8 @@ at any moment.
   status line. A newly saved brief replaces the latest one shown, unless the owner is
   reading a past brief.
 - **Diagnostics.** Each automatic run writes one counts-only line to `desktop.log`: its
-  outcome, how many messages were ready, analyzed and deferred, and how many AI requests it
-  made. Never mail text.
+  outcome, how many new messages were ready, how many carried messages it couldn't refresh,
+  how many it analyzed and deferred, and how many AI requests it made. Never mail text.
 
 ## Consequences
 

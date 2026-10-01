@@ -69,8 +69,8 @@ def test_an_automatic_run_is_logged_as_counts_only(tmp_path: Path) -> None:
         log_automatic_run(
             result(
                 status=BriefStatus.READY_FOR_REVIEW,
-                needs_review=True,
-                ready=3,
+                unrefreshed=3,
+                ready=1,
                 coverage=failed,
                 ai_calls=2,
                 error_code="AI_RATE_LIMITED",
@@ -83,12 +83,15 @@ def test_an_automatic_run_is_logged_as_counts_only(tmp_path: Path) -> None:
         handler.close()
 
     assert lines[0].endswith(
-        "automatic run: status=ready_for_review ready=4 analyzed=0 deferred=0 ai_requests=0"
+        "automatic run: status=ready_for_review ready=4 unrefreshed=0 analyzed=0 deferred=0 "
+        "ai_requests=0"
     )
     assert lines[1].endswith(
-        "automatic run: status=analysis_failed ready=0 analyzed=2 deferred=2 ai_requests=3"
+        "automatic run: status=analysis_failed ready=0 unrefreshed=0 analyzed=2 deferred=2 "
+        "ai_requests=3"
     )
     assert lines[2].endswith(
-        "automatic run: status=ready_for_review ready=3 analyzed=2 deferred=0 ai_requests=2"
+        "automatic run: status=ready_for_review ready=1 unrefreshed=3 analyzed=2 deferred=0 "
+        "ai_requests=2"
     )
     assert "AI_RATE_LIMITED" not in "".join(lines)  # Codes go through error_guidance, once.

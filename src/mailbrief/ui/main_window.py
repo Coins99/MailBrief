@@ -5,7 +5,7 @@ import contextlib
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, assert_never
 
 from pydantic import SecretStr
 from PySide6.QtCore import Qt, Signal
@@ -251,6 +251,7 @@ _AI_CANCELLED = "Cancelled. Your text is unchanged."
 _AI_DECLINED = "Nothing was sent: AI drafting needs your consent first."
 _AI_FAILED = "Couldn't write with Groq. Your text is unchanged."
 _REFRESH_DISCONNECTED = "Automatic refresh skipped: connect Gmail first."
+_REFRESH_FAILED = "Refresh failed. The displayed saved brief is unchanged."
 _AUTOMATIC = "Automatic refresh: "
 
 
@@ -1582,25 +1583,35 @@ class MainWindow(QMainWindow):
         result = await self.backend.generate(
             self, self, self._cancel, self._progress, local_date=local_date
         )
-        if result.digest is not None:
-            if local_date is None:
-                await self._show_digest(result.digest)
-            else:
-                await self._view(result.digest)
-            self.status.setText(f"Brief saved ({result.digest.status.value}).")
-            if result.digest.status is DigestStatus.EMPTY:
-                if result.sync.message_count == 0 and result.sync.status is SyncStatus.COMPLETE:
-                    self.status.setText(f"No messages in {day}. Empty brief saved.")
+        match result.status:
+            case BriefStatus.SAVED:
+                digest = result.digest
+                assert digest is not None  # A saved result always carries its digest.
+                if local_date is None:
+                    await self._show_digest(digest)
                 else:
-                    self.status.setText(
-                        "No analyzed messages in this selection. Empty brief saved."
-                    )
-        elif result.status is BriefStatus.CANCELLED:
-            self.status.setText("Cancelled. The displayed saved brief is unchanged.")
-        elif result.status is BriefStatus.CONSENT_DECLINED:
-            self.status.setText("Transmission declined. No messages sent to AI in this run.")
-        else:
-            self.status.setText("Refresh failed. The displayed saved brief is unchanged.")
+                    await self._view(digest)
+                self.status.setText(f"Brief saved ({digest.status.value}).")
+                if digest.status is DigestStatus.EMPTY:
+                    if result.sync.message_count == 0 and result.sync.status is SyncStatus.COMPLETE:
+                        self.status.setText(f"No messages in {day}. Empty brief saved.")
+                    else:
+                        self.status.setText(
+                            "No analyzed messages in this selection. Empty brief saved."
+                        )
+            case BriefStatus.CANCELLED:
+                self.status.setText("Cancelled. The displayed saved brief is unchanged.")
+            case BriefStatus.CONSENT_DECLINED:
+                self.status.setText("Transmission declined. No messages sent to AI in this run.")
+            case BriefStatus.SYNC_FAILED:
+                self.status.setText(_REFRESH_FAILED)
+            case BriefStatus.ANALYSIS_FAILED:
+                self.status.setText(_REFRESH_FAILED)
+            case BriefStatus.READY_FOR_REVIEW:
+                # Only an automatic run ends this way; from here it is reported as a failure.
+                self.status.setText(_REFRESH_FAILED)
+            case _:
+                assert_never(result.status)
         # A cancelled run's news is the cancellation; a partial count would invite misreading.
         threads = "" if result.status is BriefStatus.CANCELLED else thread_check_text(result.sync)
         if threads:
@@ -1668,38 +1679,49 @@ class MainWindow(QMainWindow):
         """Say what the run did, in the status line, and show what it saved."""
         log_automatic_run(result)
         stamp = f"{self.now().astimezone(self.zone):%H:%M}"
-        text = ""
-        if result.status is BriefStatus.READY_FOR_REVIEW:
-            # Either it only checked, because nothing may be sent or nothing is new, or it
-            # saved nothing because the brief would have lost a carried message. When that
-            # was a failure, its guidance follows below.
-            found = (
-                needs_review_sentence(result.ready)
-                if result.needs_review
-                else _ready_text(result.ready)
-            )
-            text = f"Checked Gmail at {stamp}. {found}"
-        elif result.digest is not None:
-            analyzed = 0 if result.coverage is None else result.coverage.analyzed
-            text = f"Automatic brief at {stamp}: " + (
-                f"analyzed {_count_messages(analyzed, new=True)}"
-                if analyzed
-                else "nothing new to analyze"
-            )
-            if result.deferred:
-                waiting = "waits" if result.deferred == 1 else "wait"
-                text += f"; {result.deferred} {waiting} for your review."
-            else:
-                text += "."
-            if result.proposals_created > 0:
-                count = result.proposals_created
-                noun = "update" if count == 1 else "updates"
-                text += f" Proposed {count} {noun} to your actions."
-            self._offer_undo()  # A new brief replaces the suggestions an Undo would refer to.
-            if self._shown is None:  # Never pull the owner away from a past brief they're reading.
-                await self._show_digest(result.digest)
-        elif result.status is BriefStatus.CANCELLED:
-            text = "Automatic refresh cancelled."
+        match result.status:
+            case BriefStatus.READY_FOR_REVIEW:
+                # Either it only checked, because nothing may be sent or nothing is new, or it
+                # saved nothing because the brief would have lost a carried message. When that
+                # was a failure, its guidance follows below.
+                found = (
+                    needs_review_sentence(result.unrefreshed, result.ready)
+                    if result.needs_review
+                    else _ready_text(result.ready)
+                )
+                text = f"Checked Gmail at {stamp}. {found}"
+            case BriefStatus.SAVED:
+                digest = result.digest
+                assert digest is not None  # A saved result always carries its digest.
+                analyzed = 0 if result.coverage is None else result.coverage.analyzed
+                text = f"Automatic brief at {stamp}: " + (
+                    f"analyzed {_count_messages(analyzed, new=True)}"
+                    if analyzed
+                    else "nothing new to analyze"
+                )
+                if result.deferred:
+                    waiting = "waits" if result.deferred == 1 else "wait"
+                    text += f"; {result.deferred} {waiting} for your review."
+                else:
+                    text += "."
+                if result.proposals_created > 0:
+                    count = result.proposals_created
+                    noun = "update" if count == 1 else "updates"
+                    text += f" Proposed {count} {noun} to your actions."
+                self._offer_undo()  # A new brief replaces the suggestions an Undo would refer to.
+                # Never pull the owner away from a past brief they're reading.
+                if self._shown is None:
+                    await self._show_digest(digest)
+            case BriefStatus.CANCELLED:
+                text = "Automatic refresh cancelled."
+            case BriefStatus.SYNC_FAILED:
+                text = ""  # The guidance for its code, below, says what failed.
+            case BriefStatus.ANALYSIS_FAILED:
+                text = ""  # As above.
+            case BriefStatus.CONSENT_DECLINED:
+                text = ""  # An automatic run never asks, so this never ends one.
+            case _:
+                assert_never(result.status)
         if result.status is not BriefStatus.CANCELLED:
             for code in dict.fromkeys((result.error_code, result.sync.error_code)):
                 if code:

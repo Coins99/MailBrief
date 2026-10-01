@@ -20,7 +20,7 @@ from mailbrief.ports.errors import (
 )
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
-from mailbrief.services.brief import needs_review_sentence
+from mailbrief.services.brief import CARRIED_BODY_FAILED, needs_review_sentence
 from mailbrief.services.threads import ThreadCheck
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, DigestRepository, MessageRepository
@@ -452,7 +452,8 @@ async def test_when_the_cap_can_t_cover_the_carried_messages_nothing_is_sent_or_
     result = await service.generate(tz_key=BRIEF_ZONE, automatic=True)
 
     assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
-    assert result.ready == 3  # The three carried messages; the two new ones don't count.
+    assert (result.unrefreshed, result.ready) == (3, 2)  # Three carried; two new.
+    assert result.error_code is None  # Nothing failed: it only stopped over its cap.
     assert (result.digest, result.coverage, result.deferred, result.ai_calls) == (None, None, 0, 0)
     assert provider.calls == 0 and provider.credential_checks == 0 and gate.previews == []
     assert sorted(reader.fetched) == ["m0", "m1", "m2", "m3", "m4"]  # Read in memory, to plan.
@@ -470,7 +471,7 @@ async def test_the_review_it_asks_for_sends_everything_waiting_and_keeps_every_m
     waiting = await build(
         session, FakeAIProvider(), NoAsking(answer=False), messages=mailbox
     ).generate(tz_key=BRIEF_ZONE, automatic=True)
-    assert waiting.needs_review and waiting.ready == 3
+    assert waiting.needs_review and (waiting.unrefreshed, waiting.ready) == (3, 2)
     provider, gate = FakeAIProvider([answer_all()]), RecordingGate(True)
 
     reviewed = await build(session, provider, gate, messages=mailbox).generate(tz_key=BRIEF_ZONE)
@@ -517,15 +518,34 @@ async def test_after_an_upgrade_an_automatic_run_keeps_every_carried_message_or_
         assert keys_of(await saved_brief(session)) == keys_of(result.digest)
     else:
         assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
+        assert (result.unrefreshed, result.ready, result.error_code) == (3, 2, None)
         assert await saved_brief(session) == before
 
 
-def test_the_sentence_says_how_many_of_the_brief_s_messages_were_not_refreshed() -> None:
-    assert needs_review_sentence(3) == (
-        "Today's brief needs your review: 3 messages from it couldn't be refreshed automatically."
-    )
-    assert needs_review_sentence(1) == (
-        "Today's brief needs your review: 1 message from it couldn't be refreshed automatically."
+@pytest.mark.parametrize(
+    ("unrefreshed", "ready", "sentence"),
+    [
+        (3, 0, "3 messages from it couldn't be refreshed automatically."),
+        (1, 0, "1 message from it couldn't be refreshed automatically."),
+        (
+            3,
+            2,
+            "3 messages from it couldn't be refreshed automatically. "
+            "2 new messages are also ready.",
+        ),
+        (
+            1,
+            1,
+            "1 message from it couldn't be refreshed automatically. 1 new message is also ready.",
+        ),
+    ],
+    ids=["no-new-messages", "one-and-no-new", "with-new-messages", "one-of-each"],
+)
+def test_the_sentence_counts_what_was_not_refreshed_and_then_any_new_messages(
+    unrefreshed: int, ready: int, sentence: str
+) -> None:
+    assert needs_review_sentence(unrefreshed, ready) == (
+        f"Today's brief needs your review: {sentence}"
     )
 
 
@@ -572,16 +592,29 @@ async def test_a_carried_message_whose_body_can_t_be_read_sends_and_saves_nothin
     result = await service.generate(tz_key=BRIEF_ZONE, automatic=True)
 
     assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
-    assert result.ready == 1  # m0; m1 is cached, and m2 isn't from the brief.
-    assert (result.digest, result.coverage, result.ai_calls, result.error_code) == (
-        None,
-        None,
-        0,
-        None,
-    )
+    assert (result.unrefreshed, result.ready) == (1, 1)  # m0 from the brief; m2 is new.
+    assert result.error_code == CARRIED_BODY_FAILED  # A failure, unlike stopping over the cap.
+    assert (result.digest, result.coverage, result.ai_calls) == (None, None, 0)
     assert provider.calls == 0 and provider.credential_checks == 0 and gate.previews == []
     assert await analyses(session) == cached
     assert await saved_brief(session) == before  # Still m0 and m1.
+
+
+async def test_a_carried_body_failure_is_a_failure_even_when_the_cap_is_too_small_as_well(
+    session: AsyncSession,
+) -> None:
+    await brief_of(session, 3)
+    await outdate(session)  # m1 and m2 need analysis again, and one place can't cover both.
+    await permit(session, 1, provider="fake")
+    mailbox = brief_inbox(4)
+    provider = FakeAIProvider()
+    service = build(session, provider, NoAsking(answer=False), messages=mailbox)
+    service._bodies = BodyService(BrokenBody(texts_for(mailbox), "m0", "unreadable"))
+
+    result = await service.generate(tz_key=BRIEF_ZONE, automatic=True)
+
+    assert result.needs_review and provider.calls == 0
+    assert (result.unrefreshed, result.ready, result.error_code) == (3, 1, CARRIED_BODY_FAILED)
 
 
 async def test_a_carried_message_whose_analysis_fails_writes_no_brief_and_keeps_what_succeeded(
@@ -600,7 +633,8 @@ async def test_a_carried_message_whose_analysis_fails_writes_no_brief_and_keeps_
     )
 
     assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
-    assert result.ready == 1 and result.digest is None  # Only m0 wasn't refreshed.
+    assert (result.unrefreshed, result.ready) == (1, 2)  # m0; m2 and m3 are new.
+    assert result.digest is None
     assert result.coverage is not None
     assert (result.coverage.analyzed, result.coverage.failed) == (3, 1)
     assert (result.ai_calls, result.error_code, result.proposals_created) == (2, None, 0)
@@ -633,7 +667,8 @@ async def test_a_rate_limit_after_an_upgrade_keeps_the_earlier_brief_and_says_wh
     ).generate(tz_key=BRIEF_ZONE, automatic=True)
 
     assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
-    assert (result.ready, result.error_code, result.ai_calls) == (3, "AI_RATE_LIMITED", 2)
+    assert (result.unrefreshed, result.ready) == (3, 2)
+    assert (result.error_code, result.ai_calls) == ("AI_RATE_LIMITED", 2)
     assert result.coverage is not None
     assert (result.coverage.analyzed, result.coverage.failed) == (2, 3)
     assert await saved_brief(session) == before  # Not a brief of m4 and m3 alone.
@@ -654,7 +689,8 @@ async def test_without_a_key_a_carried_message_waits_for_the_review_and_nothing_
     ).generate(tz_key=BRIEF_ZONE, automatic=True)
 
     assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
-    assert (result.ready, result.error_code, result.ai_calls) == (1, "AI_KEY_MISSING", 0)
+    assert (result.unrefreshed, result.ready) == (1, 1)
+    assert (result.error_code, result.ai_calls) == ("AI_KEY_MISSING", 0)
     assert provider.batches == [] and await saved_brief(session) == before
 
 

@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import assert_never
 from zoneinfo import ZoneInfo
 
 from alembic.util import CommandError
@@ -191,6 +192,7 @@ _AI_ERROR_MESSAGES = {
     ),
     "DRAFT_CHANGED": "The draft changed before Groq's text could be used; nothing was lost.",
     "ANALYSIS_FAILED": "No message could be analyzed.",
+    "CARRIED_BODY_FAILED": "A message in today's brief couldn't be read.",
 }
 _DRAFTING_PARTS = {
     "use_email": DraftContextPart.SOURCE_EMAIL,
@@ -772,24 +774,35 @@ def _review_line(result: BriefRunResult) -> str:
     """What an automatic run that saved nothing found: the window's sentence when it couldn't
     refresh a carried message, otherwise how many new messages are ready."""
     if result.needs_review:
-        return needs_review_sentence(result.ready)
+        return needs_review_sentence(result.unrefreshed, result.ready)
     return _ready_line(result.ready)
 
 
+def _refresh_failed(result: BriefRunResult) -> bool:
+    """Whether an automatic run that saved nothing failed to read or analyze a carried
+    message, rather than only checking or stopping over its cap."""
+    coverage = result.coverage
+    return result.error_code is not None or (coverage is not None and coverage.failed > 0)
+
+
 def _outcome(result: BriefRunResult) -> str:
-    if result.status is BriefStatus.SAVED:
-        return "Saved. Bodies were not stored."
-    if result.status is BriefStatus.READY_FOR_REVIEW:
-        return _review_line(result)
-    if result.status is BriefStatus.CONSENT_DECLINED:
-        return "Nothing was sent. No brief saved."
-    if result.status is BriefStatus.ANALYSIS_FAILED:
-        return _AI_ERROR_MESSAGES.get(
-            result.error_code or "", _AI_ERROR_MESSAGES["ANALYSIS_FAILED"]
-        )
-    if result.status is BriefStatus.SYNC_FAILED:
-        return f"Sync failed ({result.error_code or 'unknown'}). Nothing was sent."
-    return "Cancelled. No brief saved."
+    match result.status:
+        case BriefStatus.SAVED:
+            return "Saved. Bodies were not stored."
+        case BriefStatus.READY_FOR_REVIEW:
+            return _review_line(result)
+        case BriefStatus.CONSENT_DECLINED:
+            return "Nothing was sent. No brief saved."
+        case BriefStatus.ANALYSIS_FAILED:
+            return _AI_ERROR_MESSAGES.get(
+                result.error_code or "", _AI_ERROR_MESSAGES["ANALYSIS_FAILED"]
+            )
+        case BriefStatus.SYNC_FAILED:
+            return f"Sync failed ({result.error_code or 'unknown'}). Nothing was sent."
+        case BriefStatus.CANCELLED:
+            return "Cancelled. No brief saved."
+        case _:
+            assert_never(result.status)
 
 
 def _ai_line(result: BriefRunResult, *, model: str) -> str:
@@ -932,16 +945,25 @@ def _print_items(
 
 
 def _brief_exit_code(result: BriefRunResult) -> int:
-    """0 only for a complete brief, or an empty one after a complete sync."""
-    if result.status is BriefStatus.SAVED:
-        complete = (DigestStatus.COMPLETE, DigestStatus.EMPTY)
-        finished = result.digest is not None and result.digest.status in complete
-        return 0 if finished and not _sync_incomplete(result) else 4
-    if result.status is BriefStatus.CONSENT_DECLINED:
-        return 6
-    if result.status is BriefStatus.CANCELLED:
-        return 130
-    return 4
+    """0 only for a complete brief, an empty one after a complete sync, or an automatic run
+    that only checked or stopped over its cap."""
+    match result.status:
+        case BriefStatus.SAVED:
+            complete = (DigestStatus.COMPLETE, DigestStatus.EMPTY)
+            finished = result.digest is not None and result.digest.status in complete
+            return 0 if finished and not _sync_incomplete(result) else 4
+        case BriefStatus.READY_FOR_REVIEW:
+            return 4 if _refresh_failed(result) else 0
+        case BriefStatus.CONSENT_DECLINED:
+            return 6
+        case BriefStatus.CANCELLED:
+            return 130
+        case BriefStatus.SYNC_FAILED:
+            return 4
+        case BriefStatus.ANALYSIS_FAILED:
+            return 4
+        case _:
+            assert_never(result.status)
 
 
 async def brief(
@@ -1019,12 +1041,12 @@ async def brief(
             await database.dispose()
         model = ai.model_name
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
-    if result.status is BriefStatus.READY_FOR_REVIEW and result.coverage is None:
-        # It sent nothing. One whose analysis ran and failed a carried message has a coverage,
-        # and is printed like any other result below.
+    if result.status is BriefStatus.READY_FOR_REVIEW and not _refresh_failed(result):
+        # It only checked, or stopped over its cap: one line says what it found. A run that
+        # couldn't read or analyze a carried message is printed like any other result below.
         _print_threads(result.sync)
         print(_review_line(result))
-        return 0
+        return _brief_exit_code(result)
     _print_result(result, model=model)
     _print_threads(result.sync)
     created = result.proposals_created

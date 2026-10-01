@@ -39,8 +39,12 @@ from mailbrief.storage.tables import AccountTable
 logger = logging.getLogger(__name__)
 
 CONSENT_DISCLOSURE_VERSION: Final = "2"
+# An automatic run stopped before sending because a carried message's body couldn't be read.
+CARRIED_BODY_FAILED: Final = "CARRIED_BODY_FAILED"
 _DISPLAY_NAMES: Final = {"openai": "OpenAI", "groq": "Groq"}
 _AUTOMATIC_TODAY: Final = "Automatic runs brief today only."
+# What the body step leaves on a message it couldn't read: unreadable, empty or deleted.
+_UNREAD: Final = (AnalysisOutcome.FAILED, AnalysisOutcome.SKIPPED)
 
 
 class ConsentGate(Protocol):
@@ -113,14 +117,18 @@ def permission_sentence(limit: int, account_email: str, provider_name: str) -> s
     )
 
 
-def needs_review_sentence(count: int) -> str:
+def needs_review_sentence(unrefreshed: int, ready: int) -> str:
     """What an automatic run says when it saved nothing rather than lose a carried message
     (ADR 0017): how many of the day's brief's messages it didn't refresh, because they were
-    over its send limit, unreadable or failed in analysis. Shared by the CLI and the UI."""
-    return (
-        f"Today's brief needs your review: {_count(count, 'message')} from it couldn't be "
-        "refreshed automatically."
+    over its send limit, unreadable or failed in analysis, and then how many new messages
+    are ready as well, if any. Shared by the CLI and the UI."""
+    sentence = (
+        f"Today's brief needs your review: {_count(unrefreshed, 'message')} from it couldn't "
+        "be refreshed automatically."
     )
+    if ready == 0:
+        return sentence
+    return f"{sentence} {_count(ready, 'new message')} {'is' if ready == 1 else 'are'} also ready."
 
 
 def _not_refreshed(
@@ -202,8 +210,9 @@ class BriefService:
         derives proposals as usual. It never saves a brief that would lose a carried message.
         When one is over that cap, or its body can't be read, the run sends and saves
         nothing; when one's analysis fails, it writes no brief and leaves the analyses that
-        succeeded cached. Either way it returns READY_FOR_REVIEW with ``needs_review`` and
-        ``ready`` set to the number of carried messages it didn't refresh.
+        succeeded cached. Either way it returns READY_FOR_REVIEW with ``unrefreshed`` set to
+        the number of carried messages it didn't refresh and ``ready`` to the number of new
+        ones, and with CARRIED_BODY_FAILED as its error code when a body was the reason.
         """
         if automatic and (shortlist_gate is not None or include_ids or exclude_ids):
             raise ValueError("An automatic run has no review.")
@@ -264,15 +273,17 @@ class BriefService:
             if any(item.outcome is not None for item in stale):
                 # A carried message is over the cap, or its body failed or was skipped, so a
                 # saved brief would lose it: nothing is sent or saved, and the day's brief
-                # waits for the owner's review.
+                # waits for the owner's review. Only an unread body is a failure.
+                unread = any(item.outcome in _UNREAD for item in stale)
                 logger.info(
                     "Automatic run: %d carried messages not refreshed, nothing sent", len(stale)
                 )
                 return BriefRunResult(
                     status=BriefStatus.READY_FOR_REVIEW,
                     sync=sync,
-                    ready=len(stale),
-                    needs_review=True,
+                    error_code=CARRIED_BODY_FAILED if unread else None,
+                    ready=new,
+                    unrefreshed=len(stale),
                 )
         if plan.to_send and not await self._analysis.credentials_available():
             # Nothing can be sent, so there is nothing to consent to; cached and skipped
@@ -305,8 +316,8 @@ class BriefService:
                 ai_calls=run.requests_sent,
                 provider_detail=run.provider_detail,
                 deferred=coverage.deferred,
-                ready=len(lost),
-                needs_review=True,
+                ready=new,
+                unrefreshed=len(lost),
             )
         emit_progress(progress, SyncProgress(stage=SyncStage.ASSEMBLING))
         digest = await self._digests.save(

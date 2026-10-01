@@ -36,6 +36,7 @@ ERROR_MESSAGES = {
         "The draft changed before Groq's text could be used. Nothing was lost; try again."
     ),
     "ANALYSIS_FAILED": "No message could be analyzed. Review your selection and AI settings.",
+    "CARRIED_BODY_FAILED": "A message in today's brief couldn't be read.",
 }
 
 logger = logging.getLogger("mailbrief.desktop")
@@ -63,13 +64,15 @@ def log_automatic_run(result: BriefRunResult) -> None:
     """One line per automatic run (ADR 0017): its outcome and counts, never mail text.
 
     ``ai_requests`` is how many requests reached the AI provider, so the log itself shows
-    that a run without permission made none.
+    that a run without permission made none. ``unrefreshed`` above 0 is a run that saved
+    nothing rather than lose that many carried messages.
     """
     analyzed = 0 if result.coverage is None else result.coverage.analyzed
     logger.info(
-        "automatic run: status=%s ready=%d analyzed=%d deferred=%d ai_requests=%d",
+        "automatic run: status=%s ready=%d unrefreshed=%d analyzed=%d deferred=%d ai_requests=%d",
         result.status.value,
         result.ready,
+        result.unrefreshed,
         analyzed,
         result.deferred,
         result.ai_calls,

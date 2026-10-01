@@ -127,7 +127,7 @@ async def test_a_refresh_that_would_drop_a_carried_message_says_the_brief_needs_
 ) -> None:
     await window.initialize()
     backend.automatic_result = BriefRunResult(
-        status=BriefStatus.READY_FOR_REVIEW, sync=backend.sync, ready=9, needs_review=True
+        status=BriefStatus.READY_FOR_REVIEW, sync=backend.sync, unrefreshed=9, ready=2
     )
     loads = backend.loads
 
@@ -135,7 +135,7 @@ async def test_a_refresh_that_would_drop_a_carried_message_says_the_brief_needs_
 
     assert window.status.text() == (
         "Checked Gmail at 10:02. Today's brief needs your review: 9 messages from it couldn't "
-        "be refreshed automatically."
+        "be refreshed automatically. 2 new messages are also ready."
     )
     assert backend.loads == loads  # Nothing was saved: the brief shown is untouched.
     assert window.review_panel.isHidden() and open_dialogs(window) == []  # And nothing opens.
@@ -148,8 +148,8 @@ async def test_a_refresh_that_failed_a_carried_message_also_says_why(
     backend.automatic_result = BriefRunResult(
         status=BriefStatus.READY_FOR_REVIEW,
         sync=backend.sync,
-        ready=3,
-        needs_review=True,
+        unrefreshed=3,
+        ready=1,
         coverage=DigestCoverage(
             sync_complete=True, shortlisted=5, analyzed=2, reused=0, failed=3, skipped=0
         ),
@@ -163,10 +163,33 @@ async def test_a_refresh_that_failed_a_carried_message_also_says_why(
     guidance = "Groq rate limit reached; retry later."
     assert window.status.text() == (
         "Checked Gmail at 10:02. Today's brief needs your review: 3 messages from it couldn't "
-        f"be refreshed automatically. Automatic refresh: {guidance}"
+        f"be refreshed automatically. 1 new message is also ready. Automatic refresh: {guidance}"
     )
     assert window.ai.text() == f"AI: {guidance}"
     assert backend.loads == loads  # No brief was written: the one shown is untouched.
+
+
+async def test_a_refresh_that_could_not_read_a_carried_message_says_so(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    ai = window.ai.text()
+    backend.automatic_result = BriefRunResult(
+        status=BriefStatus.READY_FOR_REVIEW,
+        sync=backend.sync,
+        unrefreshed=1,
+        ready=2,
+        error_code="CARRIED_BODY_FAILED",
+    )
+
+    await due(window)
+
+    assert window.status.text() == (
+        "Checked Gmail at 10:02. Today's brief needs your review: 1 message from it couldn't "
+        "be refreshed automatically. 2 new messages are also ready. "
+        "Automatic refresh: A message in today's brief couldn't be read."
+    )
+    assert window.ai.text() == ai  # Gmail's failure, not the AI's.
 
 
 async def test_a_refresh_never_opens_a_review_a_consent_panel_or_a_dialog(
@@ -883,6 +906,9 @@ async def test_each_automatic_run_leaves_one_counts_only_line_in_the_desktop_log
         handler.close()
 
     assert len(lines) == 2
-    assert "status=ready_for_review ready=4 analyzed=0 deferred=0 ai_requests=0" in lines[0]
-    assert "status=saved ready=0 analyzed=3 deferred=2 ai_requests=0" in lines[1]
+    assert (
+        "status=ready_for_review ready=4 unrefreshed=0 analyzed=0 deferred=0 ai_requests=0"
+        in lines[0]
+    )
+    assert "status=saved ready=0 unrefreshed=0 analyzed=3 deferred=2 ai_requests=0" in lines[1]
     assert not any(word in " ".join(lines) for word in ("Budget", "owner@", "subject"))

@@ -15,7 +15,13 @@ from mailbrief.diagnostics import gmail
 from mailbrief.domain.actions import ActionProposal, ProposalState
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind, TargetReason
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
-from mailbrief.domain.digests import DigestCoverage, SyncResult, SyncStatus
+from mailbrief.domain.digests import (
+    DailyDigest,
+    DigestCoverage,
+    DigestStatus,
+    SyncResult,
+    SyncStatus,
+)
 from mailbrief.domain.drafting import DraftingOutcome, DraftingStatus
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
@@ -25,7 +31,7 @@ from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.services.calendar import InvalidTimezoneError
 from mailbrief.services.preferences import PreferencesUnavailableError
 from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
-from tests.factories import make_action
+from tests.factories import make_action, make_digest_item
 from tests.unit.providers.gmail.test_cache import MemoryVault, credential
 
 
@@ -189,35 +195,108 @@ def test_a_key_missing_failure_keeps_the_saved_brief_note_on_its_own_line(
     ]
 
 
+def _digest(status: DigestStatus) -> DailyDigest:
+    return DailyDigest(
+        account_id="owner@example.com",
+        local_date=date(2026, 9, 4),
+        timezone_name="UTC",
+        generated_at_utc=datetime(2026, 9, 4, 12, tzinfo=UTC),
+        status=status,
+        items=() if status is DigestStatus.EMPTY else (make_digest_item(),),
+    )
+
+
+_NEEDS_REVIEW = (
+    "Today's brief needs your review: 2 messages from it couldn't be refreshed automatically."
+)
+# A run of each kind: its name, the result's fields, its outcome line and its exit code.
+_OUTCOMES: list[tuple[str, dict[str, Any], str, int]] = [
+    (
+        "saved",
+        {"status": BriefStatus.SAVED, "digest": _digest(DigestStatus.COMPLETE)},
+        "Saved. Bodies were not stored.",
+        0,
+    ),
+    (
+        "saved-empty",
+        {"status": BriefStatus.SAVED, "digest": _digest(DigestStatus.EMPTY)},
+        "Saved. Bodies were not stored.",
+        0,
+    ),
+    (
+        "saved-partial",
+        {"status": BriefStatus.SAVED, "digest": _digest(DigestStatus.PARTIAL)},
+        "Saved. Bodies were not stored.",
+        4,
+    ),
+    (
+        "only-checked",
+        {"status": BriefStatus.READY_FOR_REVIEW, "ready": 2},
+        "2 new messages are ready to review; automatic analysis is off.",
+        0,
+    ),
+    (
+        "over-the-cap",
+        {"status": BriefStatus.READY_FOR_REVIEW, "unrefreshed": 2, "ready": 1},
+        f"{_NEEDS_REVIEW} 1 new message is also ready.",
+        0,
+    ),
+    (
+        "carried-body-failed",
+        {
+            "status": BriefStatus.READY_FOR_REVIEW,
+            "unrefreshed": 2,
+            "error_code": "CARRIED_BODY_FAILED",
+        },
+        _NEEDS_REVIEW,
+        4,
+    ),
+    (
+        "carried-analysis-failed",
+        {
+            "status": BriefStatus.READY_FOR_REVIEW,
+            "unrefreshed": 2,
+            "coverage": DigestCoverage(
+                sync_complete=True, shortlisted=3, analyzed=1, reused=0, failed=2, skipped=0
+            ),
+        },
+        _NEEDS_REVIEW,
+        4,
+    ),
+    (
+        "declined",
+        {"status": BriefStatus.CONSENT_DECLINED},
+        "Nothing was sent. No brief saved.",
+        6,
+    ),
+    ("cancelled", {"status": BriefStatus.CANCELLED}, "Cancelled. No brief saved.", 130),
+    (
+        "sync-failed",
+        {"status": BriefStatus.SYNC_FAILED, "error_code": "RATE_LIMITED"},
+        "Sync failed (RATE_LIMITED). Nothing was sent.",
+        4,
+    ),
+    (
+        "analysis-failed",
+        {"status": BriefStatus.ANALYSIS_FAILED},
+        "No message could be analyzed.",
+        4,
+    ),
+    (
+        "analysis-failed-with-a-code",
+        {"status": BriefStatus.ANALYSIS_FAILED, "error_code": "AI_RATE_LIMITED"},
+        "Groq rate limit reached; retry later.",
+        4,
+    ),
+]
+
+
 @pytest.mark.parametrize(
     ("fields", "line", "code"),
-    [
-        ({"status": BriefStatus.CANCELLED}, "Cancelled. No brief saved.", 130),
-        ({"status": BriefStatus.CONSENT_DECLINED}, "Nothing was sent. No brief saved.", 6),
-        (
-            {"status": BriefStatus.SYNC_FAILED, "error_code": "RATE_LIMITED"},
-            "Sync failed (RATE_LIMITED). Nothing was sent.",
-            4,
-        ),
-        ({"status": BriefStatus.ANALYSIS_FAILED}, "No message could be analyzed.", 4),
-        (
-            # An automatic run whose analysis ran and failed two carried messages.
-            {
-                "status": BriefStatus.READY_FOR_REVIEW,
-                "ready": 2,
-                "needs_review": True,
-                "coverage": DigestCoverage(
-                    sync_complete=True, shortlisted=3, analyzed=1, reused=0, failed=2, skipped=0
-                ),
-            },
-            "Today's brief needs your review: 2 messages from it couldn't be refreshed "
-            "automatically.",
-            4,
-        ),
-    ],
-    ids=["cancelled", "declined", "sync-failed", "analysis-failed", "needs-review"],
+    [case[1:] for case in _OUTCOMES],
+    ids=[case[0] for case in _OUTCOMES],
 )
-def test_a_run_that_saved_no_brief_has_its_own_line_and_exit_code(
+def test_every_kind_of_run_has_its_outcome_line_and_exit_code(
     fields: dict[str, Any], line: str, code: int
 ) -> None:
     sync = SyncResult(
@@ -232,6 +311,10 @@ def test_a_run_that_saved_no_brief_has_its_own_line_and_exit_code(
 
     assert gmail._outcome(result) == line
     assert gmail._brief_exit_code(result) == code
+
+
+def test_the_outcomes_above_cover_every_brief_status() -> None:
+    assert {fields["status"] for _, fields, _, _ in _OUTCOMES} == set(BriefStatus)
 
 
 @pytest.mark.parametrize(

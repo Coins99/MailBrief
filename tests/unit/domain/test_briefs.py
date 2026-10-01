@@ -135,8 +135,8 @@ def test_a_run_that_only_checked_reports_what_is_ready_and_has_no_digest() -> No
         BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, digest=DIGEST)
 
 
-@pytest.mark.parametrize("field", ["ready", "deferred"])
-def test_ready_and_deferred_counts_cannot_be_negative(field: str) -> None:
+@pytest.mark.parametrize("field", ["ready", "deferred", "unrefreshed"])
+def test_ready_deferred_and_unrefreshed_counts_cannot_be_negative(field: str) -> None:
     with pytest.raises(ValidationError):
         BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, **{field: -1})
 
@@ -147,16 +147,24 @@ def test_a_saved_run_counts_what_it_deferred() -> None:
     assert result.deferred == 2
 
 
-def test_only_a_run_that_is_ready_for_review_can_need_one() -> None:
-    assert not BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4).needs_review
-    waiting = BriefRunResult(
-        status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4, needs_review=True
-    )
+def test_a_run_needs_a_review_exactly_when_it_left_carried_messages_unrefreshed() -> None:
+    checked = BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4)
+    waiting = BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4, unrefreshed=2)
 
-    assert (waiting.needs_review, waiting.ready, waiting.digest) == (True, 4, None)
+    # The new messages and the carried ones are counted apart.
+    assert (checked.needs_review, checked.unrefreshed, checked.ready) == (False, 0, 4)
+    assert (waiting.needs_review, waiting.unrefreshed, waiting.ready) == (True, 2, 4)
+    assert waiting.digest is None
+    with pytest.raises(ValidationError):  # It is derived, never set.
+        BriefRunResult.model_validate(
+            {"status": BriefStatus.READY_FOR_REVIEW, "sync": SYNC, "needs_review": True}
+        )
+
+
+def test_only_a_run_that_is_ready_for_review_can_need_one() -> None:
     for status, digest in ((BriefStatus.SAVED, DIGEST), (BriefStatus.ANALYSIS_FAILED, None)):
         with pytest.raises(ValidationError, match="ready for review"):
-            BriefRunResult(status=status, sync=SYNC, digest=digest, needs_review=True)
+            BriefRunResult(status=status, sync=SYNC, digest=digest, unrefreshed=1)
 
 
 @pytest.mark.parametrize("limit", [0, 1, AUTO_SEND_LIMIT_MAX])

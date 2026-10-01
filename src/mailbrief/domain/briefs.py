@@ -110,15 +110,21 @@ class BriefRunResult(DomainModel):
     # The HTTP status and sanitized provider code behind error_code, e.g. "HTTP 403".
     provider_detail: str | None = Field(default=None, max_length=100)
     proposals_created: int = Field(default=0, ge=0)  # Follow-up proposals made (ADR 0016).
-    # Messages an automatic run found ready to review: the new ones, counted before any body
-    # is read, or with needs_review the carried ones it didn't refresh.
+    # New messages an automatic run found ready to review: its selection minus the carried
+    # ones, whether it only checked or needs a review.
     ready: int = Field(default=0, ge=0)
     # Messages an automatic run deferred to the next review: over its send limit (ADR 0017).
     deferred: int = Field(default=0, ge=0)
-    # An automatic run saved nothing because a saved brief would have lost a carried message:
-    # one over its send limit, one whose body can't be read, or one whose analysis failed
-    # (ADR 0017). Only the last gets as far as the analysis, so only it has a coverage.
-    needs_review: bool = False
+    # Carried messages an automatic run couldn't refresh: over its send limit, unreadable, or
+    # failed in analysis (ADR 0017). With any, it saved nothing rather than lose them. Only
+    # the last kind got as far as the analysis, so only it has a coverage.
+    unrefreshed: int = Field(default=0, ge=0)
+
+    @property
+    def needs_review(self) -> bool:
+        """Whether an automatic run saved nothing because a saved brief would have lost a
+        carried message; ``unrefreshed`` counts them."""
+        return self.unrefreshed > 0
 
     @model_validator(mode="after")
     def validate_digest(self) -> Self:
@@ -127,7 +133,7 @@ class BriefRunResult(DomainModel):
         return self
 
     @model_validator(mode="after")
-    def validate_needs_review(self) -> Self:
-        if self.needs_review and self.status is not BriefStatus.READY_FOR_REVIEW:
+    def validate_unrefreshed(self) -> Self:
+        if self.unrefreshed and self.status is not BriefStatus.READY_FOR_REVIEW:
             raise ValueError("only a run that is ready for review can need one")
         return self
