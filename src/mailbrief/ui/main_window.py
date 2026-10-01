@@ -76,7 +76,12 @@ from mailbrief.services.actions import (
     ActionNotFoundError,
     SuggestionNotFoundError,
 )
-from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
+from mailbrief.services.brief import (
+    ConsentGate,
+    ShortlistGate,
+    disclosure_lines,
+    needs_review_sentence,
+)
 from mailbrief.services.calendar import resolve_timezone
 from mailbrief.services.consent import NO_CONSENT
 from mailbrief.services.drafting import (
@@ -1665,7 +1670,14 @@ class MainWindow(QMainWindow):
         stamp = f"{self.now().astimezone(self.zone):%H:%M}"
         text = ""
         if result.status is BriefStatus.READY_FOR_REVIEW:
-            text = f"Checked Gmail at {stamp}. {_ready_text(result.ready)}"
+            # Either nothing was sent because nothing may be or nothing is new, or sending
+            # within the limit would have dropped a carried message from the day's brief.
+            found = (
+                needs_review_sentence(result.ready)
+                if result.needs_review
+                else _ready_text(result.ready)
+            )
+            text = f"Checked Gmail at {stamp}. {found}"
         elif result.digest is not None:
             analyzed = 0 if result.coverage is None else result.coverage.analyzed
             text = f"Automatic brief at {stamp}: " + (

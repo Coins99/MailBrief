@@ -172,6 +172,35 @@ def test_with_permission_it_sends_up_to_the_limit_and_defers_the_rest(
     assert "Saved. Bodies were not stored." in output
 
 
+def test_a_permission_too_small_for_the_carried_messages_sends_nothing_and_says_so(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = groq_answers(respx_mock)
+    path = tmp_path / "auto.sqlite3"
+    consented(path, monkeypatch, capsys)
+    mailbox.add("a2")
+    assert run_brief(path, "--yes") == 0  # a1 and a2 are in the day's brief.
+    assert consent(path, "auto-send", "1", "--yes") == 0
+    mailbox.add("a3")
+    # Another model: a1 and a2 need analysis again, and the permission covers one message.
+    monkeypatch.setenv("MAILBRIEF_GROQ_MODEL", "another-model")
+    capsys.readouterr()
+    sent = route.call_count
+
+    assert automatic(path) == 0
+
+    output = capsys.readouterr().out
+    assert "Today's brief needs your review: 3 messages need analysis." in output.splitlines()
+    assert "ready to review" not in output and "Brief:" not in output
+    assert route.call_count == sent  # Nothing was sent, and the day's brief is as it was.
+    assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
+    assert "Brief for 2026-09-16 (me@example.com): complete; items: 2" in capsys.readouterr().out
+
+
 def test_turning_the_permission_off_takes_effect_on_the_next_run(
     tmp_path: Path,
     mailbox: Mailbox,  # noqa: F811 - the imported fixture

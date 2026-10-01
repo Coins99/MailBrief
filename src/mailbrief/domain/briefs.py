@@ -91,7 +91,8 @@ class BriefStatus(StrEnum):
     CANCELLED = "cancelled"
     CONSENT_DECLINED = "consent_declined"
     ANALYSIS_FAILED = "analysis_failed"
-    # An automatic run without permission to send: it synced and ranked, nothing more.
+    # An automatic run that sent and saved nothing: it had no permission to send, found
+    # nothing new, or would have dropped a carried message (BriefRunResult.needs_review).
     READY_FOR_REVIEW = "ready_for_review"
 
 
@@ -109,13 +110,23 @@ class BriefRunResult(DomainModel):
     # The HTTP status and sanitized provider code behind error_code, e.g. "HTTP 403".
     provider_detail: str | None = Field(default=None, max_length=100)
     proposals_created: int = Field(default=0, ge=0)  # Follow-up proposals made (ADR 0016).
-    # Messages an automatic run without permission found ready to review; it reads no body.
+    # Messages an automatic run found ready to review: the new ones, counted before any body
+    # is read, or with needs_review every message that needs analysis.
     ready: int = Field(default=0, ge=0)
     # Messages an automatic run deferred to the next review: over its send limit (ADR 0017).
     deferred: int = Field(default=0, ge=0)
+    # An automatic run sent and saved nothing, because its send limit can't cover the carried
+    # messages that need analysis and a saved brief would have lost one (ADR 0017).
+    needs_review: bool = False
 
     @model_validator(mode="after")
     def validate_digest(self) -> Self:
         if (self.digest is not None) != (self.status is BriefStatus.SAVED):
             raise ValueError("a digest is present exactly when the brief was saved")
+        return self
+
+    @model_validator(mode="after")
+    def validate_needs_review(self) -> Self:
+        if self.needs_review and self.status is not BriefStatus.READY_FOR_REVIEW:
+            raise ValueError("only a run that is ready for review can need one")
         return self

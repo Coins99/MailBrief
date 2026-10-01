@@ -46,6 +46,12 @@ at any moment.
   - Over the cap, the lowest-ranked messages are **deferred**: never sent and never cached,
     counted in the brief's coverage, and left for the next review. The owner's review later
     lists them like any other message.
+  - Carried messages (Consequences, below) whose cached analysis no longer matches take the
+    places first, in rank order, ahead of new messages. An automatic run never saves a brief
+    that would lose a message carried from the day's earlier brief: when the cap can't cover
+    them, it sends nothing, saves nothing and reports that today's brief needs the owner's
+    review. A message whose analysis fails is a different matter: it is left out of that
+    run's brief, which is marked partial, as in any run.
   - Revoking consent ends the permission at once, and a new disclosure version starts
     without it, because it belongs to one version of one consent. Turning it off takes
     effect at once: every run reads it from the active consent.

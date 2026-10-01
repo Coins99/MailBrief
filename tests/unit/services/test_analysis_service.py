@@ -1628,6 +1628,50 @@ async def test_messages_already_analyzed_are_not_counted_or_deferred(
     assert sum(len(batch) for batch in provider.batches) == 1
 
 
+async def test_the_first_messages_take_the_places_ahead_of_higher_ranked_ones(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 5)  # In rank order: msg-0 ranks highest.
+    provider = FakeAIProvider([answer_all()])
+    service, plan = await planned(session, provider, shortlist, account_id)
+
+    assert plan.defer_after(3, first=("msg-4", "msg-2")) == 2
+    run = await service.execute(plan)
+
+    # msg-2 and msg-4 go first, then msg-0, the highest-ranked of the others.
+    assert outcomes(run) == [ANALYZED, DEFERRED, ANALYZED, DEFERRED, ANALYZED]
+    (batch,) = provider.batches  # What is sent still goes in rank order.
+    assert [request.subject for request in batch] == [
+        "Budget item 0",
+        "Budget item 2",
+        "Budget item 4",
+    ]
+
+
+async def test_more_first_messages_than_places_defers_the_lowest_ranked_of_them(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 4)
+    _, plan = await planned(session, FakeAIProvider(), shortlist, account_id)
+
+    assert plan.defer_after(1, first={"msg-1", "msg-3", "not-in-the-plan"}) == 3
+
+    # msg-1 outranks msg-3; msg-0 ranks highest of all but is not among the first.
+    assert [item.outcome for item in plan.messages] == [DEFERRED, None, DEFERRED, DEFERRED]
+
+
+async def test_a_first_message_that_is_already_analyzed_takes_no_place(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+    await analyze(session, FakeAIProvider([answer_all()]), shortlist[:1], account_id=account_id)
+    _, plan = await planned(session, FakeAIProvider(), shortlist, account_id)
+
+    assert plan.defer_after(1, first=("msg-0",)) == 1
+
+    assert [item.outcome for item in plan.messages] == [AnalysisOutcome.REUSED, None, DEFERRED]
+
+
 @pytest.mark.parametrize(("limit", "deferred"), [(0, 3), (1, 2), (3, 0), (4, 0), (50, 0)])
 async def test_the_number_deferred_is_what_is_over_the_limit(
     session: AsyncSession, limit: int, deferred: int

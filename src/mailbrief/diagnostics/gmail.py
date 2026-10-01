@@ -82,6 +82,7 @@ from mailbrief.services.brief import (
     CONSENT_DISCLOSURE_VERSION,
     BriefService,
     disclosure_lines,
+    needs_review_sentence,
     permission_preview,
     permission_sentence,
     provider_display_name,
@@ -951,7 +952,9 @@ async def brief(
     ``automatic`` is exactly what the desktop's automatic refresh does (ADR 0017), with no
     prompt: it brings the day's Inbox up to date and follows tracked threads, then sends
     only what the permission on the active consent allows (see ai-consent auto-send), and
-    with none only counts the messages ready to review. It takes no date, choices or --yes.
+    with none only counts the messages ready to review. A permission too small for the
+    carried messages that need analysis sends nothing either, and says the day's brief needs
+    a review. It takes no date, choices or --yes.
     """
     day = None if date_text is None else parse_brief_date(date_text)
     owner = await _owner(database_path, timezone)
@@ -1006,7 +1009,12 @@ async def brief(
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
     if result.status is BriefStatus.READY_FOR_REVIEW:
         _print_threads(result.sync)
-        print(_ready_line(result.ready))
+        # The window's sentence, when the permission can't cover the carried messages.
+        print(
+            needs_review_sentence(result.ready)
+            if result.needs_review
+            else _ready_line(result.ready)
+        )
         return 0
     _print_result(result, model=model)
     _print_threads(result.sync)

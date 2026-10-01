@@ -117,6 +117,9 @@ Groq and the desktop. Run them in order; the exit test comes first.
 - Automatic runs happen only while the desktop is open, and never for past days.
 - A day has one brief, carried forward through the day: a later run keeps the messages the
   earlier brief had unless they were archived, newly blocked or declined.
+- An automatic run whose permission can't cover the carried messages that need analysis again
+  sends and saves nothing until you run Sync and review; a carried message whose analysis
+  fails, or whose body can't be read, is still left out of that run's partial brief.
 - There is no Gmail history cursor; Inbox sync reads the day's window (not in this pull
   request).
 - The dormant Microsoft adapter has no thread reader, so it tracks no threads.
@@ -741,6 +744,10 @@ and saves no brief. Reviewing and analyzing stay a click away (Sync and review).
   never sent, never cached, counted in the brief's coverage line ("· N deferred") and listed
   again by your next review. A run that selects nothing saves nothing; a saved automatic
   brief replaces today's earlier one.
+- Messages carried from the day's earlier brief that need analysis again (after an upgrade,
+  or a change of model, body limit or time zone) are sent before new ones, and if there are
+  more of them than the run may send, it sends nothing, saves nothing, and the status line
+  and `brief --automatic` say "Today's brief needs your review: N messages need analysis."
 
 ### Declines
 

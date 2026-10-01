@@ -147,6 +147,18 @@ def test_a_saved_run_counts_what_it_deferred() -> None:
     assert result.deferred == 2
 
 
+def test_only_a_run_that_is_ready_for_review_can_need_one() -> None:
+    assert not BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4).needs_review
+    waiting = BriefRunResult(
+        status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4, needs_review=True
+    )
+
+    assert (waiting.needs_review, waiting.ready, waiting.digest) == (True, 4, None)
+    for status, digest in ((BriefStatus.SAVED, DIGEST), (BriefStatus.ANALYSIS_FAILED, None)):
+        with pytest.raises(ValidationError, match="ready for review"):
+            BriefRunResult(status=status, sync=SYNC, digest=digest, needs_review=True)
+
+
 @pytest.mark.parametrize("limit", [0, 1, AUTO_SEND_LIMIT_MAX])
 def test_a_permission_holds_zero_to_ten_messages(limit: int) -> None:
     permission = AutoSendPermission(account_email="me@example.com", limit=limit)

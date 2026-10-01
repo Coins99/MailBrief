@@ -122,6 +122,24 @@ async def test_a_refresh_without_permission_says_how_many_messages_are_ready(
     assert not window.undo_button.isEnabled() or window.undo_button.isHidden()
 
 
+async def test_a_refresh_that_would_drop_a_carried_message_says_the_brief_needs_a_review(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    backend.automatic_result = BriefRunResult(
+        status=BriefStatus.READY_FOR_REVIEW, sync=backend.sync, ready=9, needs_review=True
+    )
+    loads = backend.loads
+
+    await due(window)
+
+    assert window.status.text() == (
+        "Checked Gmail at 10:02. Today's brief needs your review: 9 messages need analysis."
+    )
+    assert backend.loads == loads  # Nothing was saved: the brief shown is untouched.
+    assert window.review_panel.isHidden() and open_dialogs(window) == []  # And nothing opens.
+
+
 async def test_a_refresh_never_opens_a_review_a_consent_panel_or_a_dialog(
     window: MainWindow, backend: FakeBackend
 ) -> None:

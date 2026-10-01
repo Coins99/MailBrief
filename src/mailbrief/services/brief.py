@@ -112,6 +112,13 @@ def permission_sentence(limit: int, account_email: str, provider_name: str) -> s
     )
 
 
+def needs_review_sentence(count: int) -> str:
+    """What an automatic run says when it saved nothing rather than drop a carried message
+    (ADR 0017): how many messages need analysis. Shared by the CLI and the UI."""
+    verb = "needs" if count == 1 else "need"
+    return f"Today's brief needs your review: {_count(count, 'message')} {verb} analysis."
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -173,10 +180,14 @@ class BriefService:
         permission on the active consent for the current disclosure version. Without one, or
         with nothing new selected, it returns READY_FOR_REVIEW with the number of new
         messages (the selection minus the carried ones) that are ready, before any body is
-        downloaded and with nothing sent or saved. With permission it downloads the bodies,
-        sends at most min(permission, ``shortlist_limit``) messages in rank order, defers the
+        downloaded and with nothing sent or saved. With permission it downloads the bodies
+        and sends at most min(permission, ``shortlist_limit``) messages: the carried ones
+        that need analysis again first, then the others, each in rank order. It defers the
         rest (never sent, never cached, counted in the coverage), then saves the brief and
-        derives proposals as usual.
+        derives proposals as usual. The cap never costs the day's brief a carried message:
+        when it can't cover the carried messages that need analysis, the run sends and saves
+        nothing, and returns READY_FOR_REVIEW with ``needs_review`` and the number of
+        messages that need analysis.
         """
         if automatic and (shortlist_gate is not None or include_ids or exclude_ids):
             raise ValueError("An automatic run has no review.")
@@ -226,12 +237,28 @@ class BriefService:
             bodies=prepared,
             timezone_name=window.timezone_name,
         )
-        if automatic:
-            # Rank order: the shortlist is sorted by rank, so the lowest-ranked wait.
-            plan.defer_after(min(send_limit, shortlist_limit))
         if cancel is not None and cancel.is_set():
             # Before the key check and consent, so a cancelled run writes no brief.
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
+        if automatic:
+            waiting = len(plan.to_send)
+            # Carried messages that need analysis again take the places first. The shortlist
+            # is sorted by rank, so the lowest-ranked of the others wait.
+            plan.defer_after(min(send_limit, shortlist_limit), first=carried)
+            if any(
+                item.outcome is AnalysisOutcome.DEFERRED
+                and item.ranked.message.provider_message_id in carried
+                for item in plan.messages
+            ):
+                # The cap can't cover the carried messages, so a saved brief would lose one:
+                # nothing is sent or saved, and the day's brief waits for the owner's review.
+                logger.info("Automatic run: %d messages need analysis, nothing sent", waiting)
+                return BriefRunResult(
+                    status=BriefStatus.READY_FOR_REVIEW,
+                    sync=sync,
+                    ready=waiting,
+                    needs_review=True,
+                )
         if plan.to_send and not await self._analysis.credentials_available():
             # Nothing can be sent, so there is nothing to consent to; cached and skipped
             # messages still make a brief.
