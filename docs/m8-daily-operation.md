@@ -1,5 +1,9 @@
 # M8 thread continuity and daily operation
 
+**Status: M8 implemented, awaiting live acceptance.** All nine parts are done; what remains
+is the [live acceptance](#live-acceptance) below, which needs a real Gmail account, Groq and
+a desktop session.
+
 M8 turns the daily brief into something to rely on every day: the owner's preferences, a
 history of saved briefs, follow-up on open actions as their threads continue, and refresh
 while MailBrief runs. The milestone's scope is in
@@ -17,10 +21,105 @@ M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), bra
 | 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7, ADR 0016 | Done |
 | 7. Follow-up proposals in the desktop; earlier tracked replies offered in review | Reviewing and applying proposals; up to 3 tracked replies outside today's Inbox join the review | None | Done |
 | 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, [ADR 0017](adr/0017-automatic-runs.md) | Done |
-| 9. Closeout | Acceptance, documentation and cleanup | None expected | Planned |
+| 9. Closeout | Cumulative runs through the day, acceptance, documentation and cleanup | None | Done |
 
 The optional Gmail history cursor for incremental Inbox reconciliation is not part of this
 pull request.
+
+## Live acceptance
+
+M8's automated checks run on synthetic mailboxes; these checks need a real Gmail account,
+Groq and the desktop. Run them in order; the exit test comes first.
+
+### Exit test, end to end
+
+1. Accept an action with a deadline from an email (Sync and review, then accept its
+   suggestion).
+2. From another account, reply in that thread with a new deadline ("Can we move this to next
+   Monday?").
+3. Sync and review: the reply is ranked in, its card says "Continues: …", the action shows
+   "1 new in thread", and the brief proposes "Set the deadline to …" with the reply's quote.
+4. Apply the proposal. The action's deadline changes; a target date you set yourself, its
+   steps and notes are unchanged; and no second action was created. Undo apply restores the
+   old deadline.
+5. Each view says exactly what it covers:
+   - a catch-up brief for yesterday says it covers the messages still in the Inbox when it
+     was made;
+   - Briefs… and the offline browser say which days have a brief, which are missed, and that
+     a past day needs a connection;
+   - a partial sync (stop it, or hit a rate limit) is labelled partial in the status line
+     and the brief's coverage line, never "complete".
+
+### Preferences (Parts 1–2)
+
+1. Add a rule for a sender in today's Inbox: review shows it excluded and unselectable, and
+   the brief has no item from it. `brief --include <that ID>` exits 3.
+2. Set messages per brief to 3: the automatic selection has at most 3, and review refuses a
+   fourth.
+3. Choose a time zone where today's date differs from the system's: the brief's date,
+   "carried over" and overdue labels, and drafting's "today" follow it.
+4. A saved AI limit applies; the same `MAILBRIEF_AI_*` variable wins in the CLI. Write with AI
+   opens on the saved tone and length.
+5. After a restart everything persists, and the packaged app lists time zones.
+
+### History and catch-up (Part 3)
+
+1. Brief today, then yesterday from Briefs…: after a restart, today's brief shows.
+2. Archive one of yesterday's messages in Gmail and brief yesterday again: the replace
+   confirmation appears first, and the archived message is gone.
+3. Accept a suggestion while viewing a past brief, then Undo: the view stays on that brief.
+4. `brief --date` for 8 days back exits 3.
+
+### Thread tracking and Add to (Parts 4–5)
+
+1. Reply to an accepted action's email from another account, then run `brief`: `actions list`
+   shows "1 new". Archive that reply: it is still counted.
+2. Reply yourself from Gmail: "you replied …" appears; Mark seen (or `actions seen <id>`)
+   clears both. A Gmail draft in the thread isn't counted.
+3. Click Add to “…” on the reply's suggestion: no new action appears, the action has two
+   sources, and its "new" count clears. Undo add reverses it. `actions accept N --into <id>`
+   does the same from the CLI.
+4. Complete the action: its thread is no longer checked.
+5. Search the database: none of the replies' text is stored beyond Gmail's preview snippet.
+
+### Follow-up proposals and outside replies (Parts 6–7)
+
+1. A reply "No longer needed, thanks" gives a cancelled proposal; applying it completes the
+   action. Dismiss a proposal and run again: it doesn't come back.
+2. Your own reply in the thread never gets a proposal.
+3. Archive a tracked reply in Gmail, then Sync and review: it is listed as "reply in a
+   tracked thread, not in today's Inbox", checked by default, and the brief shows it under
+   "Replies in threads you track" with the coverage sentence.
+4. Dismiss from the Proposals… dialog, then Undo dismiss: it is pending again.
+
+### Daily operation (Part 8) and the day's brief (Part 9)
+
+1. Refresh every hour with analysis off: sleep 3+ hours, then wake it. There is exactly one
+   "Checked Gmail at …" status, no Groq request in `desktop.log` and no new brief; with
+   nothing new it says "Nothing new to review."
+2. Give permission for 2: the dialog shows the disclosure, and the next automatic run
+   analyzes at most 2 new messages and defers the rest.
+3. Uncheck an auto-selected message in a review: later automatic runs never send it, and the
+   next review lists it unchecked.
+4. Include a message by hand in a review, then let an automatic run happen: the message is
+   still in the day's brief (one brief per day).
+5. Revoke consent in Settings: the next automatic run only checks Gmail.
+6. Close MailBrief for a day and reopen it with "Refresh when MailBrief starts": one run for
+   today; yesterday stays missed.
+
+## Known limits
+
+- The "seen" mark is a received time: a message cached late whose received time is before
+  the mark isn't counted as new.
+- At most 25 tracked threads and the newest 20 later messages per thread are read per run.
+- At most 3 outside replies join a run; the rest wait for later runs.
+- Proposals are for open actions only, and an email proposes to at most 3 actions.
+- Automatic runs happen only while the desktop is open, and never for past days.
+- A day has one brief, carried forward through the day: a later run keeps the messages the
+  earlier brief had unless they were archived, newly blocked or declined.
+- There is no Gmail history cursor; Inbox sync reads the day's window (not in this pull
+  request).
+- The dormant Microsoft adapter has no thread reader, so it tracks no threads.
 
 ## Preferences (Parts 1–2)
 

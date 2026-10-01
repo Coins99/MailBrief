@@ -28,7 +28,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   autosave, versions, copy and export, and AI drafting with Groq from context the owner
   chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
   ADR 0012 and ADR 0013.
-- M8 in progress on `feat/m8-continuity` (draft PR #17), built in nine parts
+- M8 implemented, awaiting live acceptance, on `feat/m8-continuity` (PR #17), built in nine parts
   (`docs/m8-daily-operation.md`); preferences (Parts 1–2) implemented, awaiting live
   acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
   limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
@@ -48,7 +48,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   Inbox joining the review and the brief. Daily operation (Part 8) implemented, awaiting
   live acceptance: refresh on launch and every 1, 2 or 4 hours while the desktop is open,
   automatic analysis only with an explicit permission of 1–10 messages on the consent, and
-  remembered declines. See ADR 0017.
+  remembered declines. See ADR 0017. Closeout (Part 9): runs through a day are cumulative,
+  with one brief per day. The consolidated live acceptance and known limits are in
+  `docs/m8-daily-operation.md`.
 
 ## Layout (ports and adapters)
 
@@ -172,6 +174,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   open one; the brief offers it only for actions with a source in the email's thread in the
   same account, it makes one revision, and its undo works only while the action is
   unchanged and never removes an action's last source.
+- Runs through a day are cumulative: the day's saved brief is carried forward ahead of the
+  automatic selection, within messages per brief. A carried message drops out only when it is
+  uncached, was an Inbox message since archived, is blocked or is declined; one the brief
+  listed as an outside reply keeps that status. "Ready" counts only new messages.
 - Automatic runs (ADR 0017) send nothing unless the active consent carries an explicit
   permission (`auto_send_limit`, 1–10, cleared by revoking); with none they only sync, check
   threads, rank and count. They brief today only, run only while the desktop is open, coalesce,

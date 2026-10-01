@@ -1,5 +1,7 @@
 # Gmail migration file map
 
+> Historical: predates M5. AGENTS.md has the current layout.
+
 This is the verified change surface as of 2026-09-13.
 
 This map covers the provider switch. The expanded 2026-09-25

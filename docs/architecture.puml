@@ -1,3 +1,4 @@
+' Historical: predates M5. AGENTS.md has the current layout.
 @startuml
 left to right direction
 skinparam componentStyle rectangle

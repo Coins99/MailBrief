@@ -43,5 +43,8 @@ plans) is merged from PR #15 and awaiting live acceptance, with
 M7 implemented, awaiting live acceptance: local drafts and notes, and AI drafting. See
 [m7-drafts.md](m7-drafts.md), [ADR 0012](adr/0012-drafts-and-notes.md) and
 [ADR 0013](adr/0013-ai-drafting.md).
+M8 implemented, awaiting live acceptance: preferences, brief history and catch-up, thread
+tracking, follow-up proposals, and refresh while the app is open. See
+[m8-daily-operation.md](m8-daily-operation.md).
 General tasks, calendar, analytics and website directions are intentionally rough
 in [ecosystem-roadmap.md](ecosystem-roadmap.md).
