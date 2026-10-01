@@ -7,6 +7,7 @@ is a1; nothing here may prompt unless a test has a typed answer ready for it.
 
 from pathlib import Path
 
+import httpx
 import pytest
 import respx
 
@@ -22,7 +23,11 @@ from tests.integration.test_brief_cli import (  # noqa: F401 - fixtures used by 
     vault,
 )
 from tests.integration.test_preferences_cli import corrupt, save_preferences
-from tests.unit.providers.groq.groq_fixtures import sent_messages
+from tests.unit.providers.groq.groq_fixtures import (
+    answer_every_message,
+    error_body,
+    sent_messages,
+)
 
 pytestmark = pytest.mark.respx(assert_all_called=False)
 
@@ -194,11 +199,66 @@ def test_a_permission_too_small_for_the_carried_messages_sends_nothing_and_says_
     assert automatic(path) == 0
 
     output = capsys.readouterr().out
-    assert "Today's brief needs your review: 3 messages need analysis." in output.splitlines()
+    assert (
+        "Today's brief needs your review: 2 messages from it couldn't be refreshed automatically."
+        in output.splitlines()
+    )
     assert "ready to review" not in output and "Brief:" not in output
     assert route.call_count == sent  # Nothing was sent, and the day's brief is as it was.
     assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
     assert "Brief for 2026-09-16 (me@example.com): complete; items: 2" in capsys.readouterr().out
+
+
+def test_a_carried_message_that_fails_keeps_the_earlier_brief_and_exits_4(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    route = groq_answers(respx_mock)
+    path = tmp_path / "auto.sqlite3"
+    consented(path, monkeypatch, capsys)  # a1 is in the day's brief.
+    assert consent(path, "auto-send", "5", "--yes") == 0
+    mailbox.add("a2")
+    # Another model, so a1 needs analysis again. One message to a request, newest first: the
+    # new a2 is answered, then Groq rejects the key before a1.
+    monkeypatch.setenv("MAILBRIEF_GROQ_MODEL", "another-model")
+    monkeypatch.setenv("MAILBRIEF_AI_BATCH_SIZE", "1")
+    answers = iter([answer_every_message])
+
+    def answer_once(request: httpx.Request) -> httpx.Response:
+        responder = next(answers, None)
+        if responder is None:
+            return httpx.Response(401, json=error_body("invalid_api_key"))
+        return responder(request)
+
+    route.mock(side_effect=answer_once)
+    capsys.readouterr()
+    sent = route.call_count
+
+    assert automatic(path) == 4
+
+    lines = capsys.readouterr().out.splitlines()
+    assert route.call_count == sent + 2
+    assert "Brief: ready_for_review; items: 0" in lines
+    assert any("analyzed 1, reused 0, failed 1" in line for line in lines)
+    assert "AI: Groq / another-model; requests: 2; tokens in/out: 1200 / 300" in lines
+    sentence = lines.index(
+        "Today's brief needs your review: 1 message from it couldn't be refreshed automatically."
+    )
+    assert lines[sentence + 1 :] == [
+        "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set",
+        "Groq detail: HTTP 401, code invalid_api_key",
+        "Your last saved brief for today is unchanged.",
+    ]
+    # Not a partial brief of a2 alone: the day's brief is a1 still.
+    assert gmail.main(["briefs", "show", "2026-09-16", "--database", str(path)]) == 0
+    assert "Brief for 2026-09-16 (me@example.com): complete; items: 1" in capsys.readouterr().out
+    # a2's analysis stayed cached, so the review sends a1 alone.
+    route.mock(side_effect=answer_every_message)
+    assert run_brief(path, "--yes") == 0
+    assert "analyzed 1, reused 1, failed 0" in capsys.readouterr().out
 
 
 def test_turning_the_permission_off_takes_effect_on_the_next_run(

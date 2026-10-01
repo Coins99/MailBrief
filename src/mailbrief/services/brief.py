@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterable
 from datetime import UTC, date, datetime
 from typing import Final, Protocol
 
@@ -22,12 +22,13 @@ from mailbrief.services.analysis import (
     AnalysisPlan,
     AnalysisRun,
     AnalysisService,
+    PlannedMessage,
     emit_progress,
 )
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.calendar import day_window, local_day_window, resolve_timezone
-from mailbrief.services.digest import DigestService
+from mailbrief.services.digest import IN_BRIEF, DigestService
 from mailbrief.services.history import BriefDateError, check_brief_date
 from mailbrief.services.proposals import ProposalService
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
@@ -113,10 +114,24 @@ def permission_sentence(limit: int, account_email: str, provider_name: str) -> s
 
 
 def needs_review_sentence(count: int) -> str:
-    """What an automatic run says when it saved nothing rather than drop a carried message
-    (ADR 0017): how many messages need analysis. Shared by the CLI and the UI."""
-    verb = "needs" if count == 1 else "need"
-    return f"Today's brief needs your review: {_count(count, 'message')} {verb} analysis."
+    """What an automatic run says when it saved nothing rather than lose a carried message
+    (ADR 0017): how many of the day's brief's messages it didn't refresh, because they were
+    over its send limit, unreadable or failed in analysis. Shared by the CLI and the UI."""
+    return (
+        f"Today's brief needs your review: {_count(count, 'message')} from it couldn't be "
+        "refreshed automatically."
+    )
+
+
+def _not_refreshed(
+    messages: Iterable[PlannedMessage], carried: Collection[str]
+) -> list[PlannedMessage]:
+    """The carried messages that a brief saved from ``messages`` would leave out."""
+    return [
+        item
+        for item in messages
+        if item.outcome not in IN_BRIEF and item.ranked.message.provider_message_id in carried
+    ]
 
 
 def _utc_now() -> datetime:
@@ -184,10 +199,11 @@ class BriefService:
         and sends at most min(permission, ``shortlist_limit``) messages: the carried ones
         that need analysis again first, then the others, each in rank order. It defers the
         rest (never sent, never cached, counted in the coverage), then saves the brief and
-        derives proposals as usual. The cap never costs the day's brief a carried message:
-        when it can't cover the carried messages that need analysis, the run sends and saves
-        nothing, and returns READY_FOR_REVIEW with ``needs_review`` and the number of
-        messages that need analysis.
+        derives proposals as usual. It never saves a brief that would lose a carried message.
+        When one is over that cap, or its body can't be read, the run sends and saves
+        nothing; when one's analysis fails, it writes no brief and leaves the analyses that
+        succeeded cached. Either way it returns READY_FOR_REVIEW with ``needs_review`` and
+        ``ready`` set to the number of carried messages it didn't refresh.
         """
         if automatic and (shortlist_gate is not None or include_ids or exclude_ids):
             raise ValueError("An automatic run has no review.")
@@ -241,22 +257,21 @@ class BriefService:
             # Before the key check and consent, so a cancelled run writes no brief.
             return BriefRunResult(status=BriefStatus.CANCELLED, sync=sync)
         if automatic:
-            waiting = len(plan.to_send)
             # Carried messages that need analysis again take the places first. The shortlist
             # is sorted by rank, so the lowest-ranked of the others wait.
             plan.defer_after(min(send_limit, shortlist_limit), first=carried)
-            if any(
-                item.outcome is AnalysisOutcome.DEFERRED
-                and item.ranked.message.provider_message_id in carried
-                for item in plan.messages
-            ):
-                # The cap can't cover the carried messages, so a saved brief would lose one:
-                # nothing is sent or saved, and the day's brief waits for the owner's review.
-                logger.info("Automatic run: %d messages need analysis, nothing sent", waiting)
+            stale = _not_refreshed(plan.messages, carried)
+            if any(item.outcome is not None for item in stale):
+                # A carried message is over the cap, or its body failed or was skipped, so a
+                # saved brief would lose it: nothing is sent or saved, and the day's brief
+                # waits for the owner's review.
+                logger.info(
+                    "Automatic run: %d carried messages not refreshed, nothing sent", len(stale)
+                )
                 return BriefRunResult(
                     status=BriefStatus.READY_FOR_REVIEW,
                     sync=sync,
-                    ready=waiting,
+                    ready=len(stale),
                     needs_review=True,
                 )
         if plan.to_send and not await self._analysis.credentials_available():
@@ -274,6 +289,25 @@ class BriefService:
                 )
 
         coverage = self._coverage(sync, len(shortlist), run)
+        lost = _not_refreshed(run.messages, carried) if automatic else []
+        if lost:
+            # A carried message's analysis failed, so a saved brief would lose it: no brief
+            # is written. The analyses that succeeded are cached already (execute commits
+            # each call), so the owner's review reuses them.
+            logger.info(
+                "Automatic run: %d carried messages not refreshed, no brief saved", len(lost)
+            )
+            return BriefRunResult(
+                status=BriefStatus.READY_FOR_REVIEW,
+                sync=sync,
+                coverage=coverage,
+                error_code=run.error_code,
+                ai_calls=run.requests_sent,
+                provider_detail=run.provider_detail,
+                deferred=coverage.deferred,
+                ready=len(lost),
+                needs_review=True,
+            )
         emit_progress(progress, SyncProgress(stage=SyncStage.ASSEMBLING))
         digest = await self._digests.save(
             account_id=account.id,

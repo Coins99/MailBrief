@@ -62,6 +62,20 @@ def test_an_automatic_run_is_logged_as_counts_only(tmp_path: Path) -> None:
                 error_code="AI_RATE_LIMITED",
             )
         )
+        # A run that wrote no brief because a carried message failed still shows its requests.
+        failed = DigestCoverage(
+            sync_complete=True, shortlisted=5, analyzed=2, reused=0, failed=3, skipped=0
+        )
+        log_automatic_run(
+            result(
+                status=BriefStatus.READY_FOR_REVIEW,
+                needs_review=True,
+                ready=3,
+                coverage=failed,
+                ai_calls=2,
+                error_code="AI_RATE_LIMITED",
+            )
+        )
         handler.flush()
         lines = (tmp_path / "desktop.log").read_text().splitlines()
     finally:
@@ -73,5 +87,8 @@ def test_an_automatic_run_is_logged_as_counts_only(tmp_path: Path) -> None:
     )
     assert lines[1].endswith(
         "automatic run: status=analysis_failed ready=0 analyzed=2 deferred=2 ai_requests=3"
+    )
+    assert lines[2].endswith(
+        "automatic run: status=ready_for_review ready=3 analyzed=2 deferred=0 ai_requests=2"
     )
     assert "AI_RATE_LIMITED" not in "".join(lines)  # Codes go through error_guidance, once.

@@ -1670,8 +1670,9 @@ class MainWindow(QMainWindow):
         stamp = f"{self.now().astimezone(self.zone):%H:%M}"
         text = ""
         if result.status is BriefStatus.READY_FOR_REVIEW:
-            # Either nothing was sent because nothing may be or nothing is new, or sending
-            # within the limit would have dropped a carried message from the day's brief.
+            # Either it only checked, because nothing may be sent or nothing is new, or it
+            # saved nothing because the brief would have lost a carried message. When that
+            # was a failure, its guidance follows below.
             found = (
                 needs_review_sentence(result.ready)
                 if result.needs_review

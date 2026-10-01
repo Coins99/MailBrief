@@ -15,7 +15,7 @@ from mailbrief.diagnostics import gmail
 from mailbrief.domain.actions import ActionProposal, ProposalState
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind, TargetReason
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
-from mailbrief.domain.digests import SyncResult, SyncStatus
+from mailbrief.domain.digests import DigestCoverage, SyncResult, SyncStatus
 from mailbrief.domain.drafting import DraftingOutcome, DraftingStatus
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderResponseError
@@ -187,6 +187,51 @@ def test_a_key_missing_failure_keeps_the_saved_brief_note_on_its_own_line(
         "No usable Groq API key is saved. Run: mailbrief-gmail-diagnostic ai-key set",
         "Your last saved brief for today is unchanged.",
     ]
+
+
+@pytest.mark.parametrize(
+    ("fields", "line", "code"),
+    [
+        ({"status": BriefStatus.CANCELLED}, "Cancelled. No brief saved.", 130),
+        ({"status": BriefStatus.CONSENT_DECLINED}, "Nothing was sent. No brief saved.", 6),
+        (
+            {"status": BriefStatus.SYNC_FAILED, "error_code": "RATE_LIMITED"},
+            "Sync failed (RATE_LIMITED). Nothing was sent.",
+            4,
+        ),
+        ({"status": BriefStatus.ANALYSIS_FAILED}, "No message could be analyzed.", 4),
+        (
+            # An automatic run whose analysis ran and failed two carried messages.
+            {
+                "status": BriefStatus.READY_FOR_REVIEW,
+                "ready": 2,
+                "needs_review": True,
+                "coverage": DigestCoverage(
+                    sync_complete=True, shortlisted=3, analyzed=1, reused=0, failed=2, skipped=0
+                ),
+            },
+            "Today's brief needs your review: 2 messages from it couldn't be refreshed "
+            "automatically.",
+            4,
+        ),
+    ],
+    ids=["cancelled", "declined", "sync-failed", "analysis-failed", "needs-review"],
+)
+def test_a_run_that_saved_no_brief_has_its_own_line_and_exit_code(
+    fields: dict[str, Any], line: str, code: int
+) -> None:
+    sync = SyncResult(
+        account_id="owner@example.com",
+        range_start_utc=datetime(2026, 9, 4, 4, 0, tzinfo=UTC),
+        range_end_utc=datetime(2026, 9, 5, 4, 0, tzinfo=UTC),
+        status=SyncStatus.COMPLETE,
+        page_count=1,
+        message_count=1,
+    )
+    result = BriefRunResult(sync=sync, **fields)
+
+    assert gmail._outcome(result) == line
+    assert gmail._brief_exit_code(result) == code
 
 
 @pytest.mark.parametrize(

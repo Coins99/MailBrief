@@ -27,7 +27,8 @@ SECTION_ORDER = (
     DigestSection.HIGHLIGHTS,
     DigestSection.FOLLOW_UPS,
 )
-_IN_BRIEF = (AnalysisOutcome.ANALYZED, AnalysisOutcome.REUSED)
+# The outcomes whose messages a saved brief holds; any other outcome leaves its message out.
+IN_BRIEF = (AnalysisOutcome.ANALYZED, AnalysisOutcome.REUSED)
 
 
 def section_for(analysis: MessageAnalysis) -> DigestSection:
@@ -120,7 +121,7 @@ class DigestService:
         the last good brief for the day stays in place.
         """
         entries = sorted(
-            (_entry(item) for item in messages if item.outcome in _IN_BRIEF),
+            (_entry(item) for item in messages if item.outcome in IN_BRIEF),
             key=lambda entry: _order(entry, outside_ids),
         )
         if entries:

@@ -1,30 +1,38 @@
 """Runs through a day are cumulative (ADR 0017): the messages of the day's saved brief are
 carried forward ahead of the automatic selection, unless they are gone, archived, blocked or
-declined, and an automatic run's send cap never drops one."""
+declined, and an automatic run never saves a brief that would lose one."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.analysis import ANALYSIS_SCHEMA_VERSION
+from mailbrief.domain.analysis import ANALYSIS_SCHEMA_VERSION, AnalysisRequest, AnalysisResponse
+from mailbrief.domain.bodies import MessageBody
 from mailbrief.domain.briefs import BriefStatus
-from mailbrief.domain.digests import DailyDigest, DigestSection
+from mailbrief.domain.digests import DailyDigest, DigestSection, DigestStatus
 from mailbrief.domain.messages import NormalizedMessage
+from mailbrief.ports.errors import (
+    MessageUnavailableError,
+    ProviderRateLimitError,
+    ProviderResponseError,
+)
 from mailbrief.services.application import ApplicationService
+from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import needs_review_sentence
 from mailbrief.services.threads import ThreadCheck
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, DigestRepository, MessageRepository
 from mailbrief.storage.tables import AccountTable, AnalysisTable, MessageTable
-from tests.unit.services.ai_fakes import FakeAIProvider, answer_all
+from tests.unit.services.ai_fakes import FakeAIProvider, Respond, answer_all
 from tests.unit.services.test_application import NOW, ZONE, RecordingThreads
 from tests.unit.services.test_application_outside import message, scene
 from tests.unit.services.test_automatic_run import NoAsking, analyses, permit
 from tests.unit.services.test_brief_service import (
     BODY,
     TODAY,
+    FakeBodyReader,
     RecordingGate,
     build,
     seed_outside_reply,
@@ -347,7 +355,7 @@ async def test_a_carried_outside_reply_back_in_today_s_inbox_is_an_ordinary_mess
     assert chosen == ("a1", "a2", "a5") and outside == frozenset()
 
 
-# An automatic run's send cap never drops a carried message
+# An automatic run never saves a brief that would lose a carried message: over the cap
 
 
 async def brief_of(session: AsyncSession, count: int) -> None:
@@ -444,7 +452,7 @@ async def test_when_the_cap_can_t_cover_the_carried_messages_nothing_is_sent_or_
     result = await service.generate(tz_key=BRIEF_ZONE, automatic=True)
 
     assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
-    assert result.ready == 5  # The three carried messages and the two new ones.
+    assert result.ready == 3  # The three carried messages; the two new ones don't count.
     assert (result.digest, result.coverage, result.deferred, result.ai_calls) == (None, None, 0, 0)
     assert provider.calls == 0 and provider.credential_checks == 0 and gate.previews == []
     assert sorted(reader.fetched) == ["m0", "m1", "m2", "m3", "m4"]  # Read in memory, to plan.
@@ -452,7 +460,7 @@ async def test_when_the_cap_can_t_cover_the_carried_messages_nothing_is_sent_or_
     assert await saved_brief(session) == before  # The day's brief is exactly as it was.
 
 
-async def test_the_review_it_asks_for_sends_what_it_counted_and_keeps_every_message(
+async def test_the_review_it_asks_for_sends_everything_waiting_and_keeps_every_message(
     session: AsyncSession,
 ) -> None:
     await brief_of(session, 3)
@@ -462,13 +470,14 @@ async def test_the_review_it_asks_for_sends_what_it_counted_and_keeps_every_mess
     waiting = await build(
         session, FakeAIProvider(), NoAsking(answer=False), messages=mailbox
     ).generate(tz_key=BRIEF_ZONE, automatic=True)
-    assert waiting.needs_review
+    assert waiting.needs_review and waiting.ready == 3
     provider, gate = FakeAIProvider([answer_all()]), RecordingGate(True)
 
     reviewed = await build(session, provider, gate, messages=mailbox).generate(tz_key=BRIEF_ZONE)
 
-    # A manual run is unchanged: it asks, and the permission's cap doesn't bound it.
-    assert [preview.message_count for preview in gate.previews] == [waiting.ready]
+    # A manual run is unchanged: it asks about the three carried messages and the two new
+    # ones, and the permission's cap doesn't bound it.
+    assert [preview.message_count for preview in gate.previews] == [5]
     assert sum(len(batch) for batch in provider.batches) == 5 and reviewed.deferred == 0
     assert keys_of(reviewed.digest) == {"m0", "m1", "m2", "m3", "m4"}
     # Everything is cached again, so the next automatic run has nothing to ask for.
@@ -511,8 +520,176 @@ async def test_after_an_upgrade_an_automatic_run_keeps_every_carried_message_or_
         assert await saved_brief(session) == before
 
 
-def test_the_sentence_says_how_many_messages_need_analysis() -> None:
-    assert needs_review_sentence(9) == (
-        "Today's brief needs your review: 9 messages need analysis."
+def test_the_sentence_says_how_many_of_the_brief_s_messages_were_not_refreshed() -> None:
+    assert needs_review_sentence(3) == (
+        "Today's brief needs your review: 3 messages from it couldn't be refreshed automatically."
     )
-    assert needs_review_sentence(1) == "Today's brief needs your review: 1 message needs analysis."
+    assert needs_review_sentence(1) == (
+        "Today's brief needs your review: 1 message from it couldn't be refreshed automatically."
+    )
+
+
+# An automatic run never saves a brief that would lose a carried message: failures
+
+
+class BrokenBody(FakeBodyReader):
+    """Serves every body but one: that message is unreadable, empty or deleted."""
+
+    def __init__(self, texts: dict[str, str], key: str, problem: str) -> None:
+        super().__init__({**texts, key: ""} if problem == "empty" else texts)
+        self.key, self.problem = key, problem
+
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        if provider_message_id == self.key and self.problem == "unreadable":
+            raise ProviderResponseError("malformed")
+        if provider_message_id == self.key and self.problem == "deleted":
+            raise MessageUnavailableError("gone")
+        return await super().fetch_message_body(provider_message_id)
+
+
+def answer_all_but(subject: str) -> Respond:
+    """A script item that answers every request in its batch except the one for ``subject``:
+    used twice, the message misses its batch's answer and then its own retry."""
+
+    def respond(requests: Sequence[AnalysisRequest]) -> AnalysisResponse:
+        return answer_all()([request for request in requests if request.subject != subject])
+
+    return respond
+
+
+@pytest.mark.parametrize("problem", ["unreadable", "empty", "deleted"])
+async def test_a_carried_message_whose_body_can_t_be_read_sends_and_saves_nothing(
+    session: AsyncSession, problem: str
+) -> None:
+    await brief_of(session, 2)  # m0 and m1, whose analyses are still cached.
+    await permit(session, 5, provider="fake")
+    before, cached = await saved_brief(session), await analyses(session)
+    mailbox = brief_inbox(3)  # m2 is new, and the permission would cover it.
+    provider, gate = FakeAIProvider(), NoAsking(answer=False)  # Any request fails the test.
+    service = build(session, provider, gate, messages=mailbox)
+    service._bodies = BodyService(BrokenBody(texts_for(mailbox), "m0", problem))
+
+    result = await service.generate(tz_key=BRIEF_ZONE, automatic=True)
+
+    assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
+    assert result.ready == 1  # m0; m1 is cached, and m2 isn't from the brief.
+    assert (result.digest, result.coverage, result.ai_calls, result.error_code) == (
+        None,
+        None,
+        0,
+        None,
+    )
+    assert provider.calls == 0 and provider.credential_checks == 0 and gate.previews == []
+    assert await analyses(session) == cached
+    assert await saved_brief(session) == before  # Still m0 and m1.
+
+
+async def test_a_carried_message_whose_analysis_fails_writes_no_brief_and_keeps_what_succeeded(
+    session: AsyncSession,
+) -> None:
+    await brief_of(session, 2)
+    await outdate(session)  # m0 and m1 need analysis again.
+    await permit(session, 5, provider="fake")
+    before, cached = await saved_brief(session), await analyses(session)
+    mailbox = brief_inbox(4)  # m2 and m3 are new.
+    provider = FakeAIProvider([answer_all_but("Budget 0"), answer_all_but("Budget 0")])
+    gate = NoAsking(answer=False)
+
+    result = await build(session, provider, gate, messages=mailbox).generate(
+        tz_key=BRIEF_ZONE, automatic=True
+    )
+
+    assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
+    assert result.ready == 1 and result.digest is None  # Only m0 wasn't refreshed.
+    assert result.coverage is not None
+    assert (result.coverage.analyzed, result.coverage.failed) == (3, 1)
+    assert (result.ai_calls, result.error_code, result.proposals_created) == (2, None, 0)
+    assert gate.previews == []
+    assert await saved_brief(session) == before  # No brief was written...
+    assert await analyses(session) == cached + 3  # ...and m3, m2 and m1 are cached all the same.
+
+    # So the review sends m0 alone, and the brief then has all four.
+    asked = RecordingGate(True)
+    reviewed = await build(
+        session, FakeAIProvider([answer_all()]), asked, messages=mailbox
+    ).generate(tz_key=BRIEF_ZONE)
+    (preview,) = asked.previews
+    assert (preview.message_count, preview.reused_count) == (1, 3)
+    assert keys_of(reviewed.digest) == {"m0", "m1", "m2", "m3"}
+
+
+async def test_a_rate_limit_after_an_upgrade_keeps_the_earlier_brief_and_says_why(
+    session: AsyncSession,
+) -> None:
+    await brief_of(session, 3)
+    await outdate(session)  # Every carried message misses the cache.
+    await permit(session, 10, provider="fake")
+    before, cached = await saved_brief(session), await analyses(session)
+    # Two to a request, in rank order: m4 and m3 are answered, then the provider stops the run.
+    provider = FakeAIProvider([answer_all(), ProviderRateLimitError("limited")])
+
+    result = await build(
+        session, provider, NoAsking(answer=False), messages=brief_inbox(5), batch_size=2
+    ).generate(tz_key=BRIEF_ZONE, automatic=True)
+
+    assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
+    assert (result.ready, result.error_code, result.ai_calls) == (3, "AI_RATE_LIMITED", 2)
+    assert result.coverage is not None
+    assert (result.coverage.analyzed, result.coverage.failed) == (2, 3)
+    assert await saved_brief(session) == before  # Not a brief of m4 and m3 alone.
+    assert await analyses(session) == cached + 2
+
+
+async def test_without_a_key_a_carried_message_waits_for_the_review_and_nothing_is_saved(
+    session: AsyncSession,
+) -> None:
+    await brief_of(session, 2)
+    await outdate(session, "m0")  # m1 is still cached, and alone would make a brief.
+    await permit(session, 5, provider="fake")
+    before = await saved_brief(session)
+    provider = FakeAIProvider(credentials=False)
+
+    result = await build(
+        session, provider, NoAsking(answer=False), messages=brief_inbox(3)
+    ).generate(tz_key=BRIEF_ZONE, automatic=True)
+
+    assert result.status is BriefStatus.READY_FOR_REVIEW and result.needs_review
+    assert (result.ready, result.error_code, result.ai_calls) == (1, "AI_KEY_MISSING", 0)
+    assert provider.batches == [] and await saved_brief(session) == before
+
+
+async def test_a_new_message_that_fails_still_saves_a_partial_brief_with_every_carried_message(
+    session: AsyncSession,
+) -> None:
+    await brief_of(session, 2)
+    await outdate(session)
+    await permit(session, 5, provider="fake")
+    provider = FakeAIProvider([answer_all_but("Budget 3"), answer_all_but("Budget 3")])
+
+    result = await build(
+        session, provider, NoAsking(answer=False), messages=brief_inbox(4)
+    ).generate(tz_key=BRIEF_ZONE, automatic=True)
+
+    # m3 is new, so its failure costs the day's brief nothing it had.
+    assert result.status is BriefStatus.SAVED and not result.needs_review
+    assert result.digest is not None and result.digest.status is DigestStatus.PARTIAL
+    assert keys_of(result.digest) == {"m0", "m1", "m2"}
+    assert result.coverage is not None
+    assert (result.coverage.analyzed, result.coverage.failed) == (3, 1)
+
+
+async def test_a_manual_run_still_leaves_out_a_carried_message_that_fails_and_counts_it(
+    session: AsyncSession,
+) -> None:
+    await brief_of(session, 2)
+    mailbox = brief_inbox(3)
+    service = build(session, FakeAIProvider([answer_all()]), RecordingGate(True), messages=mailbox)
+    service._bodies = BodyService(BrokenBody(texts_for(mailbox), "m0", "unreadable"))
+
+    result = await service.generate(tz_key=BRIEF_ZONE)
+
+    # Unchanged: the owner is present, and the coverage shows the failure.
+    assert result.status is BriefStatus.SAVED and not result.needs_review
+    assert result.digest is not None and result.digest.status is DigestStatus.PARTIAL
+    assert keys_of(result.digest) == {"m1", "m2"}
+    assert result.coverage is not None and result.coverage.failed == 1

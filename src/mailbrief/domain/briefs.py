@@ -91,8 +91,8 @@ class BriefStatus(StrEnum):
     CANCELLED = "cancelled"
     CONSENT_DECLINED = "consent_declined"
     ANALYSIS_FAILED = "analysis_failed"
-    # An automatic run that sent and saved nothing: it had no permission to send, found
-    # nothing new, or would have dropped a carried message (BriefRunResult.needs_review).
+    # An automatic run that saved nothing: it had no permission to send, found nothing new,
+    # or would have lost a carried message (BriefRunResult.needs_review).
     READY_FOR_REVIEW = "ready_for_review"
 
 
@@ -111,12 +111,13 @@ class BriefRunResult(DomainModel):
     provider_detail: str | None = Field(default=None, max_length=100)
     proposals_created: int = Field(default=0, ge=0)  # Follow-up proposals made (ADR 0016).
     # Messages an automatic run found ready to review: the new ones, counted before any body
-    # is read, or with needs_review every message that needs analysis.
+    # is read, or with needs_review the carried ones it didn't refresh.
     ready: int = Field(default=0, ge=0)
     # Messages an automatic run deferred to the next review: over its send limit (ADR 0017).
     deferred: int = Field(default=0, ge=0)
-    # An automatic run sent and saved nothing, because its send limit can't cover the carried
-    # messages that need analysis and a saved brief would have lost one (ADR 0017).
+    # An automatic run saved nothing because a saved brief would have lost a carried message:
+    # one over its send limit, one whose body can't be read, or one whose analysis failed
+    # (ADR 0017). Only the last gets as far as the analysis, so only it has a coverage.
     needs_review: bool = False
 
     @model_validator(mode="after")

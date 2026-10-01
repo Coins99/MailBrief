@@ -134,10 +134,39 @@ async def test_a_refresh_that_would_drop_a_carried_message_says_the_brief_needs_
     await due(window)
 
     assert window.status.text() == (
-        "Checked Gmail at 10:02. Today's brief needs your review: 9 messages need analysis."
+        "Checked Gmail at 10:02. Today's brief needs your review: 9 messages from it couldn't "
+        "be refreshed automatically."
     )
     assert backend.loads == loads  # Nothing was saved: the brief shown is untouched.
     assert window.review_panel.isHidden() and open_dialogs(window) == []  # And nothing opens.
+
+
+async def test_a_refresh_that_failed_a_carried_message_also_says_why(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    backend.automatic_result = BriefRunResult(
+        status=BriefStatus.READY_FOR_REVIEW,
+        sync=backend.sync,
+        ready=3,
+        needs_review=True,
+        coverage=DigestCoverage(
+            sync_complete=True, shortlisted=5, analyzed=2, reused=0, failed=3, skipped=0
+        ),
+        error_code="AI_RATE_LIMITED",
+        ai_calls=2,
+    )
+    loads = backend.loads
+
+    await due(window)
+
+    guidance = "Groq rate limit reached; retry later."
+    assert window.status.text() == (
+        "Checked Gmail at 10:02. Today's brief needs your review: 3 messages from it couldn't "
+        f"be refreshed automatically. Automatic refresh: {guidance}"
+    )
+    assert window.ai.text() == f"AI: {guidance}"
+    assert backend.loads == loads  # No brief was written: the one shown is untouched.
 
 
 async def test_a_refresh_never_opens_a_review_a_consent_panel_or_a_dialog(

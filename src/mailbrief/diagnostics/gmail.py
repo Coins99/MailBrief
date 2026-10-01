@@ -768,9 +768,19 @@ def _ready_line(ready: int) -> str:
     return f"{ready} new messages are ready to review; automatic analysis is off."
 
 
+def _review_line(result: BriefRunResult) -> str:
+    """What an automatic run that saved nothing found: the window's sentence when it couldn't
+    refresh a carried message, otherwise how many new messages are ready."""
+    if result.needs_review:
+        return needs_review_sentence(result.ready)
+    return _ready_line(result.ready)
+
+
 def _outcome(result: BriefRunResult) -> str:
     if result.status is BriefStatus.SAVED:
         return "Saved. Bodies were not stored."
+    if result.status is BriefStatus.READY_FOR_REVIEW:
+        return _review_line(result)
     if result.status is BriefStatus.CONSENT_DECLINED:
         return "Nothing was sent. No brief saved."
     if result.status is BriefStatus.ANALYSIS_FAILED:
@@ -813,13 +823,15 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
     if coverage is not None or result.ai_calls > 0:
         print(_ai_line(result, model=model))
     print(_outcome(result))
-    # A partial brief still explains why the new messages failed (e.g. a wrong API key).
+    # A partial brief still explains why the new messages failed (e.g. a wrong API key), and
+    # so does an automatic run that wrote no brief because a carried message failed.
     partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")
-    if result.status is BriefStatus.SAVED and partial_reason is not None:
+    explained = (BriefStatus.SAVED, BriefStatus.READY_FOR_REVIEW)
+    if result.status in explained and partial_reason is not None:
         print(partial_reason)
     if result.provider_detail:
         print(f"{provider_display_name(PROVIDER_NAME)} detail: {result.provider_detail}")
-    if result.status is BriefStatus.ANALYSIS_FAILED:
+    if result.status in (BriefStatus.ANALYSIS_FAILED, BriefStatus.READY_FOR_REVIEW):
         # Its own line: some messages end in a command, which must not run into this note.
         print("Your last saved brief for today is unchanged.")
     if _sync_incomplete(result):
@@ -952,9 +964,9 @@ async def brief(
     ``automatic`` is exactly what the desktop's automatic refresh does (ADR 0017), with no
     prompt: it brings the day's Inbox up to date and follows tracked threads, then sends
     only what the permission on the active consent allows (see ai-consent auto-send), and
-    with none only counts the messages ready to review. A permission too small for the
-    carried messages that need analysis sends nothing either, and says the day's brief needs
-    a review. It takes no date, choices or --yes.
+    with none only counts the messages ready to review. When it can't refresh a carried
+    message (over the permission, unreadable, or failed in analysis), it saves no brief and
+    says the day's brief needs a review. It takes no date, choices or --yes.
     """
     day = None if date_text is None else parse_brief_date(date_text)
     owner = await _owner(database_path, timezone)
@@ -1007,14 +1019,11 @@ async def brief(
             await database.dispose()
         model = ai.model_name
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
-    if result.status is BriefStatus.READY_FOR_REVIEW:
+    if result.status is BriefStatus.READY_FOR_REVIEW and result.coverage is None:
+        # It sent nothing. One whose analysis ran and failed a carried message has a coverage,
+        # and is printed like any other result below.
         _print_threads(result.sync)
-        # The window's sentence, when the permission can't cover the carried messages.
-        print(
-            needs_review_sentence(result.ready)
-            if result.needs_review
-            else _ready_line(result.ready)
-        )
+        print(_review_line(result))
         return 0
     _print_result(result, model=model)
     _print_threads(result.sync)

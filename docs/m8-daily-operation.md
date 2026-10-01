@@ -117,9 +117,10 @@ Groq and the desktop. Run them in order; the exit test comes first.
 - Automatic runs happen only while the desktop is open, and never for past days.
 - A day has one brief, carried forward through the day: a later run keeps the messages the
   earlier brief had unless they were archived, newly blocked or declined.
-- An automatic run whose permission can't cover the carried messages that need analysis again
-  sends and saves nothing until you run Sync and review; a carried message whose analysis
-  fails, or whose body can't be read, is still left out of that run's partial brief.
+- An automatic run that can't refresh a carried message (its permission can't cover those
+  that need analysis again, a body can't be read, or an analysis fails) saves nothing until
+  you run Sync and review. A manual run can still leave out a carried message whose refresh
+  fails; the coverage counts it as failed.
 - There is no Gmail history cursor; Inbox sync reads the day's window (not in this pull
   request).
 - The dormant Microsoft adapter has no thread reader, so it tracks no threads.
@@ -745,9 +746,11 @@ and saves no brief. Reviewing and analyzing stay a click away (Sync and review).
   again by your next review. A run that selects nothing saves nothing; a saved automatic
   brief replaces today's earlier one.
 - Messages carried from the day's earlier brief that need analysis again (after an upgrade,
-  or a change of model, body limit or time zone) are sent before new ones, and if there are
-  more of them than the run may send, it sends nothing, saves nothing, and the status line
-  and `brief --automatic` say "Today's brief needs your review: N messages need analysis."
+  or a change of model, body limit or time zone) are sent before new ones. An automatic run
+  never saves a brief that would lose one of the brief's messages: if more of them need
+  analysis than it may send, or one can't be read or fails in analysis, it saves nothing
+  (what it did analyze stays cached), and the status line and `brief --automatic` say
+  "Today's brief needs your review: N messages from it couldn't be refreshed automatically."
 
 ### Declines
 
@@ -761,7 +764,9 @@ it, or `--include`, forgets the decline. Being pushed out by a limit is not a de
 - `brief --automatic` runs one automatic run: no prompts, today only, and it rejects
   `--date`, `--include`, `--exclude` and `--yes`. Without permission it prints "N messages are
   ready to review; automatic analysis is off."; with it, the usual result plus "N deferred to
-  your next review." when messages wait.
+  your next review." when messages wait. A run that needs your review prints that sentence; if
+  its analysis ran and a carried message failed, it also prints the usual counts and the
+  reason, and exits 4.
 - `ai-consent auto-send N` shows the disclosure and asks for a typed "yes" (`--yes` skips the
   question, not the disclosure). `auto-send 0` turns it off without asking, and works even with no consent. `ai-consent
   status` and `preferences show` show it, and `preferences show` the refresh settings.
