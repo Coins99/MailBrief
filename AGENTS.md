@@ -252,7 +252,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts, drafting, preferences, history, threads and proposals services.
+  drafts, drafting, preferences, history, threads, proposals and consent services.
 
 ## Dormant Microsoft notes
 

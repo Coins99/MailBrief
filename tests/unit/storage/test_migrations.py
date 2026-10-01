@@ -1196,3 +1196,60 @@ def test_daily_operation_columns_upgrade_with_defaults_and_downgrade_keeping_row
     assert _schema(path) == _schema(fresh)
     command.upgrade(config, "head")
     assert _query(path, "SELECT auto_send_limit FROM ai_consents ORDER BY id") == [(0,), (0,)]
+
+
+def test_the_m8_chain_round_trips_with_m7_data(tmp_path: Path) -> None:
+    """From 0008 to head, back to 0008 and up again: every M7 row survives each way."""
+    path = tmp_path / "m8-chain.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)  # An account, a message, an analysis and a brief.
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)  # An accepted action and its decisions.
+    command.upgrade(config, "20260928_0008")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO action_sources(action_id,message_id,provider_message_id,subject,"
+            "sender_address,web_link,received_at_utc) VALUES(?,1,'message-1','Subject',"
+            "'sender@example.com','https://example.com','2026-09-25 00:00:00')",
+            (action_id,),
+        )
+        connection.execute(
+            "INSERT INTO drafts(public_id,kind,body,action_id,created_at_utc,updated_at_utc) "
+            "VALUES(?,'note','Mine',?,'2026-09-28 00:00:00','2026-09-28 00:00:00')",
+            (_DRAFT_ID, action_id),
+        )
+        connection.execute(_CONSENT, ("1", None))
+        connection.execute(
+            "INSERT INTO owner_consents(provider,scope,disclosure_version,granted_at_utc) "
+            "VALUES('groq','drafting','1','2026-09-28 00:00:00')"
+        )
+        connection.commit()
+    kept = (
+        *_OLD_ROWS,
+        "actions",
+        "action_sources",
+        "action_suggestions",
+        "suggestion_decisions",
+        "drafts",
+        "ai_consents",
+        "owner_consents",
+    )
+    before = _rows(path, kept)
+    fresh_0008 = tmp_path / "fresh-0008.sqlite3"
+    command.upgrade(_alembic_config(fresh_0008), "20260928_0008")
+
+    for _ in range(2):  # Up to head and down again, twice: nothing wears away.
+        command.upgrade(config, "head")
+        assert _earlier_columns(_rows(path, kept), before) == before
+        assert _query(path, "PRAGMA foreign_key_check") == []
+        assert ScriptDirectory.from_config(config).get_heads() == ["20260930_0012"]
+        assert _query(path, "SELECT version_num FROM alembic_version") == [("20260930_0012",)]
+
+        command.downgrade(config, "20260928_0008")
+        assert _rows(path, kept) == before
+        assert _schema(path) == _schema(fresh_0008)
+
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT auto_send_limit FROM ai_consents") == [(0,)]
+    assert _query(path, "SELECT count(*) FROM action_sources WHERE provider = 'gmail'") == [(1,)]
