@@ -137,7 +137,7 @@ control or format characters. See [M6 actions](m6-actions.md).
   refresh) syncs and ranks, and reports how many messages are ready to review.
 - `ai-consent auto-send N` (1–10) lets automatic runs send up to N messages without asking;
   it needs a consent, shows the disclosure, and asks for a typed `yes` (`--yes` skips only the
-  question). `auto-send 0` turns it off. Revoking consent clears it.
+  question). `auto-send 0` turns it off, with or without a consent. Revoking consent clears it.
 - Messages over the cap are deferred, not sent. Messages you left out are never selected.
   See [M8 daily operation](m8-daily-operation.md#daily-operation-part-8).
 

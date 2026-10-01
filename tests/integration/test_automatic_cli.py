@@ -260,8 +260,9 @@ def test_the_permission_needs_a_consent_first(
 
     assert consent(path, "auto-send", "3", "--yes") == 3
     assert capsys.readouterr().out.strip() == NO_CONSENT
-    assert consent(path, "auto-send", "0") == 3  # Off needs one too: it is a setting on it.
-    assert capsys.readouterr().out.strip() == NO_CONSENT
+    # Turning it off always works: with no consent there is nothing to turn off.
+    assert consent(path, "auto-send", "0") == 0
+    assert capsys.readouterr().out.strip() == "Automatic analysis is already off."
 
 
 def test_granting_shows_the_disclosure_and_asks_for_a_typed_yes(

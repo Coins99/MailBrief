@@ -657,7 +657,7 @@ it, or `--include`, forgets the decline. Being pushed out by a limit is not a de
   ready to review; automatic analysis is off."; with it, the usual result plus "N deferred to
   your next review." when messages wait.
 - `ai-consent auto-send N` shows the disclosure and asks for a typed "yes" (`--yes` skips the
-  question, not the disclosure). `auto-send 0` turns it off without asking. `ai-consent
+  question, not the disclosure). `auto-send 0` turns it off without asking, and works even with no consent. `ai-consent
   status` and `preferences show` show it, and `preferences show` the refresh settings.
 - `sync --show-metadata` marks declined messages.
 

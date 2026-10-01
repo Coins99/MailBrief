@@ -478,14 +478,18 @@ async def _auto_send(session: AsyncSession, limit: int, *, assume_yes: bool) -> 
     """Give, change or withdraw the permission for automatic runs to send up to ``limit``
     messages without asking (ADR 0017).
 
-    It needs an active consent (ConfigurationError otherwise, exit 3). A limit above 0 shows
-    the disclosure and the permission sentence, then asks for a typed "yes" unless ``--yes``;
-    declining changes nothing (exit 6). 0 turns it off without asking.
+    Turning it off (0) always works, without asking and even with no consent. Otherwise it
+    needs an active consent (ConfigurationError, exit 3); the disclosure and the permission
+    sentence are shown, then a typed "yes" is asked for unless ``--yes``; declining changes
+    nothing (exit 6).
     """
     permission = await auto_send_permission(
         session, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
     )
     if permission is None:
+        if limit == 0:  # Nothing to turn off: off always works.
+            print("Automatic analysis is already off.")
+            return 0
         raise ConfigurationError(NO_CONSENT)
     if limit == 0:
         await set_auto_send(session, 0, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION)
