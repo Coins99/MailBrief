@@ -268,23 +268,32 @@ class DesktopRuntime:
     # The automatic-analysis permission (ADR 0017) lives on the active consent. Reading and
     # changing it needs no Gmail and no AI.
 
-    async def auto_send_status(self) -> AutoSendStatus | None:
-        """The permission and the disclosure it rests on; None when no account has an active
-        consent yet, so there is nothing to allow."""
+    async def auto_send_status(self, account_email: str | None) -> AutoSendStatus | None:
+        """The connected account's permission and the disclosure it rests on; None when that
+        account has no active consent yet, so there is nothing to allow."""
         async with self._storage().session() as session:
             permission = await auto_send_permission(
-                session, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+                session,
+                account_email,
+                provider=PROVIDER_NAME,
+                version=CONSENT_DISCLOSURE_VERSION,
             )
         return None if permission is None else await self._auto_send_status(permission)
 
-    async def set_auto_send(self, limit: int) -> AutoSendStatus:
-        """Allow automatic runs to send up to ``limit`` messages without asking; 0 turns it
-        off. Raises ConfigurationError (a static message) without an active consent."""
+    async def set_auto_send(self, limit: int, account_email: str | None) -> AutoSendStatus | None:
+        """Allow automatic runs to send up to ``limit`` of the connected account's messages
+        without asking; 0 turns it off for every account. Raises ConfigurationError (a static
+        message) when a limit above 0 has no active consent to rest on. None when the
+        account has no active consent."""
         async with self._storage().session() as session:
             permission = await set_auto_send(
-                session, limit, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+                session,
+                limit,
+                account_email,
+                provider=PROVIDER_NAME,
+                version=CONSENT_DISCLOSURE_VERSION,
             )
-        return await self._auto_send_status(permission)
+        return None if permission is None else await self._auto_send_status(permission)
 
     async def _auto_send_status(self, permission: AutoSendPermission) -> AutoSendStatus:
         """The permission with what one automatic run would send: the chosen model and body

@@ -1102,26 +1102,16 @@ class ConsentRepository:
         assert consent is not None
         return consent
 
-    async def newest_active(
-        self, provider: str, disclosure_version: str, account_provider: str
-    ) -> tuple[AIConsentTable, AccountTable] | None:
-        """The most recently granted active consent to this provider and disclosure version
-        among the accounts of ``account_provider``, with its account; None when there is none."""
-        result = await self._session.execute(
-            select(AIConsentTable, AccountTable)
-            .join(AccountTable, AIConsentTable.account_id == AccountTable.id)
-            .where(
-                AIConsentTable.provider == provider,
-                AIConsentTable.disclosure_version == disclosure_version,
-                AIConsentTable.revoked_at_utc.is_(None),
-                AccountTable.provider == account_provider,
-            )
-            .order_by(AIConsentTable.granted_at_utc.desc(), AIConsentTable.id.desc())
-            .limit(1)
+    async def with_auto_send(self, provider: str) -> list[AIConsentTable]:
+        """Every consent to this provider that holds an automatic-analysis permission
+        (ADR 0017), whichever account or disclosure version it belongs to."""
+        result = await self._session.scalars(
+            select(AIConsentTable)
+            .where(AIConsentTable.provider == provider, AIConsentTable.auto_send_limit > 0)
+            .order_by(AIConsentTable.id)
             .execution_options(populate_existing=True)
         )
-        found = result.first()
-        return None if found is None else (found[0], found[1])
+        return list(result)
 
     async def set_auto_send(
         self,

@@ -66,6 +66,7 @@ _REFRESH_NOTE = (
     "today, and sends nothing to Groq unless you allow automatic analysis."
 )
 _AUTO_OFF = "Off — every run asks you first"
+AUTO_DISCONNECTED = "Connect Gmail to change automatic analysis."
 _AUTO_UNREADABLE = "The automatic-analysis setting couldn't be read just now."
 _ENVIRONMENT_NOTE = "When set, a MAILBRIEF_AI_* environment variable takes precedence."
 _UNAVAILABLE = (
@@ -223,15 +224,24 @@ class PreferencesPanel(QWidget):
         self.save_button.setEnabled(True)
 
     def set_auto_send(
-        self, status: AutoSendStatus | None, zone: ZoneInfo, *, unreadable: bool = False
+        self,
+        status: AutoSendStatus | None,
+        zone: ZoneInfo,
+        *,
+        unreadable: bool = False,
+        connected: bool = True,
     ) -> None:
-        """Show the automatic-analysis permission, in ``zone`` for the date it was given.
+        """Show the connected account's automatic-analysis permission, in ``zone`` for the
+        date it was given.
 
         Without an active consent (``status`` None) there is nothing to allow yet, so the
-        button is off and the line says how to get one. ``unreadable`` says it couldn't be read.
+        button is off and the line says how to get one. ``unreadable`` says it couldn't be
+        read, and with no Gmail account ``connected`` there is no permission to show or change.
         """
         if unreadable:
             text, changeable = _AUTO_UNREADABLE, False
+        elif not connected:
+            text, changeable = AUTO_DISCONNECTED, False
         elif status is None:
             text, changeable = NO_CONSENT, False
         elif status.limit == 0 or status.granted_at_utc is None:

@@ -25,6 +25,7 @@ from tests.integration.test_brief_cli import (  # noqa: F401 - fixtures used by 
 )
 from tests.integration.test_preferences_cli import corrupt, save_preferences
 from tests.unit.providers.groq.groq_fixtures import (
+    MemoryVault,
     answer_every_message,
     error_body,
     sent_messages,
@@ -34,6 +35,7 @@ pytestmark = pytest.mark.respx(assert_all_called=False)
 
 NO_CONSENT = "Analyze once with Sync and review to give consent first."
 READY = "new messages are ready to review; automatic analysis is off."
+OFF = "Automatic analysis is off. Every run asks you first."
 
 
 def automatic(path: Path, *options: str) -> int:
@@ -390,7 +392,60 @@ def test_the_permission_needs_a_consent_first(
     assert capsys.readouterr().out.strip() == NO_CONSENT
     # Turning it off always works: with no consent there is nothing to turn off.
     assert consent(path, "auto-send", "0") == 0
-    assert capsys.readouterr().out.strip() == "Automatic analysis is already off."
+    assert capsys.readouterr().out.strip() == OFF
+
+
+def test_with_no_gmail_connected_it_can_only_be_turned_off(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    gmail_vault: MemoryVault,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    groq_answers(respx_mock)
+    path = tmp_path / "auto.sqlite3"
+    consented(path, monkeypatch, capsys)
+    assert consent(path, "auto-send", "3", "--yes") == 0
+    capsys.readouterr()
+    gmail_vault.entries.clear()  # Disconnected: no stored credential names an account.
+
+    assert consent(path, "auto-send", "5", "--yes") == 3
+    assert capsys.readouterr().out.strip() == "Connect Gmail first."
+    assert consent(path, "status") == 0
+    output = capsys.readouterr().out
+    assert "automatic analysis up to 3 messages per run" in output  # Unchanged by the refusal.
+    assert "Automatic analysis: unavailable until you connect Gmail\n" in output
+    assert gmail.main(["preferences", "show", "--database", str(path)]) == 0
+    assert "Automatic analysis: unavailable until you connect Gmail\n" in capsys.readouterr().out
+
+    assert consent(path, "auto-send", "0") == 0  # Off is off everywhere, connected or not.
+    assert capsys.readouterr().out.strip() == OFF
+    assert consent(path, "status") == 0
+    assert "; automatic analysis off\n" in capsys.readouterr().out
+
+
+def test_the_permission_belongs_to_the_stored_credential_s_account(
+    tmp_path: Path,
+    mailbox: Mailbox,  # noqa: F811 - the imported fixture
+    gmail_vault: MemoryVault,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    groq_answers(respx_mock)
+    path = tmp_path / "auto.sqlite3"
+    consented(path, monkeypatch, capsys)
+    ((key, stored),) = gmail_vault.entries.items()
+    gmail_vault.entries[key] = stored.replace("me@example.com", "other@example.com")
+
+    # Another account is connected now, and it never consented here.
+    assert consent(path, "auto-send", "3", "--yes") == 3
+    assert capsys.readouterr().out.strip() == NO_CONSENT
+    assert consent(path, "status") == 0
+    output = capsys.readouterr().out
+    assert "; automatic analysis off\n" in output
+    assert "Automatic analysis: unavailable until you give consent" in output
 
 
 def test_granting_shows_the_disclosure_and_asks_for_a_typed_yes(
@@ -549,7 +604,9 @@ def test_status_and_preferences_show_the_permission(
         capsys.readouterr().out
     )
     assert consent(path, "status") == 0
-    assert "Groq consent granted" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Groq consent granted" in output
+    assert "\nAutomatic analysis: up to 4 messages per run, since 2026-09-16" in output
 
     assert consent(path, "revoke") == 0
     capsys.readouterr()

@@ -118,6 +118,7 @@ class FakeBackend(FakeDrafts):
         self.permission: AutoSendStatus | None = None
         self.permission_fail: Exception | None = None
         self.permission_saves: list[int] = []
+        self.permission_accounts: list[str | None] = []
         self.source_added = True
         self.sync = SyncResult(
             account_id="owner@example.com",
@@ -361,12 +362,14 @@ class FakeBackend(FakeDrafts):
             status=BriefStatus.READY_FOR_REVIEW, sync=self.sync, ready=2
         )
 
-    async def auto_send_status(self) -> AutoSendStatus | None:
+    async def auto_send_status(self, account_email: str | None) -> AutoSendStatus | None:
+        self.permission_accounts.append(account_email)
         if self.permission_fail is not None:
             raise self.permission_fail
         return self.permission
 
-    async def set_auto_send(self, limit: int) -> AutoSendStatus:
+    async def set_auto_send(self, limit: int, account_email: str | None) -> AutoSendStatus | None:
+        self.permission_accounts.append(account_email)
         self.permission_saves.append(limit)
         if self.permission is None:
             raise ConfigurationError(NO_CONSENT)

@@ -177,27 +177,27 @@ async def test_a_revoked_or_missing_consent_can_not_hold_a_permission(
     assert await consents.set_auto_send(owner.id, "groq", "2", 2, LATER) is None
 
 
-async def test_the_newest_active_consent_is_the_most_recently_granted_gmail_one(
+async def test_the_consents_holding_a_permission_are_listed_across_accounts_and_versions(
     session: AsyncSession,
 ) -> None:
     old = await account(session, "old")
     new = await account(session, "new")
-    outlook = await account(session, "work", ProviderKind.MICROSOFT)
     consents = ConsentRepository(session)
-    assert await consents.newest_active("groq", "2", "gmail") is None
+    assert await consents.with_auto_send("groq") == []
 
+    await consents.grant(old.id, "groq", "1", AT)  # An earlier disclosure version.
     await consents.grant(old.id, "groq", "2", AT)
     await consents.grant(new.id, "groq", "2", LATER)
-    await consents.grant(outlook.id, "groq", "2", LATER + timedelta(days=1))  # Not Gmail.
-    await consents.grant(new.id, "openai", "2", LATER + timedelta(days=1))  # Another provider.
-    await consents.grant(new.id, "groq", "1", LATER + timedelta(days=1))  # Another version.
+    await consents.grant(new.id, "openai", "2", LATER)  # Another provider.
+    await consents.set_auto_send(old.id, "groq", "1", 2, AT)
+    await consents.set_auto_send(new.id, "groq", "2", 3, AT)
+    await consents.set_auto_send(new.id, "openai", "2", 4, AT)
 
-    found = await consents.newest_active("groq", "2", "gmail")
-    assert found is not None
-    assert found[1].email_address == "new@example.com" and found[0].account_id == new.id
-    await consents.revoke_all(new.id, "groq", LATER)
-    found = await consents.newest_active("groq", "2", "gmail")
-    assert found is not None and found[1].email_address == "old@example.com"
+    found = await consents.with_auto_send("groq")
+    assert [(row.account_id, row.disclosure_version, row.auto_send_limit) for row in found] == [
+        (old.id, "1", 2),
+        (new.id, "2", 3),
+    ]
 
 
 # Declined messages

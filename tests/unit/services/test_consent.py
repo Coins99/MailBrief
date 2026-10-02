@@ -20,6 +20,7 @@ from mailbrief.storage.tables import AccountTable
 
 AT = datetime(2026, 9, 30, 13, tzinfo=UTC)
 LATER = AT + timedelta(hours=1)
+ME = "me@example.com"
 
 
 @pytest.fixture
@@ -60,9 +61,9 @@ async def consent(
 async def test_with_no_consent_there_is_no_permission_to_read_or_give(
     session: AsyncSession,
 ) -> None:
-    assert await auto_send_permission(session, provider="groq", version="2") is None
+    assert await auto_send_permission(session, ME, provider="groq", version="2") is None
     with pytest.raises(ConfigurationError) as caught:
-        await set_auto_send(session, 3, provider="groq", version="2")
+        await set_auto_send(session, 3, ME, provider="groq", version="2")
     assert str(caught.value) == "Analyze once with Sync and review to give consent first."
     assert str(caught.value) == NO_CONSENT
 
@@ -73,31 +74,36 @@ async def test_a_consent_starts_with_no_permission_then_takes_one_and_gives_it_u
     await consent(session)
     now = [AT]
 
-    start = await auto_send_permission(session, provider="groq", version="2")
+    start = await auto_send_permission(session, ME, provider="groq", version="2")
     assert start is not None and (start.account_email, start.limit) == ("me@example.com", 0)
     assert start.granted_at_utc is None
 
-    given = await set_auto_send(session, 4, provider="groq", version="2", clock=lambda: now[0])
-    assert (given.limit, given.granted_at_utc) == (4, AT)
+    given = await set_auto_send(session, 4, ME, provider="groq", version="2", clock=lambda: now[0])
+    assert given is not None and (given.limit, given.granted_at_utc) == (4, AT)
 
     now[0] = LATER
-    changed = await set_auto_send(session, 2, provider="groq", version="2", clock=lambda: now[0])
-    assert (changed.limit, changed.granted_at_utc) == (2, LATER)  # Given again: the new time.
-    read = await auto_send_permission(session, provider="groq", version="2")
+    changed = await set_auto_send(
+        session, 2, ME, provider="groq", version="2", clock=lambda: now[0]
+    )
+    assert changed is not None and (changed.limit, changed.granted_at_utc) == (
+        2,
+        LATER,
+    )  # Given again: the new time.
+    read = await auto_send_permission(session, ME, provider="groq", version="2")
     assert read == changed
 
-    off = await set_auto_send(session, 0, provider="groq", version="2", clock=lambda: now[0])
-    assert (off.limit, off.granted_at_utc) == (0, None)
-    assert await auto_send_permission(session, provider="groq", version="2") == off
+    off = await set_auto_send(session, 0, ME, provider="groq", version="2", clock=lambda: now[0])
+    assert off is not None and (off.limit, off.granted_at_utc) == (0, None)
+    assert await auto_send_permission(session, ME, provider="groq", version="2") == off
 
 
 async def test_it_is_saved_for_the_next_session(database: Database, session: AsyncSession) -> None:
     await consent(session)
 
-    await set_auto_send(session, 3, provider="groq", version="2", clock=lambda: AT)
+    await set_auto_send(session, 3, ME, provider="groq", version="2", clock=lambda: AT)
 
     async with database.session() as other:
-        seen = await auto_send_permission(other, provider="groq", version="2")
+        seen = await auto_send_permission(other, ME, provider="groq", version="2")
     assert seen is not None and (seen.limit, seen.granted_at_utc) == (3, AT)
 
 
@@ -106,30 +112,30 @@ async def test_a_limit_outside_zero_to_ten_is_refused_and_changes_nothing(
     database: Database, session: AsyncSession, limit: int
 ) -> None:
     await consent(session)
-    await set_auto_send(session, 2, provider="groq", version="2", clock=lambda: AT)
+    await set_auto_send(session, 2, ME, provider="groq", version="2", clock=lambda: AT)
 
     with pytest.raises(ValueError, match="0 to 10"):
-        await set_auto_send(session, limit, provider="groq", version="2", clock=lambda: LATER)
+        await set_auto_send(session, limit, ME, provider="groq", version="2", clock=lambda: LATER)
 
     async with database.session() as other:
-        seen = await auto_send_permission(other, provider="groq", version="2")
+        seen = await auto_send_permission(other, ME, provider="groq", version="2")
     assert seen is not None and (seen.limit, seen.granted_at_utc) == (2, AT)
 
 
 async def test_revoking_the_consent_ends_the_permission_at_once(session: AsyncSession) -> None:
     owner = await consent(session)
-    await set_auto_send(session, 5, provider="groq", version="2", clock=lambda: AT)
+    await set_auto_send(session, 5, ME, provider="groq", version="2", clock=lambda: AT)
 
     await ConsentRepository(session).revoke_all(owner.id, "groq", LATER)
     await session.commit()
 
-    assert await auto_send_permission(session, provider="groq", version="2") is None
+    assert await auto_send_permission(session, ME, provider="groq", version="2") is None
     with pytest.raises(ConfigurationError):
-        await set_auto_send(session, 1, provider="groq", version="2")
+        await set_auto_send(session, 1, ME, provider="groq", version="2")
     # Consenting again starts from none, never from the old permission.
     await ConsentRepository(session).grant(owner.id, "groq", "2", LATER)
     await session.commit()
-    again = await auto_send_permission(session, provider="groq", version="2")
+    again = await auto_send_permission(session, ME, provider="groq", version="2")
     assert again is not None and (again.limit, again.granted_at_utc) == (0, None)
 
 
@@ -137,47 +143,106 @@ async def test_a_new_disclosure_version_starts_without_the_permission(
     session: AsyncSession,
 ) -> None:
     await consent(session, version="2")
-    await set_auto_send(session, 5, provider="groq", version="2", clock=lambda: AT)
+    await set_auto_send(session, 5, ME, provider="groq", version="2", clock=lambda: AT)
 
-    assert await auto_send_permission(session, provider="groq", version="3") is None
+    assert await auto_send_permission(session, ME, provider="groq", version="3") is None
     with pytest.raises(ConfigurationError):
-        await set_auto_send(session, 5, provider="groq", version="3")
+        await set_auto_send(session, 5, ME, provider="groq", version="3")
     await consent(session, version="3")
-    fresh = await auto_send_permission(session, provider="groq", version="3")
+    fresh = await auto_send_permission(session, ME, provider="groq", version="3")
     assert fresh is not None and fresh.limit == 0
 
 
 async def test_only_gmail_consents_to_this_provider_count(session: AsyncSession) -> None:
-    await consent(session, "work", kind=ProviderKind.MICROSOFT)
+    await consent(session, "me", kind=ProviderKind.MICROSOFT)
     await consent(session, "me", provider="openai")
 
-    assert await auto_send_permission(session, provider="groq", version="2") is None
+    assert await auto_send_permission(session, ME, provider="groq", version="2") is None
     with pytest.raises(ConfigurationError):
-        await set_auto_send(session, 3, provider="groq", version="2")
+        await set_auto_send(session, 3, ME, provider="groq", version="2")
 
 
-async def test_with_several_accounts_the_most_recent_consent_is_the_one(
+async def limits(session: AsyncSession) -> dict[str, int]:
+    """Each account's permission as a brief reads it: on its own active consent."""
+    consents = ConsentRepository(session)
+    found: dict[str, int] = {}
+    for account in await AccountRepository(session).list_all():
+        active = await consents.get_active(account.id, "groq", "2")
+        if active is not None:
+            found[account.email_address] = active.auto_send_limit
+    return found
+
+
+async def test_the_permission_follows_the_account_named_not_the_newest_consent(
     session: AsyncSession,
 ) -> None:
     await consent(session, "old", granted=AT)
+    await consent(session, "new", granted=LATER)
+
+    given = await set_auto_send(
+        session, 2, "old@example.com", provider="groq", version="2", clock=lambda: LATER
+    )
+
+    assert given is not None and (given.account_email, given.limit) == ("old@example.com", 2)
+    assert await limits(session) == {"old@example.com": 2, "new@example.com": 0}
+    # What is displayed for each account is what a brief for that account reads.
+    for email, limit in (await limits(session)).items():
+        shown = await auto_send_permission(session, email, provider="groq", version="2")
+        assert shown is not None and (shown.account_email, shown.limit) == (email, limit)
+
+
+async def test_granting_one_account_clears_the_other(session: AsyncSession) -> None:
+    await consent(session, "old", granted=AT)
+    await consent(session, "new", granted=LATER)
+    await set_auto_send(session, 2, "old@example.com", provider="groq", version="2")
+
+    await set_auto_send(session, 5, "new@example.com", provider="groq", version="2")
+
+    assert await limits(session) == {"old@example.com": 0, "new@example.com": 5}
+    cleared = await auto_send_permission(session, "old@example.com", provider="groq", version="2")
+    assert cleared is not None and (cleared.limit, cleared.granted_at_utc) == (0, None)
+
+
+@pytest.mark.parametrize(
+    "connected", ["old@example.com", "new@example.com", "gone@example.com", None]
+)
+async def test_off_is_off_for_every_account(session: AsyncSession, connected: str | None) -> None:
+    old = await consent(session, "old", granted=AT)
     new = await consent(session, "new", granted=LATER)
-
-    given = await set_auto_send(session, 2, provider="groq", version="2", clock=lambda: LATER)
-
-    assert given.account_email == "new@example.com"
+    # A permission on each, as a build before this rule could leave them.
     consents = ConsentRepository(session)
-    chosen = await consents.get_active(new.id, "groq", "2")
-    assert chosen is not None and chosen.auto_send_limit == 2
-    (older,) = [
-        found
-        for found in [
-            await consents.get_active(account.id, "groq", "2")
-            for account in await AccountRepository(session).list_all()
-            if account.email_address == "old@example.com"
-        ]
-        if found is not None
-    ]
-    assert older.auto_send_limit == 0  # The other account's consent is untouched.
+    await consents.set_auto_send(old.id, "groq", "2", 3, AT)
+    await consents.set_auto_send(new.id, "groq", "2", 4, AT)
+    await session.commit()
+
+    off = await set_auto_send(session, 0, connected, provider="groq", version="2")
+
+    assert await limits(session) == {"old@example.com": 0, "new@example.com": 0}
+    if connected in ("old@example.com", "new@example.com"):
+        assert off is not None and (off.account_email, off.limit) == (connected, 0)
+    else:
+        assert off is None  # No such account, or none connected: still off everywhere.
+
+
+async def test_a_permission_needs_the_named_account_s_own_consent(session: AsyncSession) -> None:
+    await consent(session, "new", granted=LATER)
+    unconsented = await AccountRepository(session).upsert(
+        AccountIdentity(
+            provider=ProviderKind.GMAIL, provider_account_id="old", email_address="old@example.com"
+        )
+    )
+    await session.commit()
+    await set_auto_send(session, 4, "new@example.com", provider="groq", version="2")
+
+    for email in ("old@example.com", "nobody@example.com", None):
+        assert await auto_send_permission(session, email, provider="groq", version="2") is None
+        with pytest.raises(ConfigurationError) as caught:
+            await set_auto_send(session, 3, email, provider="groq", version="2")
+        assert str(caught.value) == NO_CONSENT
+
+    # The refusal changed nothing: the other account keeps its permission.
+    assert await limits(session) == {"new@example.com": 4}
+    assert await ConsentRepository(session).get_active(unconsented.id, "groq", "2") is None
 
 
 # The disclosure the permission is given under

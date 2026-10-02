@@ -130,7 +130,7 @@ from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
 from mailbrief.ui.preferences import DesktopPreferences
-from mailbrief.ui.preferences_view import region_zones
+from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
 from mailbrief.ui.proposals_view import ProposalsDialog
 from mailbrief.ui.scheduler import RefreshScheduler
 from mailbrief.ui.settings_view import SettingsDialog
@@ -166,8 +166,10 @@ class DesktopBackend(Protocol):
     async def generate_automatic(
         self, cancel: asyncio.Event, progress: Callable[[SyncProgress], None]
     ) -> BriefRunResult: ...
-    async def auto_send_status(self) -> AutoSendStatus | None: ...
-    async def set_auto_send(self, limit: int) -> AutoSendStatus: ...
+    async def auto_send_status(self, account_email: str | None) -> AutoSendStatus | None: ...
+    async def set_auto_send(
+        self, limit: int, account_email: str | None
+    ) -> AutoSendStatus | None: ...
     async def list_briefs(self) -> tuple[SavedBriefSummary, ...]: ...
     async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None: ...
     async def missed_days(self, account_email: str) -> tuple[date, ...]: ...
@@ -1513,6 +1515,7 @@ class MainWindow(QMainWindow):
         self._account_email = email
         self.connection.setText(f"Gmail: connected as {email}")
         self.status.setText("Connected. Sync to review today's messages.")
+        await self._show_auto_send()  # The permission shown is the connected account's.
         self._launch_soon()  # Only the first connection of a start counts as the launch.
 
     async def _disconnect(self) -> None:
@@ -1520,6 +1523,7 @@ class MainWindow(QMainWindow):
         self._account_email = None
         self.connection.setText("Gmail: disconnected")
         self.status.setText("Local credentials removed. Saved briefs remain on this device.")
+        await self._show_auto_send()
 
     # Saved briefs by day. Opening one needs no connection; briefing a past day is the
     # owner's explicit choice, one day at a time, for the connected account.
@@ -1737,10 +1741,14 @@ class MainWindow(QMainWindow):
             await self._refresh_actions()  # Thread activity and proposals may have changed.
 
     async def _show_auto_send(self) -> None:
-        """The automatic-analysis line in Settings, from the active consent; local data only."""
+        """The automatic-analysis line in Settings, from the connected account's active
+        consent; local data only."""
         panel = self.settings_dialog.preferences_panel
+        if self._account_email is None:
+            panel.set_auto_send(None, self.zone, connected=False)
+            return
         try:
-            status = await self.backend.auto_send_status()
+            status = await self.backend.auto_send_status(self._account_email)
         except Exception as exc:
             log_failure(exc)
             panel.set_auto_send(None, self.zone, unreadable=True)
@@ -1748,8 +1756,13 @@ class MainWindow(QMainWindow):
         panel.set_auto_send(status, self.zone)
 
     async def _open_auto_send(self) -> None:
-        """Open the dialog on the current permission; without a consent there is none to change."""
-        status = await self.backend.auto_send_status()
+        """Open the dialog on the connected account's permission; without an account or a
+        consent there is none to change."""
+        if self._account_email is None:
+            self.settings_dialog.preferences_panel.set_auto_send(None, self.zone, connected=False)
+            self.status.setText(AUTO_DISCONNECTED)
+            return
+        status = await self.backend.auto_send_status(self._account_email)
         self.settings_dialog.preferences_panel.set_auto_send(status, self.zone)
         if status is None:
             self.status.setText(NO_CONSENT)
@@ -1762,9 +1775,11 @@ class MainWindow(QMainWindow):
             self.status.setText(_BUSY)
 
     async def _set_auto_send(self, limit: int) -> None:
-        status = await self.backend.set_auto_send(limit)
-        self.settings_dialog.preferences_panel.set_auto_send(status, self.zone)
-        if status.limit == 0:
+        status = await self.backend.set_auto_send(limit, self._account_email)
+        self.settings_dialog.preferences_panel.set_auto_send(
+            status, self.zone, connected=self._account_email is not None
+        )
+        if status is None or status.limit == 0:
             self.status.setText("Automatic analysis is off. Every run asks you first.")
         else:
             self.status.setText(

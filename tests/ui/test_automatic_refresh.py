@@ -752,9 +752,61 @@ async def test_shutting_down_alone_also_stops_the_timer(
 # Settings: the automatic-analysis permission
 
 
-async def open_settings(window: MainWindow) -> None:
+OWNER = "owner@example.com"  # The account FakeBackend connects as.
+
+
+async def open_settings(window: MainWindow, *, connected: bool = True) -> None:
+    if connected:
+        window._account_email = OWNER
     window.start(window._open_settings)
     await finish(window)
+
+
+async def test_with_no_account_connected_the_permission_can_not_be_changed(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    backend.permission = make_auto_send(limit=2)  # Some account's; none is connected.
+    panel = window.settings_dialog.preferences_panel
+
+    await open_settings(window, connected=False)
+
+    assert (panel.auto_line.text(), panel.auto_button.isEnabled()) == (
+        "Connect Gmail to change automatic analysis.",
+        False,
+    )
+    assert backend.permission_accounts == []  # Nothing was read for an unknown account.
+    window.start(window._open_auto_send)
+    await finish(window)
+    assert not window.auto_send_dialog.isVisible()
+    assert window.status.text() == "Connect Gmail to change automatic analysis."
+    window.settings_dialog.reject()
+
+
+async def test_the_permission_is_read_and_saved_for_the_connected_account(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    backend.permission = make_auto_send(limit=0)
+    await window.initialize()  # Connects as the owner.
+    await open_settings(window, connected=False)
+    panel = window.settings_dialog.preferences_panel
+    assert panel.auto_button.isEnabled()
+
+    panel.auto_button.click()
+    await finish(window)
+    window.auto_send_dialog.limit.setValue(2)
+    window.auto_send_dialog.save_button.click()
+    await finish(window)
+
+    assert backend.permission_saves == [2]
+    assert set(backend.permission_accounts) == {OWNER}
+    window.settings_dialog.reject()
+
+    window.start(window._disconnect)
+    await finish(window)
+    assert (panel.auto_line.text(), panel.auto_button.isEnabled()) == (
+        "Connect Gmail to change automatic analysis.",
+        False,
+    )
 
 
 async def test_settings_show_the_permission_from_the_active_consent(

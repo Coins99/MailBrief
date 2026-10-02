@@ -194,6 +194,7 @@ def ai_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 PLAN: Any = "plan"  # The drafting service is a Recorder, so any plan will do.
+ME = "me@example.com"
 SAVED = PreferencesEdit(
     time_zone="Asia/Tokyo",
     shortlist_limit=3,
@@ -489,34 +490,42 @@ async def test_the_permission_is_read_and_changed_on_the_active_consent(tmp_path
     try:
         await backend.save_preferences(DesktopPreferences(groq_model="test-model"))
         await backend.save_owner_preferences(PreferencesEdit(ai_body_character_limit=2_000), 0)
-        assert await backend.auto_send_status() is None  # No consent: nothing to allow.
+        assert await backend.auto_send_status(ME) is None  # No consent: nothing to allow.
         with pytest.raises(ConfigurationError) as caught:
-            await backend.set_auto_send(3)
+            await backend.set_auto_send(3, ME)
         assert str(caught.value) == "Analyze once with Sync and review to give consent first."
 
         await seed_consent(path)
-        off = await backend.auto_send_status()
+        off = await backend.auto_send_status(ME)
         assert off is not None and (off.account_email, off.limit) == ("me@example.com", 0)
         assert off.granted_at_utc is None and off.disclosure.message_count == 1
         assert (off.disclosure.provider_name, off.disclosure.model_name) == ("groq", "test-model")
         assert off.disclosure.body_character_limit == 2_000  # A saved AI limit applies.
         assert "Zero Data Retention" in off.disclosure.privacy_notice
 
-        given = await backend.set_auto_send(3)
+        given = await backend.set_auto_send(3, ME)
+        assert given is not None
         assert (given.limit, given.disclosure.message_count) == (3, 3)
         assert given.granted_at_utc is not None
-        again = await backend.auto_send_status()
+        again = await backend.auto_send_status(ME)
         assert again is not None and (again.limit, again.granted_at_utc) == (
             3,
             given.granted_at_utc,
         )
         with pytest.raises(ValueError, match="0 to 10"):
-            await backend.set_auto_send(11)
-        assert (await backend.set_auto_send(0)).granted_at_utc is None
+            await backend.set_auto_send(11, ME)
+        off = await backend.set_auto_send(0, ME)
+        assert off is not None and off.granted_at_utc is None
+        # Another account, or none connected, has no permission here; off still works.
+        assert await backend.auto_send_status("other@example.com") is None
+        assert await backend.auto_send_status(None) is None
+        assert await backend.set_auto_send(0, None) is None
+        with pytest.raises(ConfigurationError):
+            await backend.set_auto_send(2, None)
 
-        await backend.set_auto_send(2)
+        await backend.set_auto_send(2, ME)
         assert await backend.revoke_consent() == 1  # Revoking ends it, at once.
-        assert await backend.auto_send_status() is None
+        assert await backend.auto_send_status(ME) is None
     finally:
         await backend.close()
 
@@ -537,7 +546,7 @@ async def test_the_permission_reads_when_the_saved_preferences_do_not(tmp_path: 
         finally:
             await database.dispose()
 
-        status = await backend.auto_send_status()  # Only displays, so it still answers.
+        status = await backend.auto_send_status(ME)  # Only displays, so it still answers.
 
         assert status is not None
         assert status.disclosure.model_name == "the model chosen in Settings"  # None chosen.
@@ -552,7 +561,7 @@ async def test_only_a_gmail_consent_can_hold_the_permission(tmp_path: Path) -> N
     try:
         await seed_consent(path, kind=ProviderKind.MICROSOFT)
 
-        assert await backend.auto_send_status() is None
+        assert await backend.auto_send_status(ME) is None
     finally:
         await backend.close()
 
@@ -561,6 +570,6 @@ async def test_permission_calls_need_initialized_storage(tmp_path: Path) -> None
     backend = DesktopRuntime(tmp_path / "unopened.sqlite3")
 
     with pytest.raises(RuntimeError):
-        await backend.auto_send_status()
+        await backend.auto_send_status(ME)
     with pytest.raises(RuntimeError):
-        await backend.set_auto_send(1)
+        await backend.set_auto_send(1, ME)

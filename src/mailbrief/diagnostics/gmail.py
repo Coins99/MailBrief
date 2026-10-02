@@ -141,6 +141,7 @@ from mailbrief.text.prepare import clean_generated_text
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 # Commands whose setup errors are shown as they are: static, actionable messages.
 _OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts", "preferences", "briefs"}
+_CONNECT_FIRST = "Connect Gmail first."
 _NO_BRIEF = "No saved brief for that date."
 _SEVERAL_BRIEFS = "Several accounts have a brief for that date; pass --account."
 _TIMEZONE_HELP = "IANA time zone; defaults to your saved preference, else the system time zone."
@@ -469,6 +470,22 @@ def _granted(when: datetime | None) -> str:
     return f"granted {when:%Y-%m-%d %H:%M} UTC" if when is not None else "not granted"
 
 
+async def _stored_account_email(*, required: bool) -> str | None:
+    """The connected Gmail account's address, read from the stored credential without
+    connecting; None when nothing is stored.
+
+    A vault that can't be read raises when the address is ``required``, and otherwise counts
+    as no account.
+    """
+    try:
+        credential = await asyncio.to_thread(lambda: GmailCredentialStore().load())
+    except ConfigurationError:
+        if required:
+            raise
+        return None
+    return None if credential is None else credential.email_address
+
+
 def _permission_text(limit: int, granted: datetime | None) -> str:
     """The automatic-analysis permission in a few words, for ai-consent status."""
     if limit == 0 or granted is None:
@@ -481,23 +498,31 @@ async def _auto_send(session: AsyncSession, limit: int, *, assume_yes: bool) -> 
     """Give, change or withdraw the permission for automatic runs to send up to ``limit``
     messages without asking (ADR 0017).
 
-    Turning it off (0) always works, without asking and even with no consent. Otherwise it
-    needs an active consent (ConfigurationError, exit 3); the disclosure and the permission
+    The permission belongs to the connected Gmail account, read from the stored credential
+    without connecting. Turning it off (0) always works, for every account, without asking
+    and even with no connection or consent. Otherwise it needs a stored credential and that
+    account's active consent (ConfigurationError, exit 3); the disclosure and the permission
     sentence are shown, then a typed "yes" is asked for unless ``--yes``; declining changes
     nothing (exit 6).
     """
-    permission = await auto_send_permission(
-        session, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
-    )
-    if permission is None:
-        if limit == 0:  # Nothing to turn off: off always works.
-            print("Automatic analysis is already off.")
-            return 0
-        raise ConfigurationError(NO_CONSENT)
     if limit == 0:
-        await set_auto_send(session, 0, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION)
+        await set_auto_send(
+            session,
+            0,
+            await _stored_account_email(required=False),
+            provider=PROVIDER_NAME,
+            version=CONSENT_DISCLOSURE_VERSION,
+        )
         print("Automatic analysis is off. Every run asks you first.")
         return 0
+    email = await _stored_account_email(required=True)
+    if email is None:
+        raise ConfigurationError(_CONNECT_FIRST)
+    permission = await auto_send_permission(
+        session, email, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+    )
+    if permission is None:
+        raise ConfigurationError(NO_CONSENT)
     settings = effective_settings(_load_settings(), await PreferencesService(session).get())
     preview = permission_preview(
         limit,
@@ -512,7 +537,9 @@ async def _auto_send(session: AsyncSession, limit: int, *, assume_yes: bool) -> 
     if not assume_yes and await _ask('Type "yes" to allow this: ') != "yes":
         print("Nothing was changed.")
         return 6
-    await set_auto_send(session, limit, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION)
+    await set_auto_send(
+        session, limit, email, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+    )
     noun = "message" if limit == 1 else "messages"
     print(f"Saved. Automatic runs may now send up to {limit} {noun} without asking.")
     print("Turn it off with: mailbrief-gmail-diagnostic ai-consent auto-send 0")
@@ -559,6 +586,7 @@ async def ai_consent(
                 )
                 when = None if drafting is None else drafting.granted_at_utc
                 print(f"AI drafting: Groq consent {_granted(when)}")
+                print(f"Automatic analysis: {await _connected_permission_text(session)}")
                 return 0
             now = datetime.now(UTC)
             briefs = 0
@@ -1457,18 +1485,29 @@ def _refresh_text(minutes: int | None) -> str:
 
 
 async def _automatic_analysis_text(path: Path, *, exists: bool) -> str:
-    """The automatic-analysis permission on the active consent, read locally; nothing is
+    """The connected account's automatic-analysis permission, read locally; nothing is
     created when there is no database."""
     database = await _open_existing(path) if exists else None
+    if database is None:
+        return await _connected_permission_text(None)
+    try:
+        async with database.session() as session:
+            return await _connected_permission_text(session)
+    finally:
+        await database.dispose()
+
+
+async def _connected_permission_text(session: AsyncSession | None) -> str:
+    """The connected account's automatic-analysis permission, the one a brief reads; the
+    account comes from the stored Gmail credential, without connecting."""
+    email = await _stored_account_email(required=False)
+    if email is None:
+        return "unavailable until you connect Gmail"
     permission = None
-    if database is not None:
-        try:
-            async with database.session() as session:
-                permission = await auto_send_permission(
-                    session, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
-                )
-        finally:
-            await database.dispose()
+    if session is not None:
+        permission = await auto_send_permission(
+            session, email, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+        )
     if permission is None:
         return "unavailable until you give consent (analyze once with Sync and review)"
     if permission.limit == 0 or permission.granted_at_utc is None:
@@ -1635,7 +1674,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
         choices=("status", "revoke", "auto-send"),
         help=(
             "status shows consent and the automatic-analysis permission, revoke withdraws "
-            "both for every account, and auto-send LIMIT sets the permission."
+            "both for every account, and auto-send LIMIT sets the permission for the "
+            "connected Gmail account."
         ),
     )
     consent_parser.add_argument(
@@ -1644,7 +1684,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         type=_auto_send_limit,
         help=(
             "With auto-send: how many messages an automatic run may send without asking, "
-            "0 to 10; 0 turns it off."
+            "0 to 10; 0 turns it off for every account."
         ),
     )
     consent_parser.add_argument(
