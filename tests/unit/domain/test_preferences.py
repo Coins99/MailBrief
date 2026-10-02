@@ -48,7 +48,13 @@ def test_other_zones_fail(name: str) -> None:
         ("  Alex@Example.COM ", "alex@example.com"),
         ("example.com", "@example.com"),
         ("@News.Example.com", "@news.example.com"),
-        ("a@b", "a@b"),
+        ("first.last+tag@mail.example.co.uk", "first.last+tag@mail.example.co.uk"),
+        ("o'neil_99@xn--bcher-kva.example", "o'neil_99@xn--bcher-kva.example"),
+        ("@bücher.example", "@bücher.example"),
+        # The wildcard forms mean the domain rule, which covers subdomains already.
+        ("*@Example.com", "@example.com"),
+        ("*.example.com", "@example.com"),
+        (" *@news.example.com ", "@news.example.com"),
     ],
 )
 def test_rules_are_normalized(text: str, rule: str) -> None:
@@ -70,12 +76,65 @@ def test_rules_are_normalized(text: str, rule: str) -> None:
         "alex@example.com\x00",
         "alex​@example.com",
         "a@" + "b" * EXCLUSION_MAX_CHARS,
+        "a@" + "b" * EXCLUSION_MAX_CHARS + ".example.com",
+        # Forms that were once saved and could never match a sender.
+        "alice@example.com,",
+        "<alice@example.com>",
+        "mailto:alice@example.com",
+        '"alice@example.com"',
+        "@.com",
+        # A domain needs two or more labels of letters, digits and hyphens, none empty.
+        "a@b",
+        "alice@example..com",
+        "alice@example.com.",
+        "@example_site.com",
+        "alice@exa mple.com",
+        # Wildcards anywhere else, and the other characters a local part can't hold.
+        "*",
+        "*@",
+        "*.",
+        "*.com",
+        "*@*.example.com",
+        "@*.example.com",
+        "alice@*.example.com",
+        "(alice)@example.com",
+        "[alice]@example.com",
+        "alice;bob@example.com",
+        "alice\\bob@example.com",
     ],
 )
 def test_invalid_rules_never_echo_the_text(text: str) -> None:
     with pytest.raises(ValueError) as caught:
         normalize_exclusion(text)
     assert str(caught.value) == "A sender rule must be an address or @domain."
+
+
+@pytest.mark.parametrize("text", ["*@example.com", "*.example.com"])
+def test_a_wildcard_rule_matches_the_domain_and_its_subdomains(text: str) -> None:
+    rules = (normalize_exclusion(text),)
+    assert sender_excluded("Alice@Example.com", rules)
+    assert sender_excluded("news@lists.example.com", rules)
+    assert not sender_excluded("alice@notexample.com", rules)
+
+
+@pytest.mark.parametrize(
+    ("text", "sender"),
+    [
+        ("alex@example.com", "Alex@Example.com"),
+        ("example.com", "anyone@example.com"),
+        ("@news.example.com", "digest@weekly.news.example.com"),
+        ("first.last+tag@mail.example.co.uk", "first.last+tag@mail.example.co.uk"),
+        ("@bücher.example", "info@BÜCHER.example"),
+    ],
+)
+def test_every_accepted_rule_can_match_a_sender(text: str, sender: str) -> None:
+    assert sender_excluded(sender, (normalize_exclusion(text),))
+
+
+def test_a_saved_rule_that_no_longer_validates_makes_the_preferences_unreadable() -> None:
+    with pytest.raises(ValidationError) as caught:
+        OwnerPreferences(revision=3, excluded_senders=("@example.com", "<alice@example.com>"))
+    assert "alice" not in str(caught.value)
 
 
 @pytest.mark.parametrize(

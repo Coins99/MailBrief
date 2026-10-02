@@ -40,6 +40,8 @@ AI_LIMIT_FIELDS: Final = (
 )
 
 _REGION_ZONE: Final = re.compile(r"[A-Za-z]+(/[A-Za-z0-9_+-]+)+")
+# Characters no local part of a sender rule may hold: they come from pasted headers and lists.
+_LOCAL_FORBIDDEN: Final = frozenset('<>()[],;:"\\')
 _INVALID_RULE: Final = "A sender rule must be an address or @domain."
 _INVALID_ZONE: Final = "The time zone must be UTC or a region such as America/Toronto."
 _INVALID_INTERVAL: Final = "Refresh every 60, 120 or 240 minutes, or never."
@@ -66,21 +68,41 @@ def is_region_zone(name: str) -> bool:
     return True
 
 
+def _is_domain(domain: str) -> bool:
+    """Two or more dot-separated labels of letters, digits and hyphens, none of them empty."""
+    labels = domain.split(".")
+    return len(labels) >= 2 and all(
+        label and all(character.isalnum() or character == "-" for character in label)
+        for label in labels
+    )
+
+
 def normalize_exclusion(text: str) -> str:
     """A sender rule in its stored form: an exact address, or ``@domain``.
 
-    Text without "@" is a domain. Rules are case-folded. Raises ValueError with a static
-    message that never echoes the text.
+    Text without "@" is a domain, and the wildcard forms ``*@domain`` and ``*.domain`` mean
+    ``@domain``, which already covers the domain and its subdomains. Rules are case-folded.
+
+    Every rule accepted can match a sender. An address has exactly one "@", a domain as
+    _is_domain describes, and a local part with no whitespace, no control or format
+    characters and none of ``_LOCAL_FORBIDDEN``, so a pasted ``<address>``, a ``mailto:``
+    link, quotes or a trailing comma are refused rather than saved as a rule that never
+    matches. Raises ValueError with a static message that never echoes the text.
     """
     rule = text.strip().casefold()
-    if "@" not in rule:
-        rule = "@" + rule
-    if len(rule) > EXCLUSION_MAX_CHARS or any(
-        character.isspace() or unicodedata.category(character).startswith("C") for character in rule
-    ):
+    if rule.startswith("*@"):
+        rule = rule[1:]
+    elif "@" not in rule:
+        rule = "@" + rule.removeprefix("*.")
+    if len(rule) > EXCLUSION_MAX_CHARS:
         raise ValueError(_INVALID_RULE)
     local, _, domain = rule.partition("@")
-    if "@" in domain or not domain or (not local and "." not in domain):
+    if not _is_domain(domain) or any(
+        character.isspace()
+        or unicodedata.category(character).startswith("C")
+        or character in _LOCAL_FORBIDDEN
+        for character in local
+    ):
         raise ValueError(_INVALID_RULE)
     return rule
 
