@@ -22,11 +22,11 @@ from mailbrief.domain.analysis import (
     deadline_due_at,
 )
 from mailbrief.domain.common import normalize_utc
-from mailbrief.domain.messages import NormalizedMessage, ProviderKind
+from mailbrief.domain.messages import NormalizedMessage, ProviderKind, is_own_message
 from mailbrief.services.actions import ActionConflictError, touch, urgency
 from mailbrief.services.analysis import PlannedMessage
 from mailbrief.services.deadlines import ResolvedDeadline, suggest_target_for
-from mailbrief.services.threads import is_own_message, own_addresses
+from mailbrief.services.threads import own_addresses
 from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.proposals import ProposalRepository, proposal_from_row
 from mailbrief.storage.tables import (

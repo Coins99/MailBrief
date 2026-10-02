@@ -11,13 +11,12 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.analysis import ANALYSIS_SCHEMA_VERSION
-from mailbrief.domain.messages import EmailContact, NormalizedMessage
+from mailbrief.domain.messages import EmailContact, NormalizedMessage, is_own_message
 from mailbrief.services.calendar import DayWindow, day_window, resolve_timezone
 from mailbrief.services.threads import (
     MAX_OUTSIDE_REPLIES,
     MAX_TRACKED_THREADS,
     ThreadService,
-    is_own_message,
     own_addresses,
 )
 from mailbrief.storage.database import Database

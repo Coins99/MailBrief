@@ -12,6 +12,8 @@ from mailbrief.domain.messages import (
     NormalizedMessage,
     RankedMessage,
     RankReason,
+    fold_addresses,
+    is_own_message,
 )
 from mailbrief.domain.preferences import SHORTLIST_LIMIT_MAX
 
@@ -133,7 +135,8 @@ def score_message(
 
     Applies the 10 scoring rules specified in mvp-plan.md Section 9 in strict declaration
     order, then M8's: ``tracked`` maps the threads of open actions to the time after which
-    their messages are new (ADR 0016).
+    their messages are new (ADR 0016). A message the owner sent (is_own_message, with
+    ``user_email`` as the account's addresses) never gets that bonus.
     """
     score = 0
     reasons: list[RankReason] = []
@@ -203,7 +206,11 @@ def score_message(
 
     # 11. A later message in a tracked thread, not sent by the owner (+20)
     since = None if msg.conversation_id is None else tracked.get(msg.conversation_id)
-    if since is not None and aware_received > normalize_utc(since) and not msg.is_sent:
+    if (
+        since is not None
+        and aware_received > normalize_utc(since)
+        and not is_own_message(msg, fold_addresses(target_addresses))
+    ):
         score += 20
         reasons.append(RankReason.TRACKED_THREAD_REPLY)
 

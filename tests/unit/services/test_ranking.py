@@ -319,6 +319,28 @@ def test_only_later_replies_from_others_in_tracked_threads_get_the_bonus(
     )
 
 
+@pytest.mark.parametrize(
+    ("sender", "addresses", "bonus"),
+    [
+        # Sent from an alias, which Gmail doesn't always label SENT: still the owner's.
+        ("Alias@Example.org", (USER_EMAIL, "alias@example.org"), False),
+        ("taylor@example.com", USER_EMAIL, False),
+        (" TAYLOR@example.com", frozenset({USER_EMAIL}), False),
+        ("alias@example.org", USER_EMAIL, True),  # Not one of this account's addresses.
+    ],
+)
+def test_a_reply_from_one_of_the_account_s_addresses_gets_no_tracked_bonus(
+    sender: str, addresses: str | tuple[str, ...] | frozenset[str], bonus: bool
+) -> None:
+    reply = make_baseline_message(
+        conversation_id="deck", sender=EmailContact(name="Taylor", address=sender)
+    )
+
+    _, reasons = score_message(reply, user_email=addresses, now_utc=NOW, tracked={"deck": SINCE})
+
+    assert (RankReason.TRACKED_THREAD_REPLY in reasons) is bonus
+
+
 def test_tracking_leaves_every_other_score_unchanged() -> None:
     messages = [
         make_baseline_message(provider_message_id="high", importance=MessageImportance.HIGH),

@@ -52,13 +52,14 @@ def message(
     sent: bool = False,
     name: str | None = "Sam",
     owner: str = "gmail-1",
+    address: str = "sam@example.com",
 ) -> NormalizedMessage:
     return make_message(
         provider=ProviderKind.GMAIL,
         provider_account_id=owner,
         provider_message_id=key,
         conversation_id=thread,
-        sender=EmailContact(name=name, address="sam@example.com"),
+        sender=EmailContact(name=name, address=address),
         received_at_utc=SOURCE_AT + timedelta(minutes=minutes),
         is_sent=sent,
         is_in_inbox=not sent,
@@ -241,3 +242,35 @@ async def test_a_thread_check_never_changes_the_action(session: AsyncSession) ->
         before.status,
     )
     assert after.thread is not None and after.thread.new_messages == 1
+
+
+async def test_a_reply_from_an_alias_without_the_sent_label_is_the_owner_s(
+    session: AsyncSession,
+) -> None:
+    owner = await AccountRepository(session).upsert(
+        AccountIdentity(
+            provider=ProviderKind.GMAIL,
+            provider_account_id="gmail-1",
+            email_address="gmail-1@example.com",
+            account_addresses=("gmail-1@example.com", "Alias@Example.org"),
+        )
+    )
+    await session.commit()
+    public_id = await action(session, [("source", "deck", 0)])
+    await cache(
+        session,
+        owner,
+        message("source", "deck", 0),
+        message("theirs", "deck", 10),
+        message("alias", "deck", 20, address="alias@example.org"),  # Not labelled SENT.
+        message("primary", "deck", 30, address="GMAIL-1@example.com"),
+    )
+
+    found = await activity(session, public_id)
+
+    assert found == ThreadActivity(
+        new_messages=1,
+        latest_at_utc=SOURCE_AT + timedelta(minutes=10),
+        latest_sender="Sam",
+        owner_replied_at_utc=SOURCE_AT + timedelta(minutes=30),
+    )

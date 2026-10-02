@@ -24,7 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mailbrief.domain.actions import ActionStatus
 from mailbrief.domain.analysis import ANALYSIS_SCHEMA_VERSION, DeadlinePrecision, deadline_due_at
 from mailbrief.domain.common import normalize_utc
-from mailbrief.domain.messages import NormalizedMessage, ProviderKind
+from mailbrief.domain.messages import (
+    NormalizedMessage,
+    ProviderKind,
+    fold_addresses,
+    is_own_message,
+)
 from mailbrief.domain.preferences import sender_excluded
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
@@ -83,14 +88,7 @@ class ThreadCheck:
 
 def own_addresses(account: AccountTable) -> frozenset[str]:
     """The account's own addresses, casefolded: the ones that tell the owner's mail apart."""
-    addresses = (*(account.account_addresses or ()), account.email_address)
-    return frozenset(address.strip().casefold() for address in addresses if address.strip())
-
-
-def is_own_message(message: NormalizedMessage, addresses: frozenset[str]) -> bool:
-    """Whether the owner sent it: Gmail's SENT label, or a sender that is one of the
-    account's addresses (an alias the label may not cover)."""
-    return message.is_sent or message.sender.address.strip().casefold() in addresses
+    return fold_addresses((*(account.account_addresses or ()), account.email_address))
 
 
 def _new_messages(

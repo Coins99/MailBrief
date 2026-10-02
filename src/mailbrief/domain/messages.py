@@ -1,8 +1,9 @@
 """Normalized email and ranking models."""
 
+from collections.abc import Iterable
 from datetime import datetime
 from enum import StrEnum
-from typing import Self
+from typing import Protocol, Self
 
 from pydantic import Field, HttpUrl, field_validator, model_validator
 
@@ -100,6 +101,29 @@ class NormalizedMessage(DomainModel):
     @classmethod
     def normalize_received_at(cls, value: datetime) -> datetime:
         return normalize_utc(value)
+
+
+class SentMessage(Protocol):
+    """What tells the owner's own mail apart: a message, or a cached row's few fields."""
+
+    @property
+    def is_sent(self) -> bool: ...
+
+    @property
+    def sender(self) -> EmailContact: ...
+
+
+def fold_addresses(addresses: Iterable[str]) -> frozenset[str]:
+    """Addresses stripped and casefolded for comparing, without the empty ones."""
+    return frozenset(address.strip().casefold() for address in addresses if address.strip())
+
+
+def is_own_message(message: SentMessage, addresses: frozenset[str]) -> bool:
+    """Whether the owner sent it: Gmail's SENT label, or a sender that is one of the
+    account's addresses (an alias the label may not cover). ``addresses`` are the account's
+    own, as fold_addresses returns them. The one definition ranking, thread activity,
+    outside replies and proposals share."""
+    return message.is_sent or message.sender.address.strip().casefold() in addresses
 
 
 class MessagePage(DomainModel):
