@@ -120,10 +120,11 @@ class GmailClient:
         )
 
     async def message(self, identifier: str) -> dict[str, object] | None:
-        """One message's MIME structure; attachment data stays behind attachment IDs."""
+        """One message's labels and MIME structure; attachment data stays behind attachment
+        IDs."""
         return await self._get(
             MESSAGES_URL + "/" + message_id(identifier),
-            httpx.QueryParams([("format", "full"), ("fields", "id,payload")]),
+            httpx.QueryParams([("format", "full"), ("fields", "id,labelIds,payload")]),
             missing_ok=True,
         )
 

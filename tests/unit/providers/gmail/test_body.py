@@ -258,6 +258,7 @@ async def test_provider_requests_full_format_and_separate_parts(
         body = await provider.fetch_message_body("m1")
     assert (body.text, body.attachments_skipped) == ("From Gmail", 1)
     assert get_message.calls.last.request.url.params["format"] == "full"
+    assert get_message.calls.last.request.url.params["fields"] == "id,labelIds,payload"
     assert get_part.called and not zip_route.called
 
 
@@ -267,6 +268,32 @@ async def test_deleted_message_is_unavailable(respx_mock: respx.MockRouter) -> N
         provider = GmailProvider(FakeSession(), GmailClient(http, FakeSession(), sleep=no_sleep))
         with pytest.raises(MessageUnavailableError):
             await provider.fetch_message_body("gone")
+
+
+@pytest.mark.parametrize("labels", [["TRASH"], ["SPAM"], ["INBOX", "TRASH"]])
+async def test_a_message_in_trash_or_spam_is_unavailable_and_never_read(
+    respx_mock: respx.MockRouter, labels: list[str]
+) -> None:
+    raw = message(part("multipart/mixed", parts=[part("text/html", attachment_id="p1", size=20)]))
+    raw["labelIds"] = labels
+    respx_mock.get(MESSAGES_URL + "/m1").respond(json=raw)
+    get_part = respx_mock.get(MESSAGES_URL + "/m1/attachments/p1").respond(
+        json={"size": 20, "data": encode("<p>Thrown away</p>")}
+    )
+    async with httpx.AsyncClient() as http:
+        provider = GmailProvider(FakeSession(), GmailClient(http, FakeSession(), sleep=no_sleep))
+        with pytest.raises(MessageUnavailableError):
+            await provider.fetch_message_body("m1")
+    assert not get_part.called
+
+
+async def test_other_labels_leave_a_message_readable(respx_mock: respx.MockRouter) -> None:
+    raw = message(part("text/plain", "Still here"))
+    raw["labelIds"] = ["INBOX", "UNREAD"]
+    respx_mock.get(MESSAGES_URL + "/m1").respond(json=raw)
+    async with httpx.AsyncClient() as http:
+        provider = GmailProvider(FakeSession(), GmailClient(http, FakeSession(), sleep=no_sleep))
+        assert (await provider.fetch_message_body("m1")).text == "Still here"
 
 
 @pytest.mark.parametrize("mime", ["image/png", "text/calendar"])

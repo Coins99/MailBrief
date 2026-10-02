@@ -11,7 +11,7 @@ from mailbrief.ports.errors import (
     MessageUnavailableError,
     ProviderResponseError,
 )
-from mailbrief.ports.threads import ThreadReader
+from mailbrief.ports.threads import ThreadReader, ThreadSnapshot
 from mailbrief.providers.gmail.client import MAX_RESPONSE_BYTES, THREADS_URL, GmailClient
 from mailbrief.providers.gmail.mapper import map_metadata
 from mailbrief.providers.gmail.provider import GmailProvider
@@ -104,8 +104,10 @@ async def test_a_thread_skips_drafts_trash_spam_strays_and_broken_items(
     async with httpx.AsyncClient() as http:
         provider = await connected(http)
         assert isinstance(provider, ThreadReader)
-        messages = await provider.fetch_thread(THREAD)
+        snapshot = await provider.fetch_thread(THREAD)
 
+    messages = snapshot.messages
+    assert snapshot.discarded_ids == {"trash", "spam"}  # Never the draft or the stray.
     assert [message.provider_message_id for message in messages] == ["first", "mine", "reply"]
     assert [message.is_sent for message in messages] == [False, True, False]
     assert [message.is_in_inbox for message in messages] == [False, False, True]
@@ -132,7 +134,7 @@ async def test_a_gone_or_invalid_thread_raises(
 async def test_a_thread_without_messages_is_empty(respx_mock: respx.MockRouter) -> None:
     respx_mock.get(f"{THREADS_URL}/{THREAD}").respond(json={"id": THREAD})
     async with httpx.AsyncClient() as http:
-        assert await (await connected(http)).fetch_thread(THREAD) == ()
+        assert await (await connected(http)).fetch_thread(THREAD) == ThreadSnapshot()
 
 
 async def test_reading_a_thread_needs_a_connection(respx_mock: respx.MockRouter) -> None:

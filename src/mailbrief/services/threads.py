@@ -33,7 +33,7 @@ from mailbrief.ports.errors import (
     ProviderPermissionError,
     ProviderRateLimitError,
 )
-from mailbrief.ports.threads import ThreadReader
+from mailbrief.ports.threads import ThreadReader, ThreadSnapshot
 from mailbrief.services.actions import urgency
 from mailbrief.services.calendar import DayWindow
 from mailbrief.services.sync import sanitize_error_code
@@ -66,7 +66,8 @@ class TrackedThread:
 
 @dataclass(frozen=True, slots=True)
 class ThreadCheck:
-    """What one check did: threads tracked, read, failed or gone, and messages stored.
+    """What one check did: threads tracked, read, failed or gone, messages stored, and
+    cached messages removed because Gmail has them in Trash or Spam.
 
     ``stopped_code`` names why the check stopped early, if it did.
     """
@@ -76,6 +77,7 @@ class ThreadCheck:
     failed: int = 0
     gone: int = 0
     stored: int = 0
+    removed: int = 0
     stopped_code: str | None = None
 
 
@@ -249,6 +251,10 @@ class ThreadService:
         """Read the tracked threads, at most THREAD_CONCURRENCY at a time, and cache their
         later messages, committing per thread.
 
+        A cached message the thread now has in Trash or Spam is deleted from this account's
+        cache, with its analyses, suggestions and brief items; action sources, draft sources
+        and proposals keep their snapshots. It is cached again if it leaves Trash or Spam.
+
         A gone thread is counted and skipped, and another provider error counts as failed.
         Sign-in, permission and rate-limit errors stop the check; what was stored stays.
         A cancel stops before the next read. Pending reads never outlive the call.
@@ -259,7 +265,7 @@ class ThreadService:
 
         async def read(
             thread: TrackedThread,
-        ) -> tuple[TrackedThread, tuple[NormalizedMessage, ...] | ProviderError | None]:
+        ) -> tuple[TrackedThread, ThreadSnapshot | ProviderError | None]:
             async with slots:
                 if stop.is_set() or (cancel is not None and cancel.is_set()):
                     return thread, None
@@ -270,7 +276,7 @@ class ThreadService:
                         stop.set()  # Reads still waiting for a slot are skipped at once.
                     return thread, exc
 
-        checked = failed = gone = stored = 0
+        checked = failed = gone = stored = removed = 0
         stopped: str | None = None
         tasks = [asyncio.create_task(read(thread)) for thread in tracked]
         try:
@@ -287,23 +293,32 @@ class ThreadService:
                 elif isinstance(result, ProviderError):
                     failed += 1
                 else:
-                    later = _new_messages(result, thread.since_utc)
+                    later = _new_messages(result.messages, thread.since_utc)
                     if later:
                         await self._messages.upsert_messages(account.id, later)
+                    discarded = await self._messages.get_by_provider_ids(
+                        account.id, result.discarded_ids
+                    )
+                    for row in discarded:
+                        await self._session.delete(row)
+                    if later or discarded:
                         await self._session.commit()
                     stored += len(later)
+                    removed += len(discarded)
                     checked += 1
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         logger.info(
-            "Thread check: %d tracked, %d checked, %d failed, %d gone, %d messages stored%s",
+            "Thread check: %d tracked, %d checked, %d failed, %d gone, %d messages stored, "
+            "%d removed%s",
             len(tracked),
             checked,
             failed,
             gone,
             stored,
+            removed,
             f", stopped: {stopped}" if stopped else "",
         )
         return ThreadCheck(
@@ -312,5 +327,6 @@ class ThreadService:
             failed=failed,
             gone=gone,
             stored=stored,
+            removed=removed,
             stopped_code=stopped,
         )

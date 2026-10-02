@@ -17,6 +17,7 @@ from mailbrief.domain.messages import (
     RankedMessage,
     RankReason,
 )
+from mailbrief.ports.threads import ThreadSnapshot
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.calendar import DayWindow
 from mailbrief.services.ranking import ShortlistReviewError
@@ -384,3 +385,26 @@ async def test_the_application_drops_blocked_senders_even_if_the_thread_service_
 
     assert "noisy" not in seen.candidates and "noisy" not in keys(shortlist)
     assert result.outside_ids == {"archived"}
+
+
+async def test_a_reply_trashed_after_it_was_cached_is_never_offered_or_ranked(
+    session: AsyncSession,
+) -> None:
+    """The thread check runs before outside replies are looked for, so the run that learns a
+    cached reply is in Trash or Spam already leaves it out."""
+
+    class Reader:
+        async def fetch_thread(self, provider_thread_id: str) -> ThreadSnapshot:
+            return ThreadSnapshot(discarded_ids=frozenset({"archived"}))
+
+    service, account = await scene(session, cached=[ARCHIVED, YESTERDAY])
+    service._threads = ThreadService(session, Reader())
+
+    result, shortlist = await service.prepare_daily_shortlist(tz_key=ZONE, now_utc=NOW)
+
+    assert set(keys(shortlist)) == {"quiet", "yesterday"}
+    assert result.outside_ids == {"yesterday"}
+    assert "archived" not in result.shortlisted_message_keys
+    assert (
+        await MessageRepository(session).get_by_provider_message_id(account.id, "archived") is None
+    )

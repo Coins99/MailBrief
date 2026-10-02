@@ -18,7 +18,9 @@ from mailbrief.ports.errors import (
     ProviderRateLimitError,
     ProviderResponseError,
 )
+from mailbrief.ports.threads import ThreadSnapshot
 from mailbrief.services import threads as threads_module
+from mailbrief.services.calendar import DayWindow
 from mailbrief.services.threads import (
     MAX_THREAD_MESSAGES,
     MAX_TRACKED_THREADS,
@@ -26,7 +28,7 @@ from mailbrief.services.threads import (
     ThreadService,
 )
 from mailbrief.storage.database import Database
-from mailbrief.storage.repositories import AccountRepository
+from mailbrief.storage.repositories import AccountRepository, MessageRepository
 from mailbrief.storage.tables import AccountTable, ActionSourceTable, ActionTable, MessageTable
 from tests.factories import make_message
 
@@ -119,12 +121,17 @@ def reply(
 
 
 class FakeReader:
-    """Serves threads from a dict; an exception is raised. Records reads and body fetches."""
+    """Serves threads from a dict; an exception is raised. Records reads and body fetches.
+
+    ``discarded`` names, per thread, the messages Gmail has in Trash or Spam: they are left
+    out of the thread's messages and reported as discarded.
+    """
 
     def __init__(
         self, threads: dict[str, tuple[NormalizedMessage, ...] | Exception] | None = None
     ) -> None:
         self.threads = threads or {}
+        self.discarded: dict[str, set[str]] = {}
         self.reads: list[str] = []
         self.bodies: list[str] = []
         self.in_flight = 0
@@ -132,7 +139,7 @@ class FakeReader:
         self.gate: asyncio.Event | None = None
         self.on_read: object = None
 
-    async def fetch_thread(self, provider_thread_id: str) -> tuple[NormalizedMessage, ...]:
+    async def fetch_thread(self, provider_thread_id: str) -> ThreadSnapshot:
         self.reads.append(provider_thread_id)
         self.in_flight += 1
         self.most_in_flight = max(self.most_in_flight, self.in_flight)
@@ -144,7 +151,13 @@ class FakeReader:
             found = self.threads.get(provider_thread_id, ())
             if isinstance(found, Exception):
                 raise found
-            return found
+            discarded = frozenset(self.discarded.get(provider_thread_id, ()))
+            return ThreadSnapshot(
+                messages=tuple(
+                    message for message in found if message.provider_message_id not in discarded
+                ),
+                discarded_ids=discarded,
+            )
         finally:
             self.in_flight -= 1
 
@@ -367,3 +380,84 @@ async def test_no_tracked_threads_reads_nothing(session: AsyncSession) -> None:
     result = await ThreadService(session, reader).check(account)
     assert result.tracked == 0 and reader.reads == []
     assert await session.scalar(select(func.count()).select_from(MessageTable)) == 0
+
+
+WINDOW = DayWindow(
+    local_date=date(2026, 9, 29),
+    start_utc=datetime(2026, 9, 29, 4, tzinfo=UTC),
+    end_utc=datetime(2026, 9, 30, 4, tzinfo=UTC),
+    timezone_name="America/Toronto",
+)
+
+
+@pytest.mark.parametrize("label", ["TRASH", "SPAM"])
+async def test_a_cached_reply_gmail_discards_is_forgotten_and_comes_back_if_restored(
+    session: AsyncSession, label: str
+) -> None:
+    account = await gmail(session)
+    other = await gmail(session, "gmail-2")
+    tracking = await action(session, {"deck": START})
+    thrown = reply("thrown", "deck", START + timedelta(hours=1), inbox=False)
+    kept = reply("kept", "deck", START + timedelta(hours=2), inbox=False)
+    reader = FakeReader({"deck": (thrown, kept)})
+    service = ThreadService(session, reader)
+    first = await service.check(account)
+    assert (first.stored, first.removed) == (2, 0)
+    # Another account's message with the same ID, and an action source that points at the
+    # cached reply: neither is touched when the reply is forgotten.
+    await MessageRepository(session).upsert_messages(
+        other.id, [thrown.model_copy(update={"provider_account_id": "gmail-2"})]
+    )
+    row = await MessageRepository(session).get_by_provider_message_id(account.id, "thrown")
+    assert row is not None
+    source = ActionSourceTable(
+        action_id=tracking.id,
+        message_id=row.id,
+        provider_message_id="thrown",
+        subject="Deck",
+        sender_address="sam@example.com",
+        web_link="https://mail.google.com/mail/u/#all/deck",
+        received_at_utc=START - timedelta(hours=1),
+        provider="gmail",
+        provider_account_id=ACCOUNT_ID,
+        provider_thread_id="deck",
+    )
+    session.add(source)
+    await session.commit()
+    offered = await service.outside_replies(account, WINDOW)
+    assert [message.provider_message_id for message in offered] == ["kept", "thrown"]
+
+    reader.discarded["deck"] = {"thrown"}  # The owner trashes it, or Gmail calls it spam.
+    second = await service.check(account)
+
+    assert (second.checked, second.removed) == (1, 1)
+    offered = await service.outside_replies(account, WINDOW)
+    assert [message.provider_message_id for message in offered] == ["kept"]
+    owners = await session.scalars(
+        select(MessageTable.account_id).where(MessageTable.provider_message_id == "thrown")
+    )
+    assert list(owners) == [other.id]
+    await session.refresh(source)
+    assert source.message_id is None and source.provider_message_id == "thrown"
+    assert reader.bodies == []
+
+    reader.discarded["deck"] = set()  # Taken back out.
+    third = await service.check(account)
+
+    assert (third.stored, third.removed) == (2, 0)
+    offered = await service.outside_replies(account, WINDOW)
+    assert [message.provider_message_id for message in offered] == ["kept", "thrown"]
+
+
+async def test_a_discarded_message_that_was_never_cached_removes_nothing(
+    session: AsyncSession,
+) -> None:
+    account = await gmail(session)
+    await action(session, {"deck": START})
+    reader = FakeReader({"deck": (reply("spam", "deck", START + timedelta(hours=1)),)})
+    reader.discarded["deck"] = {"spam"}
+
+    result = await ThreadService(session, reader).check(account)
+
+    assert (result.checked, result.stored, result.removed) == (1, 0, 0)
+    assert await cached(session) == {}

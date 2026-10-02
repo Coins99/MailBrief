@@ -24,7 +24,11 @@ from mailbrief.domain.messages import (
     ProviderKind,
     RankedMessage,
 )
-from mailbrief.ports.errors import AIAuthenticationError, ProviderPermissionError
+from mailbrief.ports.errors import (
+    AIAuthenticationError,
+    MessageUnavailableError,
+    ProviderPermissionError,
+)
 from mailbrief.services.analysis import AnalysisPlan, AnalysisRun, AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
@@ -710,6 +714,24 @@ async def test_review_filters_before_body_retrieval(session: AsyncSession) -> No
     assert result.sync.shortlisted_message_keys == ("m1",)
     assert result.coverage is not None and result.coverage.shortlisted == 1
     assert provider.calls == 1
+
+
+async def test_a_body_gmail_has_in_trash_or_spam_causes_no_ai_request(
+    session: AsyncSession,
+) -> None:
+    provider = FakeAIProvider()
+    service = build(session, provider, RecordingGate(True))
+
+    class Discarded:
+        async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+            # What the Gmail adapter raises for a message labelled TRASH or SPAM.
+            raise MessageUnavailableError("The Gmail message is in Trash or Spam.")
+
+    service._bodies = BodyService(Discarded())
+    result = await service.generate(tz_key=ZONE, shortlist_gate=ReviewGate(("m1",)))
+    assert provider.calls == 0
+    assert result.coverage is not None
+    assert (result.coverage.analyzed, result.coverage.skipped) == (0, 1)
 
 
 @pytest.mark.parametrize("selection", [None, (), ("foreign",), ("m0", "m0")])
