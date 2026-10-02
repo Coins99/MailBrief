@@ -115,6 +115,9 @@ Groq and the desktop. Run them in order; the exit test comes first.
 - At most 3 outside replies join a run; the rest wait for later runs.
 - Proposals are for open actions only, and an email proposes to at most 3 actions.
 - Automatic runs happen only while the desktop is open, and never for past days.
+- Automatic analysis is allowed for one account at a time, the connected one.
+- A cached reply you trash is forgotten when its thread is next checked, so only while its
+  action is open and among the 25 threads read; its body is never read meanwhile.
 - A day has one brief, carried forward through the day: a later run keeps the messages the
   earlier brief had unless they were archived, newly blocked or declined.
 - An automatic run that can't refresh a carried message (its permission can't cover those
@@ -141,7 +144,8 @@ diagnostic CLI use the same ones, and a backup of the database includes them:
 - **Messages per brief** (1 to 10, default 10): the most messages the automatic selection
   picks and the most you can select in review.
 - **Excluded senders:** an exact address, or `@domain`, which also covers its subdomains
-  (`@example.com` covers `news.example.com` but not `notexample.com`). A message from an
+  (`@example.com` covers `news.example.com` but not `notexample.com`). The accepted forms
+  are below. A message from an
   excluded sender is never selected automatically, can't be included in review or with
   `--include`, never has its body downloaded and is never offered to AI drafting. It still
   appears in review, marked as excluded. Briefs saved before a rule keep their analyses;
@@ -193,6 +197,25 @@ actions lists and offline browsing, use the system time zone meanwhile.
   built-in default. A variable set to the default's value still counts as set.
 - `--timezone`, `--tone` and `--length`: the flag, then the saved preference, then the
   default (the system time zone, neutral, medium).
+
+### Sender rule forms
+
+Every rule that is accepted can match a sender; anything else is refused with "A sender
+rule must be an address or @domain." (the Preferences tab names the line).
+
+- `alice@example.com`: that exact address. It has one `@`, and nothing before it that is
+  whitespace, a control character or one of `< > ( ) [ ] , ; : " \`.
+- `@example.com` or `example.com`: that domain and its subdomains.
+- `*@example.com` and `*.example.com`: saved as `@example.com`.
+- A domain has two or more dot-separated labels of letters, digits and hyphens, none empty,
+  so `@.com`, `localhost` and `a@b` are refused.
+- Refused, because they could never match: a trailing comma (`alice@example.com,`),
+  `<alice@example.com>`, `mailto:alice@example.com`, `"alice@example.com"`, and a `*`
+  anywhere else.
+
+A rule saved by an earlier build of this branch that no longer validates makes the
+preferences unreadable, which stops briefs and AI drafting as described above. **Reset to
+defaults** in Settings > Preferences fixes it; then add the rules again in an accepted form.
 
 ### Limits
 
@@ -343,7 +366,11 @@ Part 4 is implemented and awaits live acceptance. The policy is
 
 - Metadata only: the same four headers (From, To, Subject, Message-ID), labels, received
   time and Gmail's preview snippet as the Inbox sync. Never bodies or attachments.
-- Drafts, trash and spam in a thread are ignored.
+- Drafts, trash and spam in a thread are ignored. A reply cached earlier that you then
+  trash, or that Gmail marks as spam, is removed from the cache the next time its thread is
+  checked, with anything analyzed from it; actions, drafts and proposals keep their own
+  snapshots. Taking it out of Trash brings it back on the next check. A body in Trash or
+  Spam is never read, so it is never sent.
 - Your own messages are cached only inside tracked threads. The Sent folder, and every
   other folder or label, is never listed.
 - Cached sent messages never reach a brief: the shortlist reads Inbox messages only, as
@@ -354,7 +381,8 @@ Part 4 is implemented and awaits live acceptance. The policy is
 ### CLI
 
 - `sync` and `brief` print `Tracked threads: C checked, F failed, S messages saved` when any
-  threads were tracked, plus the reason if the check stopped.
+  threads were tracked, plus the reason if the check stopped. The log's counts-only line
+  also says how many cached messages were removed.
 - `actions list` adds `; thread: N new, latest <time> from <sender>` and
   `; you replied <date>`, in your time zone.
 - `actions seen PUBLIC_ID [--database PATH]` marks them seen ("Marked seen." or "Nothing
@@ -382,8 +410,13 @@ Part 4 is implemented and awaits live acceptance. The policy is
 
 ### For developers
 
-- `ports/threads.py`: `ThreadReader.fetch_thread(thread_id)`. `GmailProvider` implements it
-  with `threads.get`, `format=metadata` and a field mask; `providers/microsoft/` has none.
+- `ports/threads.py`: `ThreadReader.fetch_thread(thread_id)` returns a `ThreadSnapshot`:
+  the thread's messages and `discarded_ids`, the IDs labelled TRASH or SPAM. `GmailProvider`
+  implements it with `threads.get`, `format=metadata` and a field mask;
+  `providers/microsoft/` has none. `ThreadService.check` deletes this account's cached rows
+  in `discarded_ids` and counts them in `ThreadCheck.removed`.
+- `is_own_message` and `fold_addresses` live in `domain/messages.py`; ranking, thread
+  activity (`storage/actions.py`), outside replies and proposals share them.
 - `services/threads.py`: `ThreadService.tracked()` and `check()`, with
   `MAX_TRACKED_THREADS`, `MAX_THREAD_MESSAGES` and `THREAD_CONCURRENCY`. It commits per
   thread and never writes to actions.
@@ -693,8 +726,9 @@ cache, so they can be analyzed and propose updates.
 
 - `services/threads.py`: `ThreadService.outside_replies(account, window, *, limit,
   excluded_senders, tracked)` runs two queries however much there is (one when the caller
-  passes `tracked`); `MAX_OUTSIDE_REPLIES`; `own_addresses()` and `is_own_message()`, the
-  one rule for "the owner's own", shared with `ProposalService.derive`.
+  passes `tracked`); `MAX_OUTSIDE_REPLIES`; `own_addresses()`, and `is_own_message()` from
+  `domain/messages.py`, the one rule for "the owner's own", shared with
+  `ProposalService.derive`, ranking and thread activity.
 - `services/application.py` `prepare_daily_shortlist` adds them for today's window when a
   thread service is composed, persists their ranks, drops blocked senders again, and sets
   `SyncResult.outside_ids` to the selected ones. `ShortlistGate.review(...,
@@ -740,6 +774,11 @@ and saves no brief. Reviewing and analyzing stay a click away (Sync and review).
   `ai-consent auto-send N`) lets automatic runs send up to N messages (1–10) without asking.
   It is set on your active Groq consent, shows the same disclosure as the first-use consent
   and says that the runs will not ask again. It needs that consent to exist.
+- The permission belongs to the connected Gmail account, the one whose mail a run would
+  send, and at most one account holds one: granting it to an account clears any other
+  account's. With no Gmail connected, the line reads "Connect Gmail to change automatic
+  analysis." and **Change…** is off.
+- Off is off for every account: choosing 0 clears the permission wherever it was.
 - Revoking consent clears it, and a new disclosure version starts without it.
 - A run sends at most N messages. The lowest-ranked messages over the cap are **deferred**:
   never sent, never cached, counted in the brief's coverage line ("· N deferred") and listed
@@ -760,17 +799,28 @@ automatically, is remembered and never auto-selected again (automatic runs, revi
 CLI alike), and the next review lists it unchecked with "you left this out earlier". Checking
 it, or `--include`, forgets the decline. Being pushed out by a limit is not a decline.
 
+An uncheck is remembered once you confirm the review, even if you then cancel or decline the
+consent question and nothing is sent. That is deliberate: a decline can only make automatic
+runs send less.
+
 ### CLI
 
 - `brief --automatic` runs one automatic run: no prompts, today only, and it rejects
-  `--date`, `--include`, `--exclude` and `--yes`. Without permission it prints "N messages are
+  `--date`, `--include`, `--exclude` and `--yes`. It implies `--silent-only`: it never opens
+  a browser, and with an expired Gmail session it prints the sign-in message and exits 2.
+  Without permission it prints "N messages are
   ready to review; automatic analysis is off."; with it, the usual result plus "N deferred to
   your next review." when messages wait. A run that needs your review prints that sentence. If
   it only stopped over its permission, it exits 0; if a carried message couldn't be read, or
   its analysis failed, it also prints the usual result lines and the reason, and exits 4.
 - `ai-consent auto-send N` shows the disclosure and asks for a typed "yes" (`--yes` skips the
-  question, not the disclosure). `auto-send 0` turns it off without asking, and works even with no consent. `ai-consent
-  status` and `preferences show` show it, and `preferences show` the refresh settings.
+  question, not the disclosure). The account is the one in the stored Gmail credential, read
+  without connecting; with none stored it exits 3 with "Connect Gmail first.". `auto-send 0`
+  turns it off for every account without asking, and works even with no connection and no
+  consent.
+- `ai-consent status` lists each account's consent and permission, then "Automatic
+  analysis: …" for the connected account, which is what the next run reads; `preferences
+  show` prints that same line, and the refresh settings.
 - `sync --show-metadata` marks declined messages.
 
 ### Limits
@@ -800,9 +850,10 @@ it, or `--include`, forgets the decline. Being pushed out by a limit is not a de
   `note_run`, `retry_soon`); `ui/main_window.py` `_refresh_due`, `_automatic_refresh`,
   `_automatic_finished`; `ui/auto_send_view.py` `AutoSendDialog`.
 - `services/brief.py` `generate(automatic=True)`, `permission_preview`,
-  `permission_sentence`; `services/consent.py` `auto_send_permission`, `set_auto_send`;
+  `permission_sentence`; `services/consent.py` `auto_send_permission`, `set_auto_send`
+  (both take the connected account's address);
   `AnalysisPlan.defer_after`; `AnalysisOutcome.DEFERRED`; `BriefStatus.READY_FOR_REVIEW`.
 - `MessageRepository.set_review_declined` and `declined_among`;
-  `ConsentRepository.set_auto_send`; `review_shortlist(declined=...)`; `ShortlistGate.review`
-  takes `outside_ids` and `declined_ids`.
+  `ConsentRepository.set_auto_send` and `with_auto_send`; `review_shortlist(declined=...)`;
+  `ShortlistGate.review` takes `outside_ids` and `declined_ids`.
 - `ui/diagnostics.py` `log_automatic_run` logs counts only.

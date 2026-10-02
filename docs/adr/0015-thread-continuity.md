@@ -21,6 +21,13 @@ what MailBrief reads, and without letting a reply change the owner's actions.
 - **How it's read:** Gmail `threads.get` with `format=metadata`, the same four headers
   (From, To, Subject, Message-ID), labels, received time and snippet as the Inbox sync.
   Never bodies or attachments. Messages labelled DRAFT, TRASH or SPAM are ignored.
+- **Trash and Spam are forgotten** (added in the M8 review fixes): a reply cached earlier
+  and since moved to Trash or marked spam would otherwise look archived. When a thread check
+  sees a message labelled TRASH or SPAM, its cached row in that account is deleted, with its
+  analyses, suggestions and brief items; action sources, draft sources and proposals keep
+  their snapshots. Taking it back out caches it again on the next check. Independently, a
+  body labelled TRASH or SPAM is never read: the body download asks for the labels, treats
+  such a message as unavailable, and so it is skipped and never sent.
 - **What's stored:** only messages received after the action's latest source in that
   thread, the newest 20 per thread, as ordinary cached metadata: Inbox membership from their
   labels, and "sent" from the SENT label. The owner's own messages are cached only inside
@@ -68,3 +75,10 @@ Added with the desktop display (M8 Part 5).
   (mail to yourself, for example).
 - Sources accepted before 0010 whose email had already left local mail aren't tracked.
 - The desktop shows thread activity from Part 5; Part 4 shows it in the CLI.
+- A cached reply the owner trashes is forgotten only when its thread is next checked: the
+  thread must still be tracked and among the 25 read. Until then the body download's own
+  refusal keeps it from being read or sent.
+- "The owner's own message" has one definition, `is_own_message` in `domain/messages.py`:
+  Gmail's SENT label, or a sender that is one of the account's addresses. Thread activity,
+  ranking's tracked-thread bonus, outside replies and proposals all use it, so a reply sent
+  from an alias without the SENT label counts as the owner's everywhere.

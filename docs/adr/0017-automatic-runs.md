@@ -29,6 +29,8 @@ at any moment.
   - A run covers today only. Past days are never briefed automatically; catching up stays
     the owner's explicit choice (Briefs… in the desktop, or `brief --date`).
   - The CLI runs one automatic run on request (`brief --automatic`) and has no scheduler.
+    `--automatic` implies `--silent-only`: an automatic run never opens a browser, and with
+    an expired session it fails with the usual sign-in message.
 - **What.** An automatic run uses the automatic selection with no review: the top messages
   by rank, as many as the owner's messages-per-brief limit allows, never from an excluded
   sender and never one the owner declined (below). It syncs metadata, checks the threads of
@@ -40,6 +42,13 @@ at any moment.
   - **Permission** is an explicit grant, separate from consent itself, recorded on the
     active consent: the provider, the account and the disclosure version. It is a number of
     messages from 1 to 10, or 0 for none.
+  - The permission belongs to the **connected account**, the one a run reads its consent
+    for, and at most one account holds one. Granting it needs that account's active consent
+    and clears every other account's permission. The desktop takes the account from the
+    Gmail connection, and with none connected the permission can't be changed there; the
+    CLI reads it from the stored Gmail credential, without connecting.
+  - **Off is off for every account:** setting 0 clears every account's permission and needs
+    neither a connection nor a consent.
   - With permission, an automatic run may send up to that many messages without asking, and
     never more than messages per brief. Messages already analyzed and cached cost nothing,
     so only messages that would be sent count toward the cap.
@@ -64,6 +73,9 @@ at any moment.
   desktop review, or with `--exclude`), that is remembered on the cached message.
   - The automatic selection then skips it, in automatic runs and as a review's default,
     until the owner selects it again (checking it in a review, or `--include`).
+  - An uncheck is remembered as soon as the review is confirmed, even if the owner then
+    cancels or declines consent and nothing is sent: a decline can only make automatic runs
+    send less.
   - Manual reviews still list it, unchecked and marked "you left this out earlier".
   - A declined reply from outside today's Inbox (ADR 0016) fills one of the three places for
     such replies only when no undeclined one wants it, so declined replies never starve new

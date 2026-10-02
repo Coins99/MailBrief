@@ -62,6 +62,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
   analysis, deadlines, digest and brief; for M6: actions; for M7: drafts and drafting
   (AI drafting: parts, preview, consent, validation).
+- `src/mailbrief/domain/messages.py`: normalized messages, and `is_own_message`, the one
+  definition of the owner's own message, shared by ranking, thread activity, outside
+  replies and proposals.
 - `src/mailbrief/domain/drafts.py`: draft kinds, limits, placeholders and exports;
   `domain/drafting.py`: what AI drafting sends and gets back; `domain/preferences.py`: the
   owner's preferences, time zone rule and sender rules.
@@ -70,8 +73,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/services/history.py`: saved briefs by day, missed days, the catch-up date
   rule (`check_brief_date`) and each brief's `coverage_line`.
 - `src/mailbrief/services/threads.py`: checks the threads of open actions and caches their
-  later messages' metadata (ADR 0015), and finds the cached replies today's Inbox sync can't
-  see (`outside_replies`, ADR 0016).
+  later messages' metadata, forgetting those Gmail has in Trash or Spam (ADR 0015), and
+  finds the cached replies today's Inbox sync can't see (`outside_replies`, ADR 0016).
 - `src/mailbrief/services/proposals.py`: derives follow-up proposals from a saved brief's
   analyses, and applies, undoes, dismisses and restores them (ADR 0016).
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
@@ -138,9 +141,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Owner preferences are one revisioned SQLite row (ADR 0014); every save needs the revision
   the caller saw, and the row changes only through ORM objects. Sender exclusions are
   enforced by services, never only the UI: a message from an excluded sender is never
-  selected, included, downloaded, analyzed or offered to AI drafting. Sender rules are the
-  owner's text: show them to the owner, but log only their count. Unreadable preferences
-  fail closed (`PreferencesUnavailableError`) wherever data could be sent; display-only
+  selected, included, downloaded, analyzed or offered to AI drafting. Every accepted sender
+  rule can match a sender (`normalize_exclusion`); anything else is refused. Sender rules
+  are the owner's text: show them to the owner, but log only their count. Unreadable
+  preferences fail closed (`PreferencesUnavailableError`) wherever data could be sent; display-only
   views fall back to the system time zone.
 - Precedence: for AI limits, an explicit `MAILBRIEF_*` variable, then the saved
   preference, then the default; only `AI_LIMIT_FIELDS` are read from preferences, and only
@@ -155,8 +159,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   live, open actions of the connected account: at most 25 threads and the newest 20
   messages per thread after the action's latest source, during today's sync or brief only.
   Drafts, trash and spam are ignored, and no folder or label (the Sent folder included) is
-  ever listed. A reply never changes an action: activity is derived, and only the owner's
-  `mark_thread_seen` moves the watermark. A failed or stopped check never fails the sync.
+  ever listed. A cached message a thread check sees in Trash or Spam is deleted from that
+  account's cache, and a body labelled TRASH or SPAM is never read. A reply never changes
+  an action: activity is derived, and only the owner's `mark_thread_seen` moves the
+  watermark. A failed or stopped check never fails the sync.
 - Follow-up proposals are the only AI-derived path to change an action, and only the owner
   applies them; applying never touches title, notes, steps or ownership, and never moves a
   target date the owner changed. Deriving proposals never changes an action, applying and
@@ -180,9 +186,12 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   listed as an outside reply keeps that status. "Ready" counts only new messages.
 - Automatic runs (ADR 0017) send nothing unless the active consent carries an explicit
   permission (`auto_send_limit`, 1–10, cleared by revoking); with none they only sync, check
-  threads, rank and count. They brief today only, run only while the desktop is open, coalesce,
-  never open panels, never download bodies without permission, and defer messages over the
-  cap. A message the owner left out (an unchecked pick or `--exclude`) is never auto-selected.
+  threads, rank and count. The permission belongs to the connected account and at most one
+  account holds one: granting clears every other account's, and 0 clears them all.
+  `brief --automatic` implies `--silent-only`. They brief today only, run only while the
+  desktop is open, coalesce, never open panels, never download bodies without permission,
+  and defer messages over the cap. A message the owner left out (an unchecked pick or
+  `--exclude`) is never auto-selected.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
