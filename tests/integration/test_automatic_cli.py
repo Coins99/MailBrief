@@ -5,15 +5,23 @@ Gmail and Groq run over respx through the brief tests' synthetic mailbox, whose 
 is a1; nothing here may prompt unless a test has a typed answer ready for it.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
+from mailbrief.config import Settings
 from mailbrief.diagnostics import gmail
 from mailbrief.domain.preferences import PreferencesEdit
-from mailbrief.providers.gmail.client import MESSAGES_URL
+from mailbrief.ports.errors import AuthenticationRequiredError
+from mailbrief.providers.gmail.auth import GmailAuth
+from mailbrief.providers.gmail.cache import GmailCredentialStore
+from mailbrief.providers.gmail.client import MESSAGES_URL, GmailClient
+from mailbrief.providers.gmail.oauth import TOKEN_URL, AuthorizationGrant, DesktopClient
+from mailbrief.providers.gmail.provider import GmailProvider
 from tests.integration.test_brief_cli import (  # noqa: F401 - fixtures used by name
     Mailbox,
     groq_answers,
@@ -682,3 +690,62 @@ def test_a_declined_message_is_left_out_of_automatic_runs(
     output = capsys.readouterr().out
     assert "Nothing new to review." in output  # a1 is in the day's brief; a2 was left out.
     assert route.call_count == sent
+
+
+# Sign-in
+
+
+class CountingAuthorizer:
+    """Stands in for the browser sign-in: counts how often it would have opened."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def authorize(self, client: DesktopClient) -> AuthorizationGrant:
+        self.calls += 1
+        raise AuthenticationRequiredError("The interactive sign-in was abandoned.")
+
+
+@pytest.mark.parametrize(
+    ("options", "opened"),
+    [
+        (("--automatic",), 0),
+        (("--automatic", "--silent-only"), 0),
+        ((), 1),  # An ordinary brief without --silent-only does go to the browser.
+    ],
+)
+def test_an_automatic_run_with_an_expired_session_never_opens_a_browser(
+    tmp_path: Path,
+    gmail_vault: MemoryVault,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    options: tuple[str, ...],
+    opened: int,
+) -> None:
+    browser = CountingAuthorizer()
+
+    @asynccontextmanager
+    async def factory(
+        settings: Settings, *, silent_only: bool = False
+    ) -> AsyncIterator[GmailProvider]:
+        async with httpx.AsyncClient() as http:
+            auth = GmailAuth(
+                DesktopClient("client", "client-secret"), GmailCredentialStore(), http, browser
+            )
+            yield GmailProvider(auth, GmailClient(http, auth), silent_only=silent_only)
+
+    monkeypatch.setattr(gmail, "gmail_provider", factory)
+    monkeypatch.setenv("MAILBRIEF_GROQ_MODEL", "test-model")
+    token = respx_mock.post(TOKEN_URL).respond(400, json={"error": "invalid_grant"})
+    replies(monkeypatch)  # Any prompt fails the test.
+    arguments = ["brief", "--database", str(tmp_path / "auto.sqlite3"), "--timezone", "UTC"]
+
+    assert gmail.main([*arguments, *options]) == 2
+
+    assert (token.call_count, browser.calls) == (1, opened)
+    assert capsys.readouterr().out.strip() == (
+        "The interactive sign-in was abandoned."
+        if opened
+        else "Gmail authorization expired or was revoked; reconnect."
+    )

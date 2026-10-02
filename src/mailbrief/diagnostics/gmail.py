@@ -1016,8 +1016,10 @@ async def brief(
     only what the permission on the active consent allows (see ai-consent auto-send), and
     with none only counts the messages ready to review. When it can't refresh a carried
     message (over the permission, unreadable, or failed in analysis), it saves no brief and
-    says the day's brief needs a review. It takes no date, choices or --yes.
+    says the day's brief needs a review. It takes no date, choices or --yes, and it never
+    opens a browser: an automatic run signs in silently or fails with the sign-in message.
     """
+    silent_only = silent_only or automatic
     day = None if date_text is None else parse_brief_date(date_text)
     owner = await _owner(database_path, timezone)
     settings, tz, path = owner.settings, owner.zone, owner.path
@@ -1651,6 +1653,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "Run as the desktop's automatic refresh does, with no prompt: sync today's Inbox "
             "and follow tracked threads, then analyze only as many messages as your "
             "permission (ai-consent auto-send) allows, or just count those ready to review. "
+            "Implies --silent-only: it never opens a browser to sign in. "
             "Not with --date, --include, --exclude or --yes."
         ),
     )
