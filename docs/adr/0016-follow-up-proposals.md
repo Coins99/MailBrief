@@ -66,7 +66,9 @@ tracking (ADR 0015) fills already holds it, so the run may offer it:
 - **Which and how many.** Cached messages in tracked threads that are newer than the
   thread's baseline, not the owner's own, not yet analyzed at the current schema and not
   both received in the day's window and in the Inbox. At most three per run, newest first,
-  and only in today's run, never a past day's.
+  and only in today's run, never a past day's. Only threads the same run's check read
+  successfully are drawn on (ADR 0015), since only reading a thread reveals a reply since
+  trashed or marked spam.
 - **Same gates as any message.** They are ranked with the tracked-thread bonus and compete
   for the automatic selection, the review, the consent preview and the messages-per-brief
   limit; nothing is sent that the owner didn't approve, and the seven sent fields are

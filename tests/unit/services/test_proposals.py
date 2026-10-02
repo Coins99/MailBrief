@@ -370,11 +370,18 @@ async def test_at_most_three_actions_most_urgent_first(
     assert undated not in proposed
 
 
+@pytest.mark.parametrize(
+    "aliases",
+    [
+        ["gmail-1@example.com", "alias@example.org"],
+        ["Alias@Example.org"],  # An alias list that lacks the primary address.
+    ],
+)
 async def test_the_owner_s_own_messages_propose_nothing(
-    session: AsyncSession, service: ProposalService
+    session: AsyncSession, service: ProposalService, aliases: list[str]
 ) -> None:
     owner = await account(session)
-    owner.account_addresses = ["gmail-1@example.com", "Alias@Example.org"]
+    owner.account_addresses = aliases
     await session.commit()
     source = email("source", at=SOURCE_AT)
     await cache(session, owner, source)

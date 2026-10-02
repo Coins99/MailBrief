@@ -69,9 +69,13 @@ async def cache(session: AsyncSession, owner: AccountTable, *messages: Normalize
 async def found(
     session: AsyncSession, owner: AccountTable, window: DayWindow = TODAY, **options: Any
 ) -> list[str]:
-    replies = await ThreadService(session, reader=None).outside_replies(  # type: ignore[arg-type]
-        owner, window, **options
-    )
+    """The replies offered; unless ``read_threads`` is given, as if this run's check had read
+    every tracked thread."""
+    service = ThreadService(session, reader=None)  # type: ignore[arg-type]
+    if "read_threads" not in options:
+        tracked = await service.tracked(owner, limit=None)
+        options["read_threads"] = {thread.thread_id for thread in tracked}
+    replies = await service.outside_replies(owner, window, **options)
     return [message.provider_message_id for message in replies]
 
 
@@ -177,9 +181,18 @@ async def test_the_earliest_baseline_of_the_actions_tracking_a_thread_applies(
     assert await found(session, owner) == ["between"]
 
 
-async def test_the_owner_s_own_mail_is_never_found(session: AsyncSession) -> None:
+@pytest.mark.parametrize(
+    "aliases",
+    [
+        ["gmail-1@example.com", "alias@example.org"],
+        ["Alias@Example.org"],  # An alias list that lacks the primary address.
+    ],
+)
+async def test_the_owner_s_own_mail_is_never_found(
+    session: AsyncSession, aliases: list[str]
+) -> None:
     owner = await track(session)
-    owner.account_addresses = ["gmail-1@example.com", "alias@example.org"]
+    owner.account_addresses = aliases
     await session.commit()
 
     def sender(key: str, address: str) -> NormalizedMessage:
@@ -305,7 +318,7 @@ async def test_the_number_of_queries_does_not_grow_with_the_data(
     await action(session, {"one": START})
     await cache(session, owner, reply("r0", "one", IN_TODAY, inbox=False))
     selects.clear()
-    assert await found(session, owner) == ["r0"]
+    assert await found(session, owner, read_threads={"one"}) == ["r0"]
     small = len(selects)
 
     for index in range(30):
@@ -321,8 +334,9 @@ async def test_the_number_of_queries_does_not_grow_with_the_data(
                 for number in range(5)
             ),
         )
+    every_thread = {"one", *(f"thread-{index}" for index in range(30))}
     selects.clear()
-    assert len(await found(session, owner, limit=10)) == 10
+    assert len(await found(session, owner, limit=10, read_threads=every_thread)) == 10
     large = len(selects)
 
     # The tracked threads, then the messages; a caller that has the threads saves the first.
@@ -330,7 +344,14 @@ async def test_the_number_of_queries_does_not_grow_with_the_data(
     service = ThreadService(session, reader=None)  # type: ignore[arg-type]
     every = await service.tracked(owner, limit=None)
     selects.clear()
-    assert len(await service.outside_replies(owner, TODAY, limit=10, tracked=every)) == 10
+    assert (
+        len(
+            await service.outside_replies(
+                owner, TODAY, limit=10, tracked=every, read_threads=every_thread
+            )
+        )
+        == 10
+    )
     assert len(selects) == 1
 
 
@@ -355,3 +376,23 @@ async def test_replies_the_owner_declined_come_after_the_others(session: AsyncSe
     await MessageRepository(session).set_review_declined(owner.id, ["declined-newest"], None)
     await session.commit()
     assert await found(session, owner) == ["declined-newest", "new", "middle"]
+
+
+async def test_only_threads_this_run_read_are_drawn_on(session: AsyncSession) -> None:
+    owner = await track(session, deck=START, budget=START)
+    await cache(
+        session,
+        owner,
+        reply("in-deck", "deck", IN_TODAY, inbox=False),
+        reply("in-budget", "budget", IN_TODAY - timedelta(hours=1), inbox=False),
+    )
+
+    # A thread the check didn't read may hold a reply since trashed: it offers nothing.
+    assert await found(session, owner, read_threads={"deck"}) == ["in-deck"]
+    assert await found(session, owner, read_threads={"budget"}) == ["in-budget"]
+    assert await found(session, owner, read_threads=set()) == []
+    assert await found(session, owner, read_threads={"untracked"}) == []
+    assert await found(session, owner, read_threads={"deck", "budget"}) == [
+        "in-deck",
+        "in-budget",
+    ]

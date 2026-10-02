@@ -211,6 +211,8 @@ class SyncResult(DomainModel):
     threads_failed: int = Field(default=0, ge=0)
     thread_messages: int = Field(default=0, ge=0)
     threads_stopped_code: str | None = Field(default=None, max_length=128)
+    # The threads that check read successfully: outside replies come only from these.
+    threads_read: frozenset[str] = frozenset()
     # Selected messages that are replies in tracked threads outside today's Inbox (ADR 0016).
     outside_ids: frozenset[str] = frozenset()
 

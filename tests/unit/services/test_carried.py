@@ -286,7 +286,7 @@ async def test_an_outside_reply_stays_in_its_section_once_analyzed(
         RecordingGate(True),
         messages=mailbox,
         texts=texts,
-        threads=RecordingThreads(session, ThreadCheck()),
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
     ).generate(tz_key=BRIEF_ZONE)
     assert first.sync.outside_ids == {"archived"}
 
@@ -297,7 +297,7 @@ async def test_an_outside_reply_stays_in_its_section_once_analyzed(
         RecordingGate(True),
         messages=mailbox,
         texts=texts,
-        threads=RecordingThreads(session, ThreadCheck()),
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
     ).generate(tz_key=BRIEF_ZONE)
 
     assert again.sync.outside_ids == {"archived"}

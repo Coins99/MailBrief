@@ -62,9 +62,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
   analysis, deadlines, digest and brief; for M6: actions; for M7: drafts and drafting
   (AI drafting: parts, preview, consent, validation).
-- `src/mailbrief/domain/messages.py`: normalized messages, and `is_own_message`, the one
-  definition of the owner's own message, shared by ranking, thread activity, outside
-  replies and proposals.
+- `src/mailbrief/domain/messages.py`: normalized messages, `own_addresses` (the primary
+  address plus the aliases; every owner address set is built with it) and
+  `is_own_message`, the one definition of the owner's own message, shared by ranking,
+  thread activity, outside replies and proposals.
 - `src/mailbrief/domain/drafts.py`: draft kinds, limits, placeholders and exports;
   `domain/drafting.py`: what AI drafting sends and gets back; `domain/preferences.py`: the
   owner's preferences, time zone rule and sender rules.
@@ -174,8 +175,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   service is composed: cached messages in tracked threads, newer than the thread's
   baseline, never the owner's own, never from an excluded sender, not yet analyzed at the
   current schema, at most 3 a run, found from the cache with no Gmail call. They go
-  through the same review, consent and messages-per-brief limit, and are labelled in the
-  review, in their own last brief section and in the coverage line.
+  through the same review, consent and messages-per-brief limit. They come only from the
+  threads the same run's check read successfully. They are labelled in the review, in
+  their own last brief section and in the coverage line.
 - Only the owner adds an email to an existing action (`accept_into`), and only to a live,
   open one; the brief offers it only for actions with a source in the email's thread in the
   same account, it makes one revision, and its undo works only while the action is

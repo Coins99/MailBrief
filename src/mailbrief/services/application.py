@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.digests import SyncProgress, SyncResult, SyncStage, SyncStatus
-from mailbrief.domain.messages import NormalizedMessage, ProviderKind, RankedMessage
+from mailbrief.domain.messages import NormalizedMessage, ProviderKind, RankedMessage, own_addresses
 from mailbrief.domain.preferences import sender_excluded
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.services.calendar import day_window, local_day_window, resolve_timezone
@@ -107,6 +107,7 @@ class ApplicationService:
                 "threads_failed": check.failed,
                 "thread_messages": check.stored,
                 "threads_stopped_code": check.stopped_code,
+                "threads_read": check.read_ids,
             }
         )
 
@@ -259,12 +260,18 @@ class ApplicationService:
             if self._threads is not None and (rows or today)
             else []
         )
-        # Those replies join only today's run, and never come from blocked senders.
+        # Those replies join only today's run, only from the threads this run's check read
+        # (so a reply since trashed in a thread it didn't read is never offered), and never
+        # come from blocked senders.
         outside = (
             [
                 message
                 for message in await self._threads.outside_replies(
-                    account, window, excluded_senders=excluded_senders, tracked=tracked_threads
+                    account,
+                    window,
+                    excluded_senders=excluded_senders,
+                    tracked=tracked_threads,
+                    read_threads=sync_result.threads_read,
                 )
                 if not sender_excluded(message.sender.address, excluded_senders)
             ]
@@ -305,15 +312,10 @@ class ApplicationService:
 
         # 3. Deterministic local ranking; later messages in the threads of open actions
         # rank higher (ADR 0016).
-        user_addresses = (
-            account.account_addresses
-            if getattr(account, "account_addresses", None)
-            else (account.email_address,)
-        )  # noqa: E501
         tracked = {thread.thread_id: thread.since_utc for thread in tracked_threads}
         ranked = rank_messages(
             [*domain_messages, *outside],
-            user_email=user_addresses,  # type: ignore[arg-type]
+            user_email=own_addresses(account.email_address, account.account_addresses),
             now_utc=now,
             tracked=tracked,
         )

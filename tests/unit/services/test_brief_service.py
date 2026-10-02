@@ -1147,7 +1147,7 @@ async def test_an_outside_reply_becomes_a_follow_up_item_and_the_coverage_line_s
         RecordingGate(True),
         messages=mailbox,
         texts=texts,
-        threads=RecordingThreads(session, ThreadCheck()),
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
     )
 
     result = await service.generate(tz_key=ZONE)
@@ -1188,7 +1188,7 @@ async def test_an_outside_reply_goes_through_the_same_consent_and_limit(
         gate,
         messages=mailbox,
         texts={**texts_for(mailbox), "archived": f"{BODY} Reference archived."},
-        threads=RecordingThreads(session, ThreadCheck()),
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
     )
 
     declined = await service.generate(tz_key=ZONE)
@@ -1205,7 +1205,7 @@ async def test_an_outside_reply_goes_through_the_same_consent_and_limit(
         RecordingGate(True),
         messages=mailbox,
         texts={**texts_for(mailbox), "archived": f"{BODY} Reference archived."},
-        threads=RecordingThreads(session, ThreadCheck()),
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
     )
     result = await limited.generate(tz_key=ZONE, shortlist_limit=1)
     assert result.coverage is not None and result.coverage.shortlisted == 1

@@ -31,7 +31,7 @@ from mailbrief.domain.analysis import (
     DeadlinePrecision,
     TargetReason,
 )
-from mailbrief.domain.messages import EmailContact, fold_addresses, is_own_message
+from mailbrief.domain.messages import EmailContact, is_own_message, own_addresses
 from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
 from mailbrief.storage.proposals import ProposalRepository, proposal_from_row
 from mailbrief.storage.tables import (
@@ -692,7 +692,7 @@ class ActionRepository:
                 if (provider, provider_account_id) in threads:
                     accounts[(provider, provider_account_id)] = (
                         account_id,
-                        fold_addresses((*(aliases or ()), email)),
+                        own_addresses(email, aliases),
                     )
         cached: dict[tuple[int, str], list[_ThreadMessage]] = {}
         for identity, (account_id, _) in accounts.items():

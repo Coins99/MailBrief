@@ -13,7 +13,7 @@ in that cache by outside_replies(), at most MAX_OUTSIDE_REPLIES a run (ADR 0016)
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
@@ -27,9 +27,9 @@ from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.messages import (
     NormalizedMessage,
     ProviderKind,
-    fold_addresses,
     is_own_message,
 )
+from mailbrief.domain.messages import own_addresses as _own_addresses
 from mailbrief.domain.preferences import sender_excluded
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
@@ -72,7 +72,8 @@ class TrackedThread:
 @dataclass(frozen=True, slots=True)
 class ThreadCheck:
     """What one check did: threads tracked, read, failed or gone, messages stored, and
-    cached messages removed because Gmail has them in Trash or Spam.
+    cached messages removed because Gmail has them in Trash or Spam. ``read_ids`` are the
+    threads read successfully: the only ones outside replies may come from in this run.
 
     ``stopped_code`` names why the check stopped early, if it did.
     """
@@ -84,11 +85,12 @@ class ThreadCheck:
     stored: int = 0
     removed: int = 0
     stopped_code: str | None = None
+    read_ids: frozenset[str] = frozenset()
 
 
 def own_addresses(account: AccountTable) -> frozenset[str]:
     """The account's own addresses, casefolded: the ones that tell the owner's mail apart."""
-    return fold_addresses((*(account.account_addresses or ()), account.email_address))
+    return _own_addresses(account.email_address, account.account_addresses)
 
 
 def _new_messages(
@@ -165,38 +167,37 @@ class ThreadService:
         limit: int = MAX_OUTSIDE_REPLIES,
         excluded_senders: Sequence[str] = (),
         tracked: Sequence[TrackedThread] | None = None,
+        read_threads: Collection[str],
     ) -> list[NormalizedMessage]:
         """Cached replies in tracked threads that ``window``'s Inbox sync can't see, newest
         first, at most ``limit``; replies the owner declined in a review (ADR 0017) come after
         the others, so they fill a place only when no other reply wants it.
 
+        Only threads in ``read_threads``, the ones this run's check read (ThreadCheck.
+        read_ids), are drawn on: a thread the check didn't read may hold a reply since
+        trashed or marked spam, which only reading it reveals. None read means none offered.
+
         A reply qualifies when it was received after its thread's baseline (TrackedThread),
         isn't the owner's own (is_own_message), isn't from a sender in ``excluded_senders``,
         hasn't been analyzed at the current ANALYSIS_SCHEMA_VERSION, and isn't both inside
-        ``window`` and in the Inbox, which that day's sync already covers. Every tracked
-        thread counts, not only the MAX_TRACKED_THREADS the check reads. Two queries however
-        many threads, actions or messages there are (one, when ``tracked`` is given); nothing
-        is written. A caller that has
-        already listed every tracked thread (``tracked(account, limit=None)``) passes it in
-        to save that query.
+        ``window`` and in the Inbox, which that day's sync already covers. Two queries however
+        many messages there are (one, when ``tracked`` is given); nothing is written. A
+        caller that has already listed every tracked thread (``tracked(account,
+        limit=None)``) passes it in to save that query.
         """
         if limit < 1:
             raise ValueError("limit must be at least 1")
+        read = set(read_threads)
+        if not read:
+            return []
         every = await self.tracked(account, limit=None) if tracked is None else tracked
-        since = {thread.thread_id: normalize_utc(thread.since_utc) for thread in every}
+        since = {
+            thread.thread_id: normalize_utc(thread.since_utc)
+            for thread in every
+            if thread.thread_id in read
+        }
         if not since:
             return []
-        tracked_threads = (
-            select(ActionSourceTable.provider_thread_id)
-            .join(ActionTable, ActionSourceTable.action_id == ActionTable.id)
-            .where(
-                ActionTable.deleted_at_utc.is_(None),
-                ActionTable.status == ActionStatus.OPEN.value,
-                ActionSourceTable.provider == account.provider,
-                ActionSourceTable.provider_account_id == account.provider_account_id,
-                ActionSourceTable.provider_thread_id.is_not(None),
-            )
-        )
         analyzed = (
             exists()
             .where(
@@ -214,7 +215,7 @@ class ThreadService:
             select(MessageTable)
             .where(
                 MessageTable.account_id == account.id,
-                MessageTable.conversation_id.in_(tracked_threads),
+                MessageTable.conversation_id.in_(sorted(since)),
                 MessageTable.received_at_utc > min(since.values()),
                 ~analyzed,
                 ~covered,
@@ -275,6 +276,7 @@ class ThreadService:
                     return thread, exc
 
         checked = failed = gone = stored = removed = 0
+        read_ids: set[str] = set()
         stopped: str | None = None
         tasks = [asyncio.create_task(read(thread)) for thread in tracked]
         try:
@@ -303,6 +305,7 @@ class ThreadService:
                         await self._session.commit()
                     stored += len(later)
                     removed += len(discarded)
+                    read_ids.add(thread.thread_id)
                     checked += 1
         finally:
             for task in tasks:
@@ -327,4 +330,5 @@ class ThreadService:
             stored=stored,
             removed=removed,
             stopped_code=stopped,
+            read_ids=frozenset(read_ids),
         )

@@ -1,6 +1,6 @@
 """Normalized email and ranking models."""
 
-from collections.abc import Iterable
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol, Self
@@ -113,15 +113,18 @@ class SentMessage(Protocol):
     def sender(self) -> EmailContact: ...
 
 
-def fold_addresses(addresses: Iterable[str]) -> frozenset[str]:
-    """Addresses stripped and casefolded for comparing, without the empty ones."""
+def own_addresses(primary: str, aliases: Sequence[str] | None) -> frozenset[str]:
+    """The account's own addresses, stripped and casefolded for comparing: its primary
+    address plus its aliases, whether or not the alias list repeats the primary. Empty
+    entries are dropped. Every owner address set is built here."""
+    addresses = (primary, *(aliases or ()))
     return frozenset(address.strip().casefold() for address in addresses if address.strip())
 
 
 def is_own_message(message: SentMessage, addresses: frozenset[str]) -> bool:
     """Whether the owner sent it: Gmail's SENT label, or a sender that is one of the
     account's addresses (an alias the label may not cover). ``addresses`` are the account's
-    own, as fold_addresses returns them. The one definition ranking, thread activity,
+    own, as own_addresses returns them. The one definition ranking, thread activity,
     outside replies and proposals share."""
     return message.is_sent or message.sender.address.strip().casefold() in addresses
 

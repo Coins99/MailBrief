@@ -11,6 +11,7 @@ from mailbrief.domain.messages import (
     NormalizedMessage,
     RankedMessage,
     RankReason,
+    own_addresses,
 )
 from mailbrief.services.ranking import (
     rank_messages,
@@ -323,14 +324,14 @@ def test_only_later_replies_from_others_in_tracked_threads_get_the_bonus(
     ("sender", "addresses", "bonus"),
     [
         # Sent from an alias, which Gmail doesn't always label SENT: still the owner's.
-        ("Alias@Example.org", (USER_EMAIL, "alias@example.org"), False),
+        ("Alias@Example.org", own_addresses(USER_EMAIL, ["alias@example.org"]), False),
         ("taylor@example.com", USER_EMAIL, False),
-        (" TAYLOR@example.com", frozenset({USER_EMAIL}), False),
+        (" TAYLOR@example.com", own_addresses(USER_EMAIL, None), False),
         ("alias@example.org", USER_EMAIL, True),  # Not one of this account's addresses.
     ],
 )
 def test_a_reply_from_one_of_the_account_s_addresses_gets_no_tracked_bonus(
-    sender: str, addresses: str | tuple[str, ...] | frozenset[str], bonus: bool
+    sender: str, addresses: str | frozenset[str], bonus: bool
 ) -> None:
     reply = make_baseline_message(
         conversation_id="deck", sender=EmailContact(name="Taylor", address=sender)
@@ -354,3 +355,54 @@ def test_tracking_leaves_every_other_score_unchanged() -> None:
     assert [item.score for item in plain] == [20, 8, 0]
     assert [item.score for item in tracked] == [20, 8, 20]
     assert tracked[:2] == plain[:2]
+
+
+def test_the_primary_address_counts_when_the_alias_list_lacks_it() -> None:
+    addresses = own_addresses("Taylor@Example.com", ["alias@example.org"])
+    assert addresses == {"taylor@example.com", "alias@example.org"}
+    from_primary = make_baseline_message(
+        conversation_id="deck", sender=EmailContact(name="Taylor", address="taylor@example.com")
+    )
+    to_primary = make_baseline_message(
+        to_recipients=(EmailContact(name="Taylor", address="TAYLOR@example.com"),)
+    )
+    to_alias = make_baseline_message(
+        to_recipients=(EmailContact(name="Taylor", address="alias@example.org"),)
+    )
+
+    tracked = {"deck": SINCE}
+    assert score_message(from_primary, user_email=addresses, now_utc=NOW, tracked=tracked) == (
+        0,
+        (),
+    )
+    assert score_message(to_primary, user_email=addresses, now_utc=NOW) == (
+        8,
+        (RankReason.DIRECT_RECIPIENT,),
+    )
+    assert score_message(to_alias, user_email=addresses, now_utc=NOW) == (
+        8,
+        (RankReason.DIRECT_RECIPIENT,),
+    )
+
+
+@pytest.mark.parametrize(
+    ("primary", "aliases", "expected"),
+    [
+        ("me@example.com", None, {"me@example.com"}),
+        ("me@example.com", [], {"me@example.com"}),
+        (
+            " Me@Example.com ",
+            ["ME@example.com", "Alias@Example.org"],
+            {"me@example.com", "alias@example.org"},
+        ),
+        (
+            "me@example.com",
+            ["", "  ", "alias@example.org"],
+            {"me@example.com", "alias@example.org"},
+        ),
+    ],
+)
+def test_own_addresses_are_the_primary_plus_the_aliases_casefolded(
+    primary: str, aliases: list[str] | None, expected: set[str]
+) -> None:
+    assert own_addresses(primary, aliases) == expected

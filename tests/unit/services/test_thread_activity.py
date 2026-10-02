@@ -274,3 +274,33 @@ async def test_a_reply_from_an_alias_without_the_sent_label_is_the_owner_s(
         latest_sender="Sam",
         owner_replied_at_utc=SOURCE_AT + timedelta(minutes=30),
     )
+
+
+async def test_the_primary_address_is_the_owner_s_when_the_alias_list_lacks_it(
+    session: AsyncSession,
+) -> None:
+    owner = await AccountRepository(session).upsert(
+        AccountIdentity(
+            provider=ProviderKind.GMAIL,
+            provider_account_id="gmail-1",
+            email_address="gmail-1@example.com",
+            account_addresses=("alias@example.org",),
+        )
+    )
+    await session.commit()
+    public_id = await action(session, [("source", "deck", 0)])
+    await cache(
+        session,
+        owner,
+        message("source", "deck", 0),
+        message("theirs", "deck", 10),
+        message("primary", "deck", 20, address="gmail-1@example.com"),  # Not labelled SENT.
+    )
+
+    found = await activity(session, public_id)
+
+    assert found is not None
+    assert (found.new_messages, found.owner_replied_at_utc) == (
+        1,
+        SOURCE_AT + timedelta(minutes=20),
+    )

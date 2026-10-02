@@ -117,7 +117,10 @@ Groq and the desktop. Run them in order; the exit test comes first.
 - Automatic runs happen only while the desktop is open, and never for past days.
 - Automatic analysis is allowed for one account at a time, the connected one.
 - A cached reply you trash is forgotten when its thread is next checked, so only while its
-  action is open and among the 25 threads read; its body is never read meanwhile.
+  action is open and among the 25 threads read. Replies outside today's Inbox come only
+  from the threads read in the same run, so a thread that wasn't read (over the cap, or a
+  failed or stopped check) offers none that run. On every other path the body download's
+  refusal is the guard: a body in Trash or Spam is never read or sent.
 - A day has one brief, carried forward through the day: a later run keeps the messages the
   earlier brief had unless they were archived, newly blocked or declined.
 - An automatic run that can't refresh a carried message (its permission can't cover those
@@ -415,8 +418,11 @@ Part 4 is implemented and awaits live acceptance. The policy is
   implements it with `threads.get`, `format=metadata` and a field mask;
   `providers/microsoft/` has none. `ThreadService.check` deletes this account's cached rows
   in `discarded_ids` and counts them in `ThreadCheck.removed`.
-- `is_own_message` and `fold_addresses` live in `domain/messages.py`; ranking, thread
-  activity (`storage/actions.py`), outside replies and proposals share them.
+- `is_own_message` and `own_addresses(primary, aliases)` live in `domain/messages.py`;
+  ranking (direct recipient and tracked-thread bonus), thread activity
+  (`storage/actions.py`), outside replies and proposals share them. `ThreadCheck.read_ids`
+  names the threads read successfully; `SyncResult.threads_read` carries them to
+  `outside_replies(read_threads=...)`.
 - `services/threads.py`: `ThreadService.tracked()` and `check()`, with
   `MAX_TRACKED_THREADS`, `MAX_THREAD_MESSAGES` and `THREAD_CONCURRENCY`. It commits per
   thread and never writes to actions.
@@ -681,8 +687,8 @@ cache, so they can be analyzed and propose updates.
   - have not been analyzed at the current analysis schema;
   - are not both received today and still in the Inbox, which today's sync already covers.
 - **Bounds.** At most 3 a run, newest first. Only today's run brings them in, never a
-  past day's. They come from the cache the thread check fills, so nothing extra is read
-  from Gmail to find them.
+  past day's. They come from the cache the thread check fills, and only from the threads
+  that run's check read, so nothing extra is read from Gmail to find them.
 - **Review.** They are listed as `<sender> — <subject> — reply in a tracked thread, not in
   today's Inbox`. They get the same +20 rank bonus as any reply in a tracked thread, so they
   are usually checked. You can check or uncheck them, they count toward messages per brief,
@@ -725,8 +731,9 @@ cache, so they can be analyzed and propose updates.
 ### For developers
 
 - `services/threads.py`: `ThreadService.outside_replies(account, window, *, limit,
-  excluded_senders, tracked)` runs two queries however much there is (one when the caller
-  passes `tracked`); `MAX_OUTSIDE_REPLIES`; `own_addresses()`, and `is_own_message()` from
+  excluded_senders, tracked, read_threads)` runs two queries however much there is (one
+  when the caller passes `tracked`) and draws only on `read_threads`; `MAX_OUTSIDE_REPLIES`;
+  `own_addresses(account)`, a call to the domain `own_addresses`, and `is_own_message()` from
   `domain/messages.py`, the one rule for "the owner's own", shared with
   `ProposalService.derive`, ranking and thread activity.
 - `services/application.py` `prepare_daily_shortlist` adds them for today's window when a

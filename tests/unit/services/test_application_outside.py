@@ -3,7 +3,7 @@
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Collection, Sequence
 from datetime import date, timedelta
 
 import pytest
@@ -78,14 +78,21 @@ async def scene(
     today: list[NormalizedMessage] | None = None,
     cached: list[NormalizedMessage] = (),  # type: ignore[assignment]
     tracked: tuple[str, ...] = ("deck",),
+    read: tuple[str, ...] | None = None,
+    check: ThreadCheck | Exception | None = None,
+    aliases: tuple[str, ...] = (),
 ) -> tuple[ApplicationService, AccountTable]:
     """An account with an open action in each ``tracked`` thread, ``cached`` messages already
-    stored (as a thread check leaves them), and ``today`` in the provider's Inbox."""
+    stored (as a thread check leaves them), and ``today`` in the provider's Inbox.
+
+    This run's check reads the ``read`` threads (every tracked one by default), or ends as
+    ``check`` says."""
     account = await AccountRepository(session).upsert(
         AccountIdentity(
             provider=ProviderKind.MICROSOFT,
             provider_account_id="acc-1",
             email_address="user@example.com",
+            account_addresses=aliases,
         )
     )
     for thread in tracked:
@@ -122,7 +129,12 @@ async def scene(
         message_repo=MessageRepository(session),
         sync_run_repo=SyncRunRepository(session),
         account_repo=AccountRepository(session),
-        threads=RecordingThreads(session, ThreadCheck()),
+        threads=RecordingThreads(
+            session,
+            check
+            if check is not None
+            else ThreadCheck(read_ids=frozenset(tracked if read is None else read)),
+        ),
     )
     return service, account
 
@@ -357,7 +369,7 @@ async def test_the_application_drops_blocked_senders_even_if_the_thread_service_
         async def check(
             self, account: AccountTable, *, cancel: asyncio.Event | None = None
         ) -> ThreadCheck:
-            return ThreadCheck()
+            return ThreadCheck(read_ids=frozenset({"deck"}))
 
         async def outside_replies(
             self,
@@ -367,8 +379,11 @@ async def test_the_application_drops_blocked_senders_even_if_the_thread_service_
             limit: int = MAX_OUTSIDE_REPLIES,
             excluded_senders: Sequence[str] = (),
             tracked: Sequence[TrackedThread] | None = None,
+            read_threads: Collection[str],
         ) -> list[NormalizedMessage]:
-            return await super().outside_replies(account, window, limit=limit, tracked=tracked)
+            return await super().outside_replies(
+                account, window, limit=limit, tracked=tracked, read_threads=read_threads
+            )
 
     leaky = ApplicationService(
         provider=FakeEmailProvider(pages=[[message("quiet", hours_ago=2)]]),
@@ -408,3 +423,82 @@ async def test_a_reply_trashed_after_it_was_cached_is_never_offered_or_ranked(
     assert (
         await MessageRepository(session).get_by_provider_message_id(account.id, "archived") is None
     )
+
+
+# Only threads this run read (a reply trashed in an unread thread is never offered)
+
+
+async def test_a_reply_in_a_thread_this_run_did_not_read_is_not_offered(
+    session: AsyncSession,
+) -> None:
+    service, _ = await scene(session, cached=[ARCHIVED], tracked=("deck", "budget"), read=())
+
+    result, shortlist = await service.prepare_daily_shortlist(tz_key=ZONE, now_utc=NOW)
+
+    assert keys(shortlist) == ["quiet"] and result.outside_ids == frozenset()
+
+
+async def test_the_same_reply_is_offered_once_its_thread_is_read(session: AsyncSession) -> None:
+    service, _ = await scene(
+        session, cached=[ARCHIVED], tracked=("deck", "budget"), read=("budget",)
+    )
+    first, _ = await service.prepare_daily_shortlist(tz_key=ZONE, now_utc=NOW)
+    assert first.outside_ids == frozenset() and first.threads_read == {"budget"}
+
+    again, _ = await scene(session, cached=[ARCHIVED], tracked=(), read=("deck",))
+    result, shortlist = await again.prepare_daily_shortlist(tz_key=ZONE, now_utc=NOW)
+
+    assert set(keys(shortlist)) == {"quiet", "archived"}
+    assert result.outside_ids == {"archived"} and result.threads_read == {"deck"}
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        RuntimeError("the check failed"),
+        ThreadCheck(
+            tracked=2, checked=1, stopped_code="RATE_LIMITED", read_ids=frozenset({"budget"})
+        ),
+    ],
+    ids=["failed", "stopped"],
+)
+async def test_a_failed_or_stopped_check_offers_nothing_from_threads_it_did_not_read(
+    session: AsyncSession, check: ThreadCheck | Exception
+) -> None:
+    budget = message("budget-reply", thread="budget", hours_ago=4, inbox=False)
+    service, _ = await scene(
+        session, cached=[ARCHIVED, budget], tracked=("deck", "budget"), check=check
+    )
+
+    result, shortlist = await service.prepare_daily_shortlist(tz_key=ZONE, now_utc=NOW)
+
+    assert "archived" not in keys(shortlist)
+    expected = {"budget-reply"} if isinstance(check, ThreadCheck) else set()
+    assert result.outside_ids == expected
+
+
+async def test_an_alias_list_without_the_primary_still_counts_the_primary_as_the_owner_s(
+    session: AsyncSession,
+) -> None:
+    def from_primary(key: str, *, inbox: bool, hours_ago: float) -> NormalizedMessage:
+        return message(
+            key, thread="deck", hours_ago=hours_ago, inbox=inbox, sender="User@Example.com"
+        )
+
+    to_primary = message("to-me", hours_ago=2).model_copy(
+        update={"to_recipients": (EmailContact(name=None, address="user@example.com"),)}
+    )
+    service, _ = await scene(
+        session,
+        today=[to_primary, from_primary("my-inbox-reply", inbox=True, hours_ago=2)],
+        cached=[from_primary("my-archived-reply", inbox=False, hours_ago=3), ARCHIVED],
+        aliases=("alias@example.org",),
+    )
+
+    result, shortlist = await service.prepare_daily_shortlist(tz_key=ZONE, now_utc=NOW)
+
+    ranked = {item.message.provider_message_id: item for item in shortlist}
+    assert RankReason.DIRECT_RECIPIENT in ranked["to-me"].reasons
+    assert RankReason.TRACKED_THREAD_REPLY not in ranked["my-inbox-reply"].reasons
+    assert "my-archived-reply" not in ranked  # The owner's own: never an outside reply.
+    assert result.outside_ids == {"archived"}

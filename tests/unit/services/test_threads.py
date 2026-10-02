@@ -424,14 +424,14 @@ async def test_a_cached_reply_gmail_discards_is_forgotten_and_comes_back_if_rest
     )
     session.add(source)
     await session.commit()
-    offered = await service.outside_replies(account, WINDOW)
+    offered = await service.outside_replies(account, WINDOW, read_threads=first.read_ids)
     assert [message.provider_message_id for message in offered] == ["kept", "thrown"]
 
     reader.discarded["deck"] = {"thrown"}  # The owner trashes it, or Gmail calls it spam.
     second = await service.check(account)
 
     assert (second.checked, second.removed) == (1, 1)
-    offered = await service.outside_replies(account, WINDOW)
+    offered = await service.outside_replies(account, WINDOW, read_threads=second.read_ids)
     assert [message.provider_message_id for message in offered] == ["kept"]
     owners = await session.scalars(
         select(MessageTable.account_id).where(MessageTable.provider_message_id == "thrown")
@@ -445,7 +445,7 @@ async def test_a_cached_reply_gmail_discards_is_forgotten_and_comes_back_if_rest
     third = await service.check(account)
 
     assert (third.stored, third.removed) == (2, 0)
-    offered = await service.outside_replies(account, WINDOW)
+    offered = await service.outside_replies(account, WINDOW, read_threads=third.read_ids)
     assert [message.provider_message_id for message in offered] == ["kept", "thrown"]
 
 

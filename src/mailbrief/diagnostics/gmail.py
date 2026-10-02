@@ -361,7 +361,10 @@ async def sync(
                     # Replies in tracked threads that today's Inbox sync can't see (ADR 0016).
                     # Excluded senders never appear, like in the review.
                     for reply in await threads.outside_replies(
-                        account, window, excluded_senders=rules
+                        account,
+                        window,
+                        excluded_senders=rules,
+                        read_threads=result.threads_read,
                     ):
                         key = reply.provider_message_id
                         stored = await messages.get_by_provider_message_id(account.id, key)

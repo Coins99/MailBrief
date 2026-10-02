@@ -76,9 +76,16 @@ Added with the desktop display (M8 Part 5).
 - Sources accepted before 0010 whose email had already left local mail aren't tracked.
 - The desktop shows thread activity from Part 5; Part 4 shows it in the CLI.
 - A cached reply the owner trashes is forgotten only when its thread is next checked: the
-  thread must still be tracked and among the 25 read. Until then the body download's own
-  refusal keeps it from being read or sent.
+  thread must still be tracked and among the 25 read. So replies outside today's Inbox
+  (ADR 0016) come only from the threads read successfully in the same run: a thread the
+  check didn't read, because of the cap or a failed or stopped check, offers none, and
+  with no thread service or no check there are none at all. Every other path that could
+  reach a trashed or spam message (a carried message, `--include`, AI drafting's email) is
+  guarded by the body download's refusal, which keeps it from being read or sent.
 - "The owner's own message" has one definition, `is_own_message` in `domain/messages.py`:
-  Gmail's SENT label, or a sender that is one of the account's addresses. Thread activity,
-  ranking's tracked-thread bonus, outside replies and proposals all use it, so a reply sent
-  from an alias without the SENT label counts as the owner's everywhere.
+  Gmail's SENT label, or a sender that is one of the account's addresses. Those addresses
+  are always `own_addresses(primary, aliases)`, the primary address plus the aliases, even
+  when Gmail's alias list leaves the primary out. Thread activity, ranking (both its
+  direct-recipient rule and its tracked-thread bonus), outside replies and proposals all
+  use them, so a reply sent from the primary address or an alias without the SENT label
+  counts as the owner's everywhere.

@@ -12,8 +12,8 @@ from mailbrief.domain.messages import (
     NormalizedMessage,
     RankedMessage,
     RankReason,
-    fold_addresses,
     is_own_message,
+    own_addresses,
 )
 from mailbrief.domain.preferences import SHORTLIST_LIMIT_MAX
 
@@ -127,7 +127,7 @@ def _is_automated_sender(sender_address: str) -> bool:
 def score_message(
     msg: NormalizedMessage,
     *,
-    user_email: str | Sequence[str] | set[str] | frozenset[str],
+    user_email: str | frozenset[str],
     now_utc: datetime,
     tracked: Mapping[str, datetime] = _UNTRACKED,
 ) -> tuple[int, tuple[RankReason, ...]]:
@@ -135,8 +135,12 @@ def score_message(
 
     Applies the 10 scoring rules specified in mvp-plan.md Section 9 in strict declaration
     order, then M8's: ``tracked`` maps the threads of open actions to the time after which
-    their messages are new (ADR 0016). A message the owner sent (is_own_message, with
-    ``user_email`` as the account's addresses) never gets that bonus.
+    their messages are new (ADR 0016). A message the owner sent (is_own_message) never gets
+    that bonus.
+
+    ``user_email`` is the account's own address set, as own_addresses returns it, used by
+    both the direct-recipient rule and the tracked-thread bonus; a single address stands
+    for an account without aliases.
     """
     score = 0
     reasons: list[RankReason] = []
@@ -157,12 +161,8 @@ def score_message(
         reasons.append(RankReason.UNREAD)
 
     # 4. User is directly in to_recipients (+8)
-    if isinstance(user_email, str):
-        target_addresses = {user_email.strip().lower()}
-    else:
-        target_addresses = {a.strip().lower() for a in user_email if a}
-
-    is_direct = any(r.address.strip().lower() in target_addresses for r in msg.to_recipients)
+    addresses = own_addresses(user_email, None) if isinstance(user_email, str) else user_email
+    is_direct = any(r.address.strip().casefold() in addresses for r in msg.to_recipients)
     if is_direct:
         score += 8
         reasons.append(RankReason.DIRECT_RECIPIENT)
@@ -209,7 +209,7 @@ def score_message(
     if (
         since is not None
         and aware_received > normalize_utc(since)
-        and not is_own_message(msg, fold_addresses(target_addresses))
+        and not is_own_message(msg, addresses)
     ):
         score += 20
         reasons.append(RankReason.TRACKED_THREAD_REPLY)
@@ -220,11 +220,13 @@ def score_message(
 def rank_messages(
     messages: Sequence[NormalizedMessage],
     *,
-    user_email: str | Sequence[str] | set[str] | frozenset[str],
+    user_email: str | frozenset[str],
     now_utc: datetime,
     tracked: Mapping[str, datetime] = _UNTRACKED,
 ) -> list[RankedMessage]:
     """Score a collection of normalized messages with a shared reference timestamp.
+
+    ``user_email`` is as score_message takes it: the account's own_addresses, or one address.
 
     ``tracked`` maps each tracked thread ID to the time after which its messages are new.
     """
