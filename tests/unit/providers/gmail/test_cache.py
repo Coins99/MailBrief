@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from mailbrief.errors import ConfigurationError
 from mailbrief.providers.gmail import cache
 from mailbrief.providers.gmail.cache import GmailCredentialStore, RefreshCredential
+from mailbrief.providers.gmail.errors import GmailSetupError
 
 
 class MemoryVault:
@@ -79,24 +80,13 @@ def test_corrupt_storage_does_not_expose_payload(value: str) -> None:
         GmailCredentialStore(vault).load()
 
 
-def test_rejects_unsupported_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vault_unavailable_is_reported_as_a_gmail_setup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend selection lives in mailbrief.infra.vault; Gmail keeps its own error type."""
     monkeypatch.setattr(sys, "platform", "linux")
-    with pytest.raises(ConfigurationError, match="Windows or macOS"):
-        cache.os_vault()
-
-
-def test_windows_uses_credential_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    from keyring.backends.Windows import WinVaultKeyring
-
-    monkeypatch.setattr(sys, "platform", "win32")
-    assert isinstance(cache.os_vault(), WinVaultKeyring)
-
-
-def test_macos_uses_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
-    from keyring.backends.macOS import Keyring
-
-    monkeypatch.setattr(sys, "platform", "darwin")
-    assert isinstance(cache.os_vault(), Keyring)
+    with pytest.raises(GmailSetupError, match="Windows or macOS"):
+        GmailCredentialStore()
 
 
 @pytest.mark.parametrize(
@@ -111,5 +101,16 @@ def test_unavailable_vault_is_setup_error(
 ) -> None:
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setitem(sys.modules, module, None)
-    with pytest.raises(ConfigurationError, match=message):
-        cache.os_vault()
+    with pytest.raises(GmailSetupError, match=message):
+        GmailCredentialStore()
+
+
+def test_store_reads_the_vault_through_this_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Integration tests replace ``cache.os_vault`` so no test can reach the owner's real
+    vault entry; the store must keep looking the backend up there."""
+    vault = MemoryVault()
+    monkeypatch.setattr(cache, "os_vault", lambda: vault)
+    GmailCredentialStore().save(
+        RefreshCredential(client_id="c", email_address="a@b.example", refresh_token=SecretStr("t"))
+    )
+    assert vault.value is not None

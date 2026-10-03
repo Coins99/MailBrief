@@ -1,10 +1,10 @@
 """Refresh credentials stored only in the operating-system credential vault."""
 
-import sys
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
+from mailbrief.infra.vault import VaultBackend, VaultUnavailableError, os_vault
 from mailbrief.providers.gmail.errors import GmailSetupError
 
 SERVICE = "MailBrief.Gmail"
@@ -32,46 +32,17 @@ class CredentialStore(Protocol):
     def clear(self) -> None: ...
 
 
-class VaultBackend(Protocol):
-    """Minimal interface for the explicitly selected OS vault backend."""
-
-    def get_password(self, service: str, username: str) -> str | None: ...
-
-    def set_password(self, service: str, username: str, password: str) -> None: ...
-
-    def delete_password(self, service: str, username: str) -> None: ...
-
-
-def _platform() -> str:
-    """Read the platform at call time without letting mypy narrow it per OS."""
-    return sys.platform
-
-
-def os_vault() -> VaultBackend:
-    """Choose the OS vault explicitly; never let keyring auto-select a backend."""
-    current = _platform()
-    if current == "win32":
-        try:
-            from keyring.backends.Windows import WinVaultKeyring
-
-            return WinVaultKeyring()  # type: ignore[no-untyped-call]
-        except Exception:
-            raise GmailSetupError("Windows Credential Manager is unavailable.") from None
-    if current == "darwin":
-        try:
-            from keyring.backends.macOS import Keyring as MacOSKeychain
-
-            return MacOSKeychain()  # type: ignore[no-untyped-call]
-        except Exception:
-            raise GmailSetupError("The macOS Keychain is unavailable.") from None
-    raise GmailSetupError("Gmail credential storage requires Windows or macOS.")
-
-
 class GmailCredentialStore:
     """Fail closed if the OS vault cannot load, save, or delete credentials."""
 
     def __init__(self, backend: VaultBackend | None = None) -> None:
-        self._backend = backend if backend is not None else os_vault()
+        if backend is None:
+            try:
+                backend = os_vault()
+            except VaultUnavailableError as exc:
+                # Keep Gmail's own error type; the shared vault's messages are static.
+                raise GmailSetupError(str(exc)) from None
+        self._backend = backend
 
     def load(self) -> RefreshCredential | None:
         try:
