@@ -55,6 +55,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 ## Layout (ports and adapters)
 
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
+  `domain/common.py` holds the helpers every layer shares: `utc_now` (the default injected
+  clock), `normalize_utc` and `counted` ("1 message", "3 messages"); reuse them.
 - `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` / `DraftingProvider` protocols
   (`drafting.py`), `ThreadReader` (`threads.py`) and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
@@ -87,6 +89,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   follow-up proposals, `drafts.py` for drafts, their versions and source snapshots, and
   `preferences.py` for the preferences row. Alembic revisions live in
   `migrations/versions/`.
+  `database.chunked()` splits every IN list to SQLite's batch size.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
 - `src/mailbrief/infra/`: HTTP retry classification, `vault.py`, the explicit OS
