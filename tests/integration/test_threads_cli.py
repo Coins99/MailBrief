@@ -299,6 +299,9 @@ def test_briefs_show_continuations_and_accept_into_adds_to_the_action(
 
     assert actions("accept", waiting, "--into", public_id) == 0
     assert capsys.readouterr().out == f"Added to: [2JChase the budget ({public_id})\n"
+    # Again: already there, so nothing changes.
+    assert actions("accept", waiting, "--into", public_id) == 0
+    assert capsys.readouterr().out == "Already added to: [2JChase the budget.\n"
     assert actions("list", "--view", "waiting", "--timezone", "UTC") == 0
     assert capsys.readouterr().out.count("Chase the budget") == 1  # No second action.
 

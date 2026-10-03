@@ -42,7 +42,7 @@ from mailbrief.providers.gmail.oauth import DesktopClient
 from mailbrief.providers.groq.credentials import GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.providers.groq.provider import PRIVACY_NOTICE, PROVIDER_NAME
-from mailbrief.services.actions import AcceptedInto, ActionService
+from mailbrief.services.actions import AcceptedInto, ActionService, DecisionSnapshot
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
@@ -495,11 +495,17 @@ class DesktopRuntime:
             return await ActionService(session).accept_into(suggestion_id, public_id, revision)
 
     async def undo_accept_into(
-        self, suggestion_id: int, public_id: str, revision: int, remove_source: bool
+        self,
+        suggestion_id: int,
+        public_id: str,
+        revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
     ) -> Action:
         async with self._storage().session() as session:
             return await ActionService(session).undo_accept_into(
-                suggestion_id, public_id, revision, remove_source
+                suggestion_id, public_id, revision, remove_source, previous=previous
             )
 
     async def mark_thread_seen(self, public_id: str, revision: int) -> Action:

@@ -74,6 +74,7 @@ from mailbrief.services.actions import (
     AcceptedInto,
     ActionConflictError,
     ActionNotFoundError,
+    DecisionSnapshot,
     SuggestionNotFoundError,
 )
 from mailbrief.services.brief import (
@@ -188,7 +189,13 @@ class DesktopBackend(Protocol):
         self, suggestion_id: int, public_id: str, revision: int
     ) -> AcceptedInto: ...
     async def undo_accept_into(
-        self, suggestion_id: int, public_id: str, revision: int, remove_source: bool
+        self,
+        suggestion_id: int,
+        public_id: str,
+        revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
     ) -> Action: ...
     async def mark_thread_seen(self, public_id: str, revision: int) -> Action: ...
     async def dismiss_suggestion(self, suggestion_id: int) -> None: ...
@@ -720,7 +727,8 @@ class MainWindow(QMainWindow):
         self._start_from_link(lambda: self._accept_into(suggestion_id, public_id, revision))
 
     async def _accept_into(self, suggestion_id: int, public_id: str, revision: int) -> None:
-        """Add the suggestion's email to an action that continues its thread, with Undo."""
+        """Add the suggestion's email to an action that continues its thread, with Undo when
+        that changed anything."""
         try:
             result = await self.backend.accept_into(suggestion_id, public_id, revision)
         except ActionConflictError as exc:
@@ -732,10 +740,18 @@ class MainWindow(QMainWindow):
             await self._stale(exc)
             return
         action = result.action
+        if not result.changed:  # Already there: nothing to undo.
+            self.status.setText(f"Already added to: {action.title}.")
+            await self._refresh_views()
+            return
 
         async def undo() -> None:
             await self.backend.undo_accept_into(
-                suggestion_id, action.public_id, action.revision, result.source_added
+                suggestion_id,
+                action.public_id,
+                action.revision,
+                result.source_added,
+                previous=result.previous,
             )
 
         self._offer_undo("Undo add", undo)

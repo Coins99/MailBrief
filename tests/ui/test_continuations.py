@@ -189,7 +189,21 @@ async def test_add_to_then_undo(
     await finish(window)
 
     assert backend.action_calls[-1] == ("undo_accept_into", 7, TRACKED.public_id, 4, source_added)
+    assert backend.undo_previous is not None  # What accept_into replaced goes back.
+    assert backend.undo_previous.decision is SuggestionState.DISMISSED
     assert window.status.text() == "Undone."
+    assert window.undo_button.isHidden()
+
+
+async def test_repeating_add_to_offers_no_undo(window: MainWindow, backend: FakeBackend) -> None:
+    await window.initialize()
+    backend.add_changed = False  # The suggestion was already added to that action.
+
+    window.digest.anchorClicked.emit(QUrl("mailbrief:into/0"))
+    await finish(window)
+
+    assert backend.action_calls == [("accept_into", 7, TRACKED.public_id, 3)]
+    assert window.status.text() == "Already added to: Send the deck."
     assert window.undo_button.isHidden()
 
 

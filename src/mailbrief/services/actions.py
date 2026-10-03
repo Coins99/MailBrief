@@ -61,11 +61,25 @@ class ActionConflictError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionSnapshot:
+    """A suggestion's decision as it was before accept_into, for its undo to put back:
+    ``decision`` is None when there was none (the suggestion was pending)."""
+
+    decision: SuggestionState | None = None
+    action_id: int | None = None
+    decided_at_utc: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AcceptedInto:
-    """What accept_into did: the action, and whether the email became a new source of it."""
+    """What accept_into did: the action, whether the email became a new source of it,
+    whether anything changed at all (repeating an addition changes nothing, and so has
+    nothing to undo), and the decision it replaced."""
 
     action: Action
     source_added: bool
+    changed: bool
+    previous: DecisionSnapshot
 
 
 def _utc_now() -> datetime:
@@ -263,8 +277,10 @@ class ActionService:
         ActionConflictError, so it is reopened first. The brief offers this for the open
         actions that track the email's thread; naming the action (``actions accept N
         --into``) allows any thread or account. Repeating it for the same action returns
-        the action unchanged, even with an old revision. undo_accept_into() reverses it
-        while the action is unchanged.
+        the action unchanged, even with an old revision, with ``changed`` false: there is
+        nothing to undo then. Otherwise ``previous`` is the decision it replaced (none, a
+        dismissal, or an acceptance into a deleted action), which undo_accept_into() puts
+        back while the action is unchanged.
         """
 
         async def run(now: datetime) -> AcceptedInto:
@@ -276,8 +292,19 @@ class ActionService:
                 raise ActionConflictError("Reopen the action before adding to it.")
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
+            previous = (
+                DecisionSnapshot()
+                if decision is None
+                else DecisionSnapshot(
+                    decision=SuggestionState(decision.decision),
+                    action_id=decision.action_id,
+                    decided_at_utc=decision.decided_at_utc,
+                )
+            )
             if accepted_id == target.id:
-                return AcceptedInto(await self._load(target), source_added=False)
+                return AcceptedInto(
+                    await self._load(target), source_added=False, changed=False, previous=previous
+                )
             if accepted_id is not None:
                 other = await self._repository.get_action_by_id(accepted_id)
                 if other is not None and other.deleted_at_utc is None:
@@ -289,19 +316,29 @@ class ActionService:
                 key, decision=SuggestionState.ACCEPTED, action_id=target.id, decided_at_utc=now
             )
             touch(target, now)
-            return AcceptedInto(await self._load(target), source_added=added)
+            return AcceptedInto(
+                await self._load(target), source_added=added, changed=True, previous=previous
+            )
 
         return await self._write(run)
 
     async def undo_accept_into(
-        self, suggestion_id: int, public_id: str, expected_revision: int, remove_source: bool
+        self,
+        suggestion_id: int,
+        public_id: str,
+        expected_revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
     ) -> Action:
         """Reverse accept_into while the action is exactly as it left it; one revision.
 
-        The suggestion is pending again. With ``remove_source`` (accept_into's
-        ``source_added``), its email stops being a source, but an action's last source always
-        stays. Raises ActionConflictError unless the action is live, still at
-        ``expected_revision``, and the suggestion is still accepted into it.
+        The suggestion's decision becomes exactly ``previous`` (accept_into's): none, so it
+        is pending again, or the earlier dismissal or acceptance with its original time.
+        With ``remove_source`` (accept_into's ``source_added``), its email stops being a
+        source, but an action's last source always stays. Raises ActionConflictError unless
+        the action is live, still at ``expected_revision``, and the suggestion is still
+        accepted into it.
         """
 
         async def run(now: datetime) -> Action:
@@ -314,7 +351,15 @@ class ActionService:
                 or _accepted_action_id(decision) != row.id
             ):
                 raise ActionConflictError(_UNDO_ADD)
-            await self._repository.delete_decision(key)
+            if previous.decision is None or previous.decided_at_utc is None:
+                await self._repository.delete_decision(key)
+            else:
+                await self._repository.save_decision(
+                    key,
+                    decision=previous.decision,
+                    action_id=previous.action_id,
+                    decided_at_utc=previous.decided_at_utc,
+                )
             if remove_source and await self._repository.source_count(row.id) > 1:
                 await self._repository.remove_source(row.id, message.provider_message_id)
             touch(row, now)

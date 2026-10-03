@@ -30,6 +30,7 @@ from mailbrief.services.actions import (
     ActionConflictError,
     ActionNotFoundError,
     ActionService,
+    DecisionSnapshot,
     SuggestionNotFoundError,
 )
 from mailbrief.services.analysis import suggestion_fingerprint
@@ -972,8 +973,8 @@ async def test_accept_into_adds_a_second_source_to_an_existing_action(
     repeated = await service.accept_into(second.suggestion_ids[0], action.public_id, 1)
 
     linked = added.action
-    assert added.source_added
-    assert repeated.action == linked and not repeated.source_added
+    assert added.source_added and added.changed and added.previous == DecisionSnapshot()
+    assert repeated.action == linked and not repeated.source_added and not repeated.changed
     assert [source.provider_message_id for source in linked.sources] == ["msg-1", "msg-2"]
     assert linked.revision == 2
     assert (await states(session, second))[0] == (SuggestionState.ACCEPTED, action.public_id)
@@ -1089,7 +1090,7 @@ async def test_undo_add_returns_the_suggestion_to_pending_in_one_revision(
     clock.advance(minutes=5)
 
     undone = await service.undo_accept_into(
-        second.suggestion_ids[0], action.public_id, 2, remove_source
+        second.suggestion_ids[0], action.public_id, 2, remove_source, previous=DecisionSnapshot()
     )
 
     assert (undone.revision, undone.updated_at_utc) == (3, clock.now)
@@ -1108,7 +1109,9 @@ async def test_undo_add_never_removes_the_last_source(
     action = await service.accept(seeded.suggestion_ids[0])
     await service.accept_into(seeded.suggestion_ids[1], action.public_id, 1)
 
-    undone = await service.undo_accept_into(seeded.suggestion_ids[1], action.public_id, 2, True)
+    undone = await service.undo_accept_into(
+        seeded.suggestion_ids[1], action.public_id, 2, True, previous=DecisionSnapshot()
+    )
 
     assert [source.provider_message_id for source in undone.sources] == ["msg-1"]
     assert undone.revision == 3
@@ -1116,6 +1119,88 @@ async def test_undo_add_never_removes_the_last_source(
         (SuggestionState.ACCEPTED, action.public_id),
         (SuggestionState.PENDING, None),
     ]
+
+
+async def decision_row(
+    session: AsyncSession, provider_message_id: str
+) -> tuple[str, int | None, datetime]:
+    """The one stored decision on that email's suggestions."""
+    (row,) = (
+        await session.scalars(
+            select(SuggestionDecisionTable).where(
+                SuggestionDecisionTable.provider_message_id == provider_message_id
+            )
+        )
+    ).all()
+    await session.refresh(row)
+    return row.decision, row.action_id, row.decided_at_utc
+
+
+async def test_repeating_an_add_changes_nothing_and_leaves_nothing_to_undo(
+    session: AsyncSession, service: ActionService, clock: Clock
+) -> None:
+    _, second, action = await added_into(session, service)
+    stored = await decision_row(session, "msg-2")
+    before = await counts(session)
+    clock.advance(minutes=5)
+
+    repeated = await service.accept_into(second.suggestion_ids[0], action.public_id, 2)
+
+    assert not repeated.changed and repeated.action == await service.get(action.public_id)
+    assert repeated.previous.decision is SuggestionState.ACCEPTED
+    assert await decision_row(session, "msg-2") == stored  # Intact, with its time.
+    # Accepting it again later finds the action it already belongs to: no duplicate.
+    again = await service.accept(second.suggestion_ids[0])
+    assert again.public_id == action.public_id
+    assert await counts(session) == before
+
+
+async def test_undoing_an_add_over_a_dismissal_dismisses_it_again(
+    session: AsyncSession, service: ActionService, clock: Clock
+) -> None:
+    first = await seed(session)
+    second = await seed(session, (suggestion(0, "Send the deck, again"),), message="msg-2")
+    action = await service.accept(first.suggestion_ids[0])
+    await service.dismiss(second.suggestion_ids[0])
+    dismissed = await decision_row(session, "msg-2")
+    clock.advance(minutes=5)
+
+    added = await service.accept_into(second.suggestion_ids[0], action.public_id, 1)
+    assert added.changed and added.previous == DecisionSnapshot(
+        SuggestionState.DISMISSED, None, dismissed[2]
+    )
+    clock.advance(minutes=5)
+    await service.undo_accept_into(
+        second.suggestion_ids[0], action.public_id, 2, added.source_added, previous=added.previous
+    )
+
+    assert await decision_row(session, "msg-2") == dismissed  # The original time, too.
+    assert (await states(session, second))[0] == (SuggestionState.DISMISSED, None)
+
+
+async def test_undoing_an_add_over_a_deleted_action_s_decision_restores_that_decision(
+    session: AsyncSession, service: ActionService, clock: Clock
+) -> None:
+    first = await seed(session)
+    second = await seed(session, (suggestion(0, "Other"),), message="msg-2")
+    deleted = await service.accept(first.suggestion_ids[0])
+    target = await service.accept(second.suggestion_ids[0])
+    await service.delete(deleted.public_id, 1)
+    before = await decision_row(session, "msg-1")
+    before_view = (await states(session, first))[0]
+    clock.advance(minutes=5)
+
+    added = await service.accept_into(first.suggestion_ids[0], target.public_id, 1)
+    assert added.previous.decision is SuggestionState.ACCEPTED
+    await service.undo_accept_into(
+        first.suggestion_ids[0], target.public_id, 2, added.source_added, previous=added.previous
+    )
+
+    assert await decision_row(session, "msg-1") == before
+    assert (await states(session, first))[0] == before_view
+    # Restoring the deleted action still brings the suggestion back with it.
+    assert (await service.restore(deleted.public_id)).public_id == deleted.public_id
+    assert (await states(session, first))[0] == (SuggestionState.ACCEPTED, deleted.public_id)
 
 
 @pytest.mark.parametrize("change", ["edited", "pending", "other_action", "deleted"])
@@ -1138,7 +1223,9 @@ async def test_undo_add_is_refused_once_anything_changed(
     before = await counts(session)
 
     with pytest.raises(ActionConflictError, match="Only an unchanged addition can be undone."):
-        await service.undo_accept_into(suggestion_id, action.public_id, revision, True)
+        await service.undo_accept_into(
+            suggestion_id, action.public_id, revision, True, previous=DecisionSnapshot()
+        )
 
     assert await counts(session) == before  # No decision or source was removed.
     if change != "deleted":

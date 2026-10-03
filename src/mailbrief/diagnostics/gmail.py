@@ -1270,6 +1270,9 @@ async def actions(
                     print(str(exc))  # Static, such as a suggestion owned by another action.
                     return 3
                 title = _terminal_safe(added.action.title)
+                if not added.changed:
+                    print(f"Already added to: {title}.")
+                    return 0
                 print(f"Added to: {title} ({added.action.public_id})")
                 return 0
             if action == "accept":

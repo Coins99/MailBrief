@@ -17,6 +17,7 @@ from mailbrief.domain.actions import (
     ActionFilter,
     ActionProposal,
     StepEdit,
+    SuggestionState,
     ThreadLink,
 )
 from mailbrief.domain.analysis import DeadlinePrecision
@@ -39,7 +40,7 @@ from mailbrief.domain.messages import RankedMessage
 from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
-from mailbrief.services.actions import AcceptedInto
+from mailbrief.services.actions import AcceptedInto, DecisionSnapshot
 from mailbrief.services.brief import ConsentGate, ShortlistGate
 from mailbrief.services.consent import NO_CONSENT
 from mailbrief.services.preferences import PreferencesConflictError
@@ -98,7 +99,8 @@ class FakeBackend(FakeDrafts):
         self.key_value: SecretStr | None = None
         self.revoked = False
         # The actions continuing each message's thread, for every brief shown; links_fail
-        # makes every read fail. source_added is what accept_into reports.
+        # makes every read fail. source_added and add_changed are what accept_into reports,
+        # and undo_previous the decision the last undo was given to put back.
         self.links: dict[str, tuple[ThreadLink, ...]] = {}
         self.links_fail: Exception | None = None
         self.link_calls: list[DailyDigest] = []
@@ -120,6 +122,8 @@ class FakeBackend(FakeDrafts):
         self.permission_saves: list[int] = []
         self.permission_accounts: list[str | None] = []
         self.source_added = True
+        self.add_changed = True
+        self.undo_previous: DecisionSnapshot | None = None
         self.sync = SyncResult(
             account_id="owner@example.com",
             range_start_utc=datetime(2026, 9, 4, tzinfo=UTC),
@@ -183,11 +187,25 @@ class FakeBackend(FakeDrafts):
     async def accept_into(self, suggestion_id: int, public_id: str, revision: int) -> AcceptedInto:
         await self._act("accept_into", suggestion_id, public_id, revision)
         action = make_action(public_id=public_id, title="Send the deck", revision=revision + 1)
-        return AcceptedInto(action, source_added=self.source_added)
+        return AcceptedInto(
+            action,
+            source_added=self.source_added,
+            changed=self.add_changed,
+            previous=DecisionSnapshot(
+                SuggestionState.DISMISSED, None, datetime(2026, 9, 1, tzinfo=UTC)
+            ),
+        )
 
     async def undo_accept_into(
-        self, suggestion_id: int, public_id: str, revision: int, remove_source: bool
+        self,
+        suggestion_id: int,
+        public_id: str,
+        revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
     ) -> Action:
+        self.undo_previous = previous
         await self._act("undo_accept_into", suggestion_id, public_id, revision, remove_source)
         return make_action(public_id=public_id, revision=revision + 1)
 

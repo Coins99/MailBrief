@@ -16,7 +16,7 @@ from mailbrief.domain.analysis import ActionOwnership, ActionSuggestion
 from mailbrief.domain.briefs import AnalysisOutcome
 from mailbrief.domain.digests import DailyDigest, DigestSection, DigestStatus
 from mailbrief.domain.messages import AccountIdentity, ProviderKind, RankedMessage
-from mailbrief.services.actions import ActionConflictError
+from mailbrief.services.actions import ActionConflictError, DecisionSnapshot
 from mailbrief.services.analysis import PlannedMessage, suggestion_fingerprint
 from mailbrief.services.proposals import ProposalNotFoundError, ProposalService
 from mailbrief.storage.database import Database
@@ -188,7 +188,10 @@ async def test_the_runtime_links_briefs_adds_to_actions_and_marks_threads_seen(
         added = await runtime.accept_into(second, action.public_id, 1)
         assert (added.action.revision, added.source_added) == (2, False)
         assert states(await runtime.load_saved()) == [SuggestionState.ACCEPTED] * 2
-        undone = await runtime.undo_accept_into(second, action.public_id, 2, added.source_added)
+        assert added.changed and added.previous == DecisionSnapshot()
+        undone = await runtime.undo_accept_into(
+            second, action.public_id, 2, added.source_added, previous=added.previous
+        )
         assert undone.revision == 3
         assert states(await runtime.load_saved()) == [
             SuggestionState.ACCEPTED,
