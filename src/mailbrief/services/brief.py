@@ -17,6 +17,9 @@ from mailbrief.domain.briefs import (
     TransmissionPreview,
 )
 from mailbrief.domain.digests import DigestCoverage, SyncProgress, SyncResult, SyncStage, SyncStatus
+from mailbrief.ports.ai_provider import AIProvider
+from mailbrief.ports.email_provider import EmailProvider
+from mailbrief.ports.threads import ThreadReader
 from mailbrief.services.analysis import (
     KEY_MISSING,
     AnalysisPlan,
@@ -33,7 +36,13 @@ from mailbrief.services.history import BriefDateError, check_brief_date
 from mailbrief.services.proposals import ProposalService
 from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
 from mailbrief.services.ranking import ShortlistGate as ShortlistGate
-from mailbrief.storage.repositories import ConsentRepository
+from mailbrief.services.threads import ThreadService
+from mailbrief.storage.repositories import (
+    AccountRepository,
+    ConsentRepository,
+    MessageRepository,
+    SyncRunRepository,
+)
 from mailbrief.storage.tables import AccountTable
 
 logger = logging.getLogger(__name__)
@@ -408,3 +417,37 @@ class BriefService:
             ai_provider=self._analysis.provider_name if used else None,
             ai_model=self._analysis.model_name if used else None,
         )
+
+
+class BriefSource(EmailProvider, ThreadReader, Protocol):
+    """A mail provider that syncs metadata, reads bodies and reads thread metadata, as
+    Gmail does: everything the brief pipeline asks of one."""
+
+
+def build_brief_service(
+    session: AsyncSession,
+    provider: BriefSource,
+    ai: AIProvider,
+    *,
+    consent_gate: ConsentGate,
+    body_limit: int,
+    batch_size: int,
+    clock: Callable[[], datetime] = _utc_now,
+) -> BriefService:
+    """The brief pipeline, wired once for the desktop app and the diagnostic CLI.
+    Thread tracking (ADR 0015, 0016) is always composed."""
+    return BriefService(
+        session=session,
+        application=ApplicationService(
+            provider,
+            MessageRepository(session),
+            SyncRunRepository(session),
+            AccountRepository(session),
+            threads=ThreadService(session, provider),
+        ),
+        bodies=BodyService(provider, limit=body_limit),
+        analysis=AnalysisService(session, ai, batch_size=batch_size),
+        digests=DigestService(session),
+        consent_gate=consent_gate,
+        clock=clock,
+    )

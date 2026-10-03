@@ -43,19 +43,16 @@ from mailbrief.providers.groq.credentials import GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.providers.groq.provider import PRIVACY_NOTICE, PROVIDER_NAME
 from mailbrief.services.actions import AcceptedInto, ActionService, DecisionSnapshot
-from mailbrief.services.analysis import AnalysisService
-from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import (
     CONSENT_DISCLOSURE_VERSION,
-    BriefService,
     ConsentGate,
     ShortlistGate,
+    build_brief_service,
     permission_preview,
 )
 from mailbrief.services.calendar import day_window, resolve_timezone
 from mailbrief.services.consent import auto_send_permission, set_auto_send
-from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
     DRAFTING_SCOPE,
@@ -72,7 +69,6 @@ from mailbrief.services.preferences import (
     owner_zone,
 )
 from mailbrief.services.proposals import ProposalService
-from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -81,7 +77,6 @@ from mailbrief.storage.repositories import (
     DigestRepository,
     MessageRepository,
     OwnerConsentRepository,
-    SyncRunRepository,
 )
 from mailbrief.ui.preferences import DesktopPreferences, PreferencesStore
 
@@ -240,19 +235,13 @@ class DesktopRuntime:
             groq_provider(settings) as ai,
             self._storage().session() as session,
         ):
-            service = BriefService(
-                session=session,
-                application=ApplicationService(
-                    provider,
-                    MessageRepository(session),
-                    SyncRunRepository(session),
-                    AccountRepository(session),
-                    threads=ThreadService(session, provider),
-                ),
-                bodies=BodyService(provider, limit=settings.ai_body_character_limit),
-                analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),
-                digests=DigestService(session),
+            service = build_brief_service(
+                session,
+                provider,
+                ai,
                 consent_gate=gate,
+                body_limit=settings.ai_body_character_limit,
+                batch_size=settings.ai_batch_size,
             )
             return await service.generate(
                 tz_key=zone.key,

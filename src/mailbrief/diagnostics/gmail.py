@@ -76,12 +76,11 @@ from mailbrief.services.actions import (
     ActionService,
     SuggestionNotFoundError,
 )
-from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import (
     CONSENT_DISCLOSURE_VERSION,
-    BriefService,
+    build_brief_service,
     disclosure_lines,
     needs_review_sentence,
     permission_preview,
@@ -95,7 +94,6 @@ from mailbrief.services.calendar import (
     resolve_timezone,
 )
 from mailbrief.services.consent import NO_CONSENT, auto_send_permission, set_auto_send
-from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
     DRAFTING_SCOPE,
@@ -1039,21 +1037,15 @@ async def brief(
         database = Database.from_path(path)
         try:
             async with database.session() as session:
-                service = BriefService(
-                    session=session,
-                    application=ApplicationService(
-                        provider,
-                        MessageRepository(session),
-                        SyncRunRepository(session),
-                        AccountRepository(session),
-                        threads=ThreadService(session, provider),
-                    ),
-                    bodies=BodyService(provider, limit=settings.ai_body_character_limit),
-                    analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),
-                    digests=DigestService(session),
+                service = build_brief_service(
+                    session,
+                    provider,
+                    ai,
                     consent_gate=(
                         _NeverAsks() if automatic else CliConsentGate(assume_yes=assume_yes)
                     ),
+                    body_limit=settings.ai_body_character_limit,
+                    batch_size=settings.ai_batch_size,
                     clock=lambda: now,
                 )
                 result = await service.generate(
