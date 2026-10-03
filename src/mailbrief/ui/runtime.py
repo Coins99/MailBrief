@@ -1,7 +1,8 @@
 """Desktop composition; every operation owns and closes its provider/session resources."""
 
 import asyncio
-from collections.abc import Callable, Sequence
+import contextlib
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -600,45 +601,36 @@ class DesktopRuntime:
     # AI drafting (ADR 0013). Groq and, only when the owner chooses the email, Gmail are
     # opened for each call and closed afterwards.
 
-    async def available_drafting_parts(self, public_id: str) -> frozenset[DraftContextPart]:
+    @contextlib.asynccontextmanager
+    async def _drafting(self) -> AsyncIterator[DraftingService]:
+        """A drafting service under the owner's preferences, with Groq open for the call.
+        Gmail opens only if the owner's chosen email has to be downloaded."""
         preferences = await self.get_owner_preferences()
         settings = await self._settings(preferences)
         async with groq_provider(settings) as ai, self._storage().session() as session:
-            service = DraftingService(
+            yield DraftingService(
                 session,
                 ai,
                 BodyService(_GmailBodies(settings), limit=settings.ai_body_character_limit),
                 zone=owner_zone(preferences),
                 excluded_senders=preferences.excluded_senders,
             )
+
+    async def available_drafting_parts(self, public_id: str) -> frozenset[DraftContextPart]:
+        async with self._drafting() as service:
             return await service.available_parts(public_id)
 
     async def prepare_drafting(self, public_id: str, options: DraftingOptions) -> DraftingPlan:
         """Build what would be sent; choosing the email downloads its body now, in memory."""
-        preferences = await self.get_owner_preferences()
-        settings = await self._settings(preferences)
-        async with groq_provider(settings) as ai, self._storage().session() as session:
-            service = DraftingService(
-                session,
-                ai,
-                BodyService(_GmailBodies(settings), limit=settings.ai_body_character_limit),
-                zone=owner_zone(preferences),
-                excluded_senders=preferences.excluded_senders,
-            )
+        async with self._drafting() as service:
             return await service.prepare(public_id, options)
 
     async def generate_draft(
         self, plan: DraftingPlan, gate: DraftingGate, cancel: asyncio.Event
     ) -> DraftingOutcome:
-        preferences = await self.get_owner_preferences()
-        settings = await self._settings(preferences)
-        async with groq_provider(settings) as ai, self._storage().session() as session:
-            service = DraftingService(
-                session,
-                ai,
-                zone=owner_zone(preferences),
-                excluded_senders=preferences.excluded_senders,
-            )
+        """Send the approved plan; the email's body is already in it, so Gmail is never
+        opened here."""
+        async with self._drafting() as service:
             return await service.generate(plan, gate, cancel)
 
     async def close(self) -> None:

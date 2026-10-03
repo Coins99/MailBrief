@@ -111,6 +111,7 @@ async def test_drafting_through_the_runtime(
 
         outcome = await runtime.generate_draft(plan, Approve(), asyncio.Event())
 
+        assert FakeGmail.opened == 1  # Generating sends the plan's body; Gmail stays closed.
         assert outcome.status is DraftingStatus.GENERATED
         assert outcome.draft is not None and outcome.draft.body == "Yes, approved. [[amount]]"
         sent = json.loads(json.loads(route.calls.last.request.content)["messages"][1]["content"])
