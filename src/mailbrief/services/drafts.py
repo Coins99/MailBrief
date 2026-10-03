@@ -13,6 +13,7 @@ from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mailbrief.domain.common import utc_now
 from mailbrief.domain.drafting import DraftGenerationInfo, GeneratedDraft
 from mailbrief.domain.drafts import (
     DRAFT_TITLE_MAX_CHARS,
@@ -27,7 +28,7 @@ from mailbrief.domain.drafts import (
     DraftVersionOrigin,
 )
 from mailbrief.services.actions import ActionNotFoundError
-from mailbrief.services.owned import OwnedRecordService, new_public_id, utc_now
+from mailbrief.services.owned import OwnedRecordService, new_public_id
 from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.drafts import (
     DraftRepository,

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Final, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from mailbrief.domain.briefs import (
     BriefStatus,
     TransmissionPreview,
 )
+from mailbrief.domain.common import counted, utc_now
 from mailbrief.domain.digests import DigestCoverage, SyncProgress, SyncResult, SyncStage, SyncStatus
 from mailbrief.ports.ai_provider import AIProvider
 from mailbrief.ports.email_provider import EmailProvider
@@ -62,10 +63,6 @@ class ConsentGate(Protocol):
     async def confirm(self, preview: TransmissionPreview) -> bool: ...
 
 
-def _count(number: int, noun: str) -> str:
-    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
-
-
 def provider_display_name(name: str) -> str:
     """The provider's name as people write it; unknown names pass through unchanged."""
     return _DISPLAY_NAMES.get(name, name)
@@ -76,9 +73,9 @@ def disclosure_lines(preview: TransmissionPreview) -> tuple[str, ...]:
     provider = provider_display_name(preview.provider_name)
     cut = preview.truncated_count
     lines = [
-        f"MailBrief will send {_count(preview.message_count, 'message')} to {provider} "
+        f"MailBrief will send {counted(preview.message_count, 'message')} to {provider} "
         f"({preview.model_name}) for analysis.",
-        f"{_count(cut, 'message')} {'is' if cut == 1 else 'are'} cut to fit the length limit."
+        f"{counted(cut, 'message')} {'is' if cut == 1 else 'are'} cut to fit the length limit."
         if cut
         else "No message is cut to fit the length limit.",
         "For each message it sends: " + "; ".join(preview.fields) + ".",
@@ -87,7 +84,7 @@ def disclosure_lines(preview: TransmissionPreview) -> tuple[str, ...]:
     ]
     if preview.reused_count:
         lines.append(
-            f"{_count(preview.reused_count, 'message')} already analyzed will not be sent again."
+            f"{counted(preview.reused_count, 'message')} already analyzed will not be sent again."
         )
     if preview.first_use:
         lines.append("Your consent is remembered for this account until you revoke it.")
@@ -118,9 +115,8 @@ def permission_preview(
 
 def permission_sentence(limit: int, account_email: str, provider_name: str) -> str:
     """The plain sentence that says what the automatic-analysis permission allows."""
-    noun = "message" if limit == 1 else "messages"
     return (
-        f"Automatic runs may send up to {limit} {noun} from {account_email} to "
+        f"Automatic runs may send up to {counted(limit, 'message')} from {account_email} to "
         f"{provider_display_name(provider_name)} without asking. "
         "Revoke consent in Settings to stop."
     )
@@ -132,12 +128,12 @@ def needs_review_sentence(unrefreshed: int, ready: int) -> str:
     over its send limit, unreadable or failed in analysis, and then how many new messages
     are ready as well, if any. Shared by the CLI and the UI."""
     sentence = (
-        f"Today's brief needs your review: {_count(unrefreshed, 'message')} from it couldn't "
+        f"Today's brief needs your review: {counted(unrefreshed, 'message')} from it couldn't "
         "be refreshed automatically."
     )
     if ready == 0:
         return sentence
-    return f"{sentence} {_count(ready, 'new message')} {'is' if ready == 1 else 'are'} also ready."
+    return f"{sentence} {counted(ready, 'new message')} {'is' if ready == 1 else 'are'} also ready."
 
 
 def _not_refreshed(
@@ -149,10 +145,6 @@ def _not_refreshed(
         for item in messages
         if item.outcome not in IN_BRIEF and item.ranked.message.provider_message_id in carried
     ]
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 class BriefService:
@@ -167,7 +159,7 @@ class BriefService:
         analysis: AnalysisService,
         digests: DigestService,
         consent_gate: ConsentGate,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] = utc_now,
         proposals: ProposalService | None = None,
     ) -> None:
         self._session = session
@@ -432,7 +424,7 @@ def build_brief_service(
     consent_gate: ConsentGate,
     body_limit: int,
     batch_size: int,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
 ) -> BriefService:
     """The brief pipeline, wired once for the desktop app and the diagnostic CLI.
     Thread tracking (ADR 0015, 0016) is always composed."""

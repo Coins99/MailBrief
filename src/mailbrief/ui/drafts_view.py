@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mailbrief.domain.common import counted
 from mailbrief.domain.drafts import KIND_NAMES, DraftKind, DraftSummary
 from mailbrief.ui.lists import ActivatingList
 
@@ -32,7 +33,7 @@ def describe(summary: DraftSummary, zone: ZoneInfo) -> str:
     parts = [f"{KIND_NAMES[summary.kind]} · {summary.display_title} — updated {updated}"]
     count = summary.placeholder_count
     if count:
-        parts.append(f"{count} placeholder{'' if count == 1 else 's'}")
+        parts.append(counted(count, "placeholder"))
     if summary.action_title:
         parts.append(f"for “{summary.action_title}”")
     return " · ".join(parts)

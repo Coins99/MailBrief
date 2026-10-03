@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mailbrief.domain.common import counted
 from mailbrief.domain.digests import SavedBriefSummary
 from mailbrief.services.history import CATCH_UP_DAYS
 from mailbrief.ui.lists import ActivatingList
@@ -37,10 +38,9 @@ def _plain(text: str = "") -> QLabel:
 
 
 def summary_text(summary: SavedBriefSummary) -> str:
-    noun = "item" if summary.item_count == 1 else "items"
     return (
         f"{summary.local_date.isoformat()} · {summary.status.value} · "
-        f"{summary.item_count} {noun} · {summary.account_email}"
+        f"{counted(summary.item_count, 'item')} · {summary.account_email}"
     )
 
 

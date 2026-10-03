@@ -27,8 +27,9 @@ from mailbrief.domain.analysis import (
     DeadlinePrecision,
     deadline_due_at,
 )
+from mailbrief.domain.common import utc_now
 from mailbrief.domain.messages import ProviderKind
-from mailbrief.services.owned import OwnedRecordService, new_public_id, utc_now
+from mailbrief.services.owned import OwnedRecordService, new_public_id
 from mailbrief.storage.actions import ActionRepository, DecisionKey, suggestion_from_row
 from mailbrief.storage.tables import (
     AccountTable,

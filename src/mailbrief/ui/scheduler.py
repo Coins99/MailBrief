@@ -8,15 +8,13 @@ no tray or background process, and ``stop()`` ends the timer.
 """
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from mailbrief.domain.common import utc_now
+
 TICK_MS = 60_000  # A minute: how often due time is checked, and how long a retry waits.
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 class RefreshScheduler(QObject):
@@ -34,7 +32,7 @@ class RefreshScheduler(QObject):
         self,
         parent: QObject | None = None,
         *,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] = utc_now,
         tick_ms: int = TICK_MS,
     ) -> None:
         super().__init__(parent)

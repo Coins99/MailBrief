@@ -2,16 +2,12 @@
 
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
-from mailbrief.domain.common import normalize_utc
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+from mailbrief.domain.common import normalize_utc, utc_now
 
 
 def new_public_id() -> str:
