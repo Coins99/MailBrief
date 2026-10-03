@@ -1,12 +1,9 @@
-"""Shared HTTP retry policy, execution engine, duration parsing, and response classification."""
+"""Retry-delay parsing, Groq response classification and retry-wait accounting."""
 
-import asyncio
 import email.utils
-import logging
 import math
 import re
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,10 +18,7 @@ from mailbrief.ports.errors import (
     ProviderPermissionError,
     ProviderRateLimitError,
     ProviderResponseError,
-    ProviderTimeoutError,
 )
-
-logger = logging.getLogger(__name__)
 
 _DURATION_RE = re.compile(
     r"^(?=[0-9])(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m(?!s))?(?:(?P<seconds>\d+(?:\.\d+)?)s)?(?:(?P<ms>\d+(?:\.\d+)?)ms)?$"
@@ -195,32 +189,6 @@ def classify_groq_response(response: httpx.Response, client_request_id: str) -> 
     )
 
 
-@dataclass(frozen=True)
-class RetryPolicy:
-    """Configurable HTTP retry and classification rules."""
-
-    parse_retry_after: Callable[[str | None], float | None]
-    classify_response: Callable[[httpx.Response, str], ResponseVerdict]
-    client_request_id_header: str | None = None
-    max_retries: int = 3
-    request_deadline_seconds: float = 45.0
-    min_remaining_budget_seconds: float = 2.0
-    connect_timeout: float = 10.0
-    read_timeout: float = 30.0
-    write_timeout: float = 10.0
-    pool_timeout: float = 10.0
-    transient_delays: tuple[float, ...] = (1.0, 2.0, 4.0)
-
-
-@dataclass(frozen=True)
-class RetryResult:
-    """Execution telemetry and returned HTTP response."""
-
-    response: httpx.Response
-    attempts: int
-    accumulated_sleep_seconds: float
-
-
 @dataclass
 class RetryTracker:
     """Accumulates retry attempts and sleep durations across operations."""
@@ -236,124 +204,3 @@ class RetryTracker:
 current_retry_tracker: ContextVar[RetryTracker | None] = ContextVar(
     "current_retry_tracker", default=None
 )
-
-
-async def execute_with_retry(
-    client: httpx.AsyncClient,
-    build_request: Callable[[], httpx.Request],
-    *,
-    policy: RetryPolicy,
-    client_request_id: str,
-    on_retry: Callable[[int, float], None] | None = None,
-) -> RetryResult:
-    """Execute a single logical request with wall-clock deadline, timeout clamping, and sleep accounting."""  # noqa: E501
-    deadline = time.monotonic() + policy.request_deadline_seconds
-    attempt = 0
-    accumulated_sleep = 0.0
-
-    while True:
-        now = time.monotonic()
-        remaining = deadline - now
-        if remaining < policy.min_remaining_budget_seconds:
-            raise ProviderTimeoutError(
-                "HTTP request deadline exceeded.",
-                client_request_id=client_request_id,
-                accumulated_sleep_seconds=accumulated_sleep,
-            )
-
-        connect_to = min(policy.connect_timeout, remaining)
-        read_to = min(policy.read_timeout, remaining)
-
-        request = build_request()
-        if policy.client_request_id_header:
-            request.headers[policy.client_request_id_header] = client_request_id
-
-        # Stamp timeout extensions inside the engine so callers cannot forget:
-        request.extensions["timeout"] = {
-            "connect": connect_to,
-            "read": read_to,
-            "write": policy.write_timeout,
-            "pool": policy.pool_timeout,
-        }
-
-        try:
-            response = await client.send(
-                request,
-                follow_redirects=False,
-            )
-        except httpx.TransportError as exc:
-            delay = (
-                policy.transient_delays[attempt]
-                if attempt < len(policy.transient_delays)
-                else policy.transient_delays[-1]
-            )
-            if not math.isfinite(delay) or delay < 0.0:
-                delay = 1.0
-            delay = max(0.0, delay)
-
-            if attempt < policy.max_retries and (time.monotonic() + delay) <= deadline:
-                attempt += 1
-                if on_retry is not None:
-                    try:
-                        on_retry(attempt, delay)
-                    except Exception as cb_exc:
-                        logger.warning("on_retry callback raised an exception: %s", cb_exc)
-                tracker = current_retry_tracker.get()
-                if tracker is not None:
-                    tracker.record_sleep(delay)
-                await asyncio.sleep(delay)
-                accumulated_sleep += delay
-                continue
-            raise ProviderError(
-                "HTTP network request failed.",
-                client_request_id=client_request_id,
-                accumulated_sleep_seconds=accumulated_sleep,
-            ) from exc
-
-        verdict = policy.classify_response(response, client_request_id)
-        if verdict.kind == VerdictKind.SUCCESS:
-            return RetryResult(
-                response=response,
-                attempts=attempt + 1,
-                accumulated_sleep_seconds=accumulated_sleep,
-            )
-
-        exc_to_raise = verdict.exception or ProviderError(
-            f"HTTP request failed with status {response.status_code}.",
-            client_request_id=client_request_id,
-        )
-        exc_to_raise.accumulated_sleep_seconds = accumulated_sleep  # type: ignore[attr-defined]
-
-        if verdict.kind == VerdictKind.RETRY:
-            raw_delay = (
-                verdict.retry_delay
-                if verdict.retry_delay is not None
-                else (
-                    policy.transient_delays[attempt]
-                    if attempt < len(policy.transient_delays)
-                    else policy.transient_delays[-1]
-                )
-            )
-            if not math.isfinite(raw_delay) or raw_delay < 0.0:
-                raw_delay = (
-                    policy.transient_delays[attempt]
-                    if attempt < len(policy.transient_delays)
-                    else policy.transient_delays[-1]
-                )
-            delay = max(0.0, raw_delay)
-
-            if attempt < policy.max_retries and (time.monotonic() + delay) <= deadline:
-                attempt += 1
-                if on_retry is not None:
-                    try:
-                        on_retry(attempt, delay)
-                    except Exception as cb_exc:
-                        logger.warning("on_retry callback raised an exception: %s", cb_exc)
-                tracker = current_retry_tracker.get()
-                if tracker is not None:
-                    tracker.record_sleep(delay)
-                await asyncio.sleep(delay)
-                accumulated_sleep += delay
-                continue
-
-        raise exc_to_raise
