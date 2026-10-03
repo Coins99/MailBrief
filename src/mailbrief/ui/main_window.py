@@ -1356,6 +1356,7 @@ class MainWindow(QMainWindow):
             self._set_busy(False)
 
     async def _open_cached(self) -> None:
+        self.cached_dialog.show_today()  # Today in the owner's zone, each time it opens.
         self.cached_dialog.configure(await self.backend.cached_accounts())
         self.cached_dialog.open()
         selected = self.cached_dialog.selection()

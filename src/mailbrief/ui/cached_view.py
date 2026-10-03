@@ -1,6 +1,7 @@
 """Read-only cached mail browsing; no provider calls or body downloads."""
 
-from datetime import date
+from collections.abc import Callable
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QDate, Qt, QUrl, Signal
@@ -30,14 +31,16 @@ class CachedMailDialog(QDialog):
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.resize(850, 620)
         self._page: CachedMailPage | None = None
-        # The owner's zone, for the last sync time; the window sets it.
+        # The owner's zone, for today's date and the last sync time; the window sets it.
         self.zone: ZoneInfo | None = None
+        # Today's date in that zone, as the picker opens on it; a test injects a clock.
+        self.today: Callable[[], date] = lambda: datetime.now(self.zone).date()
         layout = QVBoxLayout(self)
         filters = QHBoxLayout()
         self.accounts = QComboBox()
         self.accounts.setAccessibleName("Cached Gmail account")
-        self.day = QDateEdit(QDate.currentDate())
-        self.day.setAccessibleName("Received date in your local timezone")
+        self.day = QDateEdit()
+        self.day.setAccessibleName("Received date in your time zone")
         self.day.setCalendarPopup(True)
         self.day.setDisplayFormat("yyyy-MM-dd")
         filters.addWidget(self.accounts, 1)
@@ -74,6 +77,15 @@ class CachedMailDialog(QDialog):
         self.messages.currentRowChanged.connect(self._show_message)
         self.source.clicked.connect(self._open_source)
         self.set_busy(False)
+        self.show_today()
+
+    def show_today(self) -> None:
+        """Set the picker to today in the owner's zone, whatever the computer's zone; the
+        caller loads the page, so no page is requested here."""
+        today = self.today()
+        self.day.blockSignals(True)
+        self.day.setDate(QDate(today.year, today.month, today.day))
+        self.day.blockSignals(False)
 
     def configure(self, accounts: tuple[CachedAccount, ...]) -> None:
         self.accounts.blockSignals(True)
