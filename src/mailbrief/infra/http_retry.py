@@ -1,10 +1,9 @@
-"""Retry-delay parsing, Groq response classification and retry-wait accounting."""
+"""Retry-delay parsing and Groq response classification."""
 
 import email.utils
 import math
 import re
 from collections.abc import Mapping
-from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -187,20 +186,3 @@ def classify_groq_response(response: httpx.Response, client_request_id: str) -> 
         ),
         retry_delay=delay,
     )
-
-
-@dataclass
-class RetryTracker:
-    """Accumulates retry attempts and sleep durations across operations."""
-
-    sleep_seconds: float = 0.0
-    retry_count: int = 0
-
-    def record_sleep(self, delay: float) -> None:
-        self.sleep_seconds += delay
-        self.retry_count += 1
-
-
-current_retry_tracker: ContextVar[RetryTracker | None] = ContextVar(
-    "current_retry_tracker", default=None
-)

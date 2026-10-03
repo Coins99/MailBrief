@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from mailbrief.domain.digests import SyncProgress, SyncResult, SyncStage, SyncStatus
-from mailbrief.infra.http_retry import RetryTracker, current_retry_tracker
 from mailbrief.ports.email_provider import EmailProvider
 from mailbrief.ports.errors import (
     AuthenticationRequiredError,
@@ -89,32 +88,6 @@ class SyncService:
         last-sync time. Provider rate-limit waits of up to MAX_SINGLE_WAIT_SECONDS are
         honored by resuming from the last committed page.
         """
-        tracker = RetryTracker()
-        token = current_retry_tracker.set(tracker)
-        try:
-            return await self._sync_day(
-                account_id=account_id,
-                account_identity=account_identity,
-                window=window,
-                progress=progress,
-                cancel=cancel,
-                tracker=tracker,
-                record_last_sync=record_last_sync,
-            )
-        finally:
-            current_retry_tracker.reset(token)
-
-    async def _sync_day(
-        self,
-        *,
-        account_id: int,
-        account_identity: str,
-        window: DayWindow,
-        progress: Callable[[SyncProgress], None] | None,
-        cancel: asyncio.Event | None,
-        tracker: RetryTracker,
-        record_last_sync: bool,
-    ) -> SyncResult:
         sync_run = await self._sync_run_repo.create_sync_run(
             account_id=account_id,
             range_start_utc=window.start_utc,
@@ -171,8 +144,7 @@ class SyncService:
         work_start = time.monotonic()
 
         def work_budget_exceeded() -> bool:
-            waited = tracker.sleep_seconds + local_wait_seconds
-            return (time.monotonic() - work_start) - waited > MAX_RUN_WORK_SECONDS
+            return (time.monotonic() - work_start) - local_wait_seconds > MAX_RUN_WORK_SECONDS
 
         emit_progress()
         try:
@@ -216,20 +188,17 @@ class SyncService:
                     break
 
                 except ProviderRateLimitError as exc:
-                    if tracker.sleep_seconds == 0.0 and exc.accumulated_sleep_seconds > 0.0:
-                        local_wait_seconds += exc.accumulated_sleep_seconds
-                    total_wait_seconds = tracker.sleep_seconds + local_wait_seconds
                     wait_delay = exc.retry_after_seconds
                     if (
                         wait_delay is None
                         or wait_delay > MAX_SINGLE_WAIT_SECONDS
-                        or (total_wait_seconds + wait_delay) > MAX_TOTAL_WAIT_SECONDS
+                        or (local_wait_seconds + wait_delay) > MAX_TOTAL_WAIT_SECONDS
                     ):
                         error_code = exc.provider_error_code or "RATE_LIMITED"
                         logger.warning(
                             "Rate-limit wait ceiling exceeded (wait=%s, waited=%.1fs): %s",
                             wait_delay,
-                            total_wait_seconds,
+                            local_wait_seconds,
                             error_code,
                         )
                         status = SyncStatus.PARTIAL if pages_count > 0 else SyncStatus.FAILED

@@ -1,13 +1,11 @@
-"""Unit tests for shared HTTP retry policy and execution engine."""
+"""Retry-delay parsing and Groq response classification."""
 
 import httpx
 import pytest
 
 from mailbrief.infra.http_retry import (
-    RetryTracker,
     VerdictKind,
     classify_groq_response,
-    current_retry_tracker,
     parse_ai_ratelimit_reset,
     parse_retry_delay,
 )
@@ -199,14 +197,3 @@ def test_classify_groq_response_other_4xx_terminal() -> None:
     verdict = classify_groq_response(response, "client-req")
     assert verdict.kind == VerdictKind.FAIL
     assert isinstance(verdict.exception, ProviderResponseError)
-
-
-def test_retry_tracker_accumulates_recorded_sleeps() -> None:
-    tracker = RetryTracker()
-    tracker.record_sleep(1.5)
-    tracker.record_sleep(2.0)
-    assert (tracker.sleep_seconds, tracker.retry_count) == (3.5, 2)
-
-
-def test_current_retry_tracker_defaults_to_none() -> None:
-    assert current_retry_tracker.get() is None
