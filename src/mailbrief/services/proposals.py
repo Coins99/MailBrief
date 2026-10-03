@@ -7,8 +7,8 @@ text.
 """
 
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Sequence
-from datetime import UTC, date, datetime
+from collections.abc import Callable, Iterable, Sequence
+from datetime import date, datetime
 from typing import Final
 
 from sqlalchemy import select
@@ -26,6 +26,7 @@ from mailbrief.domain.messages import NormalizedMessage, ProviderKind, is_own_me
 from mailbrief.services.actions import ActionConflictError, touch, urgency
 from mailbrief.services.analysis import PlannedMessage
 from mailbrief.services.deadlines import ResolvedDeadline, suggest_target_for
+from mailbrief.services.owned import OwnedRecordService, utc_now
 from mailbrief.services.threads import own_addresses
 from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.proposals import ProposalRepository, proposal_from_row
@@ -64,10 +65,6 @@ class ProposalNotFoundError(LookupError):
 
     def __init__(self) -> None:
         super().__init__(_NOT_FOUND)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _due(action: ActionTable) -> datetime | None:
@@ -164,27 +161,19 @@ def _new_row(
     return row
 
 
-class ProposalService:
+class ProposalService(OwnedRecordService):
     """Stores, lists and decides follow-up proposals.
 
     Every mutating method reads the clock once, commits once and rolls back on failure.
     """
 
-    def __init__(self, session: AsyncSession, *, clock: Callable[[], datetime] = _utc_now) -> None:
-        self._session = session
-        self._clock = clock
+    def __init__(self, session: AsyncSession, *, clock: Callable[[], datetime] = utc_now) -> None:
+        super().__init__(session, clock=clock)
         self._proposals = ProposalRepository(session)
         self._actions = ActionRepository(session)
 
-    async def _write[T](self, operation: Callable[[datetime], Awaitable[T]]) -> T:
-        now = normalize_utc(self._clock())
-        try:
-            result = await operation(now)
-            await self._session.commit()
-        except BaseException:
-            await self._session.rollback()
-            raise
-        return result
+    def _stale_error(self) -> Exception:
+        return ActionConflictError(_STALE)
 
     async def _row(self, proposal_id: int) -> ActionProposalTable:
         row = await self._proposals.get(proposal_id)
