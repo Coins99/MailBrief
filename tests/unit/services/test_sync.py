@@ -219,9 +219,7 @@ async def test_sync_idempotency_and_ranking_preservation(
     # Set ranking on msg-1
     saved_msg1 = await msg_repo.get_by_provider_message_id(test_account, "msg-1")
     assert saved_msg1 is not None
-    await msg_repo.update_ranking(
-        saved_msg1.id, rank_score=42, rank_reasons=[RankReason.HIGH_IMPORTANCE]
-    )
+    await msg_repo.update_rankings([(saved_msg1.id, 42, [RankReason.HIGH_IMPORTANCE])])
     await async_session.commit()
 
     # Re-sync with updated subject

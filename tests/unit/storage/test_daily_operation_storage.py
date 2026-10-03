@@ -12,7 +12,7 @@ from mailbrief.domain.briefs import AUTO_SEND_LIMIT_MAX
 from mailbrief.domain.digests import DigestCoverage, DigestStatus
 from mailbrief.domain.messages import AccountIdentity, ProviderKind
 from mailbrief.domain.preferences import PreferencesEdit
-from mailbrief.storage import repositories
+from mailbrief.storage import database as storage_database
 from mailbrief.storage.database import Database
 from mailbrief.storage.preferences import apply_edit, preferences_from_row
 from mailbrief.storage.repositories import (
@@ -251,11 +251,12 @@ async def test_a_decline_belongs_to_its_account_and_survives_a_sync(
 async def test_declines_work_across_the_sqlite_batch_size(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(repositories, "MAX_SQLITE_BATCH_SIZE", 2)
+    monkeypatch.setattr(storage_database, "MAX_SQLITE_BATCH_SIZE", 2)
     owner = await account(session)
     keys = [f"m{number}" for number in range(7)]
     await cached(session, owner, *keys)
     messages = MessageRepository(session)
+    assert len(list(storage_database.chunked(keys))) == 4  # The patch really chunks.
 
     assert await messages.set_review_declined(owner.id, keys, AT) == 7
     await session.commit()

@@ -7,7 +7,8 @@ import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import StatementError
 
-from mailbrief.storage.database import Database, sqlite_url
+from mailbrief.storage import database as storage_database
+from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE, Database, chunked, sqlite_url
 from mailbrief.storage.tables import AccountTable, Base, MessageTable
 
 
@@ -156,3 +157,21 @@ async def test_naive_database_timestamp_is_rejected(tmp_path: Path) -> None:
                 )
     finally:
         await database.dispose()
+
+
+def test_chunked_gives_distinct_sorted_values_within_the_batch_size() -> None:
+    values = [5, 3, 5, 1, *range(10, 10 + MAX_SQLITE_BATCH_SIZE)]
+
+    chunks = list(chunked(values))
+
+    assert [len(chunk) for chunk in chunks] == [MAX_SQLITE_BATCH_SIZE, 3]
+    flat = [value for chunk in chunks for value in chunk]
+    assert flat == sorted(set(values))
+    assert list(chunked([])) == []
+    assert list(chunked(iter(["b", "a", "b"]))) == [("a", "b")]  # Any iterable, read once.
+
+
+def test_chunked_reads_the_batch_size_when_called(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(storage_database, "MAX_SQLITE_BATCH_SIZE", 2)
+
+    assert list(chunked([4, 1, 3, 2, 5])) == [(1, 2), (3, 4), (5,)]

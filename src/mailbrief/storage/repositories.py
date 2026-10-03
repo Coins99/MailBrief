@@ -1,5 +1,6 @@
 """Database repositories implementing transactional persistence and domain mappings."""
 
+import itertools
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import cast
@@ -37,7 +38,7 @@ from mailbrief.domain.messages import (
     RankReason,
 )
 from mailbrief.storage.actions import suggestion_from_row, suggestion_views
-from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
+from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE, chunked
 from mailbrief.storage.tables import (
     AccountTable,
     ActionSuggestionTable,
@@ -182,8 +183,7 @@ class MessageRepository:
         unique_messages = list(deduped.values())
 
         saved_rows: list[MessageTable] = []
-        for i in range(0, len(unique_messages), MAX_SQLITE_BATCH_SIZE):
-            batch = unique_messages[i : i + MAX_SQLITE_BATCH_SIZE]
+        for batch in itertools.batched(unique_messages, MAX_SQLITE_BATCH_SIZE, strict=False):
             rows = [
                 {
                     "account_id": account_id,
@@ -242,21 +242,6 @@ class MessageRepository:
             saved_rows.extend(result.all())
 
         return saved_rows
-
-    async def update_ranking(
-        self,
-        message_id: int,
-        rank_score: int,
-        rank_reasons: Sequence[str | RankReason],
-    ) -> None:
-        """Persist computed rank score and readable reasons for a message."""
-        reasons_list = [r.value if isinstance(r, RankReason) else str(r) for r in rank_reasons]
-        stmt = (
-            update(MessageTable)
-            .where(MessageTable.id == message_id)
-            .values(rank_score=rank_score, rank_reasons_json=reasons_list)
-        )
-        await self._session.execute(stmt)
 
     async def update_rankings(
         self,
@@ -353,16 +338,10 @@ class MessageRepository:
             MessageTable.received_at_utc < normalize_utc(end_utc),
         )
         await self._session.execute(update(MessageTable).where(*window).values(is_in_inbox=False))
-        identifiers = sorted(seen_ids)
-        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+        for chunk in chunked(seen_ids):
             await self._session.execute(
                 update(MessageTable)
-                .where(
-                    *window,
-                    MessageTable.provider_message_id.in_(
-                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
-                    ),
-                )
+                .where(*window, MessageTable.provider_message_id.in_(chunk))
                 .values(is_in_inbox=True)
             )
 
@@ -372,15 +351,12 @@ class MessageRepository:
         """The cached messages among these IDs, in any order; IDs no longer cached are
         silently absent."""
         found: list[MessageTable] = []
-        identifiers = sorted(set(provider_message_ids))
-        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+        for chunk in chunked(provider_message_ids):
             result = await self._session.scalars(
                 select(MessageTable)
                 .where(
                     MessageTable.account_id == account_id,
-                    MessageTable.provider_message_id.in_(
-                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
-                    ),
+                    MessageTable.provider_message_id.in_(chunk),
                 )
                 .execution_options(populate_existing=True)
             )
@@ -392,14 +368,11 @@ class MessageRepository:
     ) -> frozenset[str]:
         """The IDs among these that the owner declined in a review (ADR 0017)."""
         found: set[str] = set()
-        identifiers = sorted(set(provider_message_ids))
-        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+        for chunk in chunked(provider_message_ids):
             result = await self._session.scalars(
                 select(MessageTable.provider_message_id).where(
                     MessageTable.account_id == account_id,
-                    MessageTable.provider_message_id.in_(
-                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
-                    ),
+                    MessageTable.provider_message_id.in_(chunk),
                     MessageTable.review_declined_at_utc.is_not(None),
                 )
             )
@@ -416,16 +389,13 @@ class MessageRepository:
         the session show the change. The caller commits.
         """
         changed = 0
-        identifiers = sorted(set(provider_message_ids))
         stamp = None if now_utc is None else normalize_utc(now_utc)
-        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+        for chunk in chunked(provider_message_ids):
             result = await self._session.scalars(
                 select(MessageTable)
                 .where(
                     MessageTable.account_id == account_id,
-                    MessageTable.provider_message_id.in_(
-                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
-                    ),
+                    MessageTable.provider_message_id.in_(chunk),
                 )
                 .execution_options(populate_existing=True)
             )
