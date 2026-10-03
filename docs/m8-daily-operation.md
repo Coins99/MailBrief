@@ -171,7 +171,8 @@ save happened since Settings opened, the save is refused with "Preferences chang
 they were loaded; reopen Settings."
 
 The window applies your time zone and drafting defaults at startup and after each save or
-reset, and redraws the brief, actions and drafts. Changing the time zone changes where
+reset, and redraws the brief, actions and drafts. Browse saved mail opens on today in your
+time zone, whatever the computer's zone, each time you open it. Changing the time zone changes where
 today starts: today's messages are analyzed again once, because the analysis includes the
 zone, and the change can start a new day's brief.
 
@@ -467,8 +468,11 @@ Part 5 is implemented and awaits live acceptance. It needs no migration. The pol
 ### Undo
 
 - **Undo add** reverses an addition while the action is exactly as the addition left it.
-  The suggestion is pending again, and the email stops being a source if the addition made
-  it one. An action's last source always stays.
+  Undo restores exactly what was there before: the suggestion is pending again, or
+  dismissed again, or back with the deleted action it belonged to, and the email stops
+  being a source if the addition made it one. An action's last source always stays.
+- An action that changed nothing offers no Undo: choosing **Add to** for an action the
+  suggestion already belongs to says "Already added to: <title>." and changes nothing.
 - Any later change to the action (an edit, completing it, marking it seen, another
   addition) makes Undo refuse with "Can't undo: it has changed since then." As before,
   Undo covers only the latest change and is withdrawn by an edit or a new brief.
@@ -479,7 +483,8 @@ Part 5 is implemented and awaits live acceptance. It needs no migration. The pol
 ### CLI
 
 - `actions accept N --into PUBLIC_ID [--database PATH]` accepts suggestion N into that
-  action and prints "Added to: <title> (<id>)". An unknown action or suggestion exits 3; a
+  action and prints "Added to: <title> (<id>)", or "Already added to: <title>." (exit 0)
+  when it already belongs to that action. An unknown action or suggestion exits 3; a
   suggestion accepted into another action exits 3 with "That suggestion already belongs to
   another action." Only an open action takes an email: a completed one exits 3 with "Reopen
   the action before adding to it." When you name the action, any thread is allowed; the

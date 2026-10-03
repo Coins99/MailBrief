@@ -70,7 +70,8 @@ can access the database. An incomplete sync with no usable messages also preserv
 the last good brief rather than saving a misleading empty one.
 
 **Browse saved mail (offline)** opens a read-only view of locally cached Gmail
-metadata. Choose an account and received date in your local timezone, and use
+metadata. Choose an account and received date in your time zone (M8: it opens on today
+there, from the Preferences time zone), and use
 100-message pages. The browser includes messages no longer marked as being in the
 Inbox, labels the snapshot as potentially stale, and shows the account's last
 complete sync time. Sender, subject, received time and the existing Gmail preview

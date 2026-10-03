@@ -62,9 +62,13 @@ Added with the desktop display (M8 Part 5).
   email often starts a new thread.
 - **One revision:** the suggestion is accepted into the action, the email becomes a source
   unless it already is one, and nothing else about the action changes.
-- **Undo** works while the action is unchanged since the addition: the suggestion is pending
-  again and the source the addition made is removed. It never removes an action's last
-  source.
+- **Undo** works while the action is unchanged since the addition. It restores exactly what
+  was there before: the suggestion's earlier decision comes back as it was (pending, a
+  dismissal, or an acceptance into an action since deleted, with its original time), and
+  the source the addition made is removed. It never removes an action's last source.
+- **An addition that changed nothing offers no Undo.** Adding a suggestion to the action it
+  already belongs to changes nothing; the desktop and the CLI say "Already added to:
+  <title>." instead (added in the M8 review fixes).
 
 ## Consequences
 
