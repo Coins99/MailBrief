@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.actions import Action, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
+from mailbrief.domain.common import counted
 from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.deadline_text import deadline_text
 from mailbrief.ui.lists import ActivatingList
@@ -77,7 +78,7 @@ def describe(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> s
             replied = _when(thread.owner_replied_at_utc, today=today, zone=zone, clock=False)
             details.append(f"you replied {replied}")
     if proposals := len(pending_proposals(action)):
-        details.append(f"{proposals} {'proposal' if proposals == 1 else 'proposals'}")
+        details.append(counted(proposals, "proposal"))
     return action.title + (" — " + " · ".join(details) if details else "")
 
 

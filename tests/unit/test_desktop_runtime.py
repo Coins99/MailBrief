@@ -211,10 +211,8 @@ async def test_a_brief_uses_the_owner_s_zone_limit_rules_and_ai_limits(
     seen: list[Settings] = []
     monkeypatch.setattr(runtime, "gmail_provider", provider_factory(seen))
     monkeypatch.setattr(runtime, "groq_provider", provider_factory(seen))
-    brief, bodies, analysis = Recorder(), Recorder(), Recorder()
-    monkeypatch.setattr(runtime, "BriefService", brief)
-    monkeypatch.setattr(runtime, "BodyService", bodies)
-    monkeypatch.setattr(runtime, "AnalysisService", analysis)
+    brief = Recorder()
+    monkeypatch.setattr(runtime, "build_brief_service", brief)
     backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
     await backend.load_saved()
     try:
@@ -231,8 +229,8 @@ async def test_a_brief_uses_the_owner_s_zone_limit_rules_and_ai_limits(
         assert call["shortlist_limit"] == 3
         assert call["excluded_senders"] == ("@example.org",)
         assert call["shortlist_gate"] is review
-        assert bodies.built[0]["limit"] == 2_000  # Saved.
-        assert analysis.built[0]["batch_size"] == 4  # Saved.
+        assert brief.built[0]["body_limit"] == 2_000  # Saved.
+        assert brief.built[0]["batch_size"] == 4  # Saved.
         assert {settings.ai_timeout_seconds for settings in seen} == {30}  # Environment.
     finally:
         await backend.close()
@@ -388,7 +386,7 @@ async def test_a_past_day_reaches_the_brief_service(
     monkeypatch.setattr(runtime, "gmail_provider", provider_factory([]))
     monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
     brief = Recorder()
-    monkeypatch.setattr(runtime, "BriefService", brief)
+    monkeypatch.setattr(runtime, "build_brief_service", brief)
     backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
     await backend.load_saved()
     try:
@@ -406,10 +404,8 @@ async def test_an_automatic_run_takes_no_review_asks_nothing_and_is_marked_autom
 ) -> None:
     monkeypatch.setattr(runtime, "gmail_provider", provider_factory([]))
     monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
-    brief, bodies, analysis = Recorder(), Recorder(), Recorder()
-    monkeypatch.setattr(runtime, "BriefService", brief)
-    monkeypatch.setattr(runtime, "BodyService", bodies)
-    monkeypatch.setattr(runtime, "AnalysisService", analysis)
+    brief = Recorder()
+    monkeypatch.setattr(runtime, "build_brief_service", brief)
     backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
     await backend.load_saved()
     try:
@@ -427,7 +423,7 @@ async def test_an_automatic_run_takes_no_review_asks_nothing_and_is_marked_autom
         # The owner's zone, limit and rules apply to an automatic run like any other.
         assert call["tz_key"] == "Asia/Tokyo" and call["shortlist_limit"] == 3
         assert call["excluded_senders"] == ("@example.org",)
-        assert bodies.built[0]["limit"] == 2_000 and analysis.built[0]["batch_size"] == 4
+        assert brief.built[0]["body_limit"] == 2_000 and brief.built[0]["batch_size"] == 4
         # Its consent gate can never say yes, so nothing could be sent through it.
         gate = brief.built[0]["consent_gate"]
         assert await gate.confirm(object()) is False

@@ -9,14 +9,14 @@ Sender rules are the owner's own text; only their count is ever logged.
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Final, Literal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.config import Settings
-from mailbrief.domain.common import normalize_utc
+from mailbrief.domain.common import normalize_utc, utc_now
 from mailbrief.domain.preferences import AI_LIMIT_FIELDS, OwnerPreferences, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.services.calendar import resolve_timezone
@@ -52,14 +52,10 @@ class PreferencesUnavailableError(ConfigurationError):
         super().__init__(_UNAVAILABLE)
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 class PreferencesService:
     """Every mutating method reads the clock once, commits once and rolls back on failure."""
 
-    def __init__(self, session: AsyncSession, *, clock: Callable[[], datetime] = _utc_now) -> None:
+    def __init__(self, session: AsyncSession, *, clock: Callable[[], datetime] = utc_now) -> None:
         self._session = session
         self._clock = clock
         self._repository = PreferencesRepository(session)

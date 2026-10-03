@@ -1,6 +1,6 @@
 """SQLAlchemy table mappings for local MailBrief state."""
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     JSON,
@@ -22,6 +22,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
 from mailbrief.domain.briefs import AUTO_SEND_LIMIT_MAX
+from mailbrief.domain.common import utc_now
 from mailbrief.domain.preferences import (
     AI_BODY_CHARS_MAX,
     AI_OUTPUT_TOKENS_MAX,
@@ -33,12 +34,6 @@ from mailbrief.domain.preferences import (
     SHORTLIST_LIMIT_MAX,
 )
 from mailbrief.storage.types import UTCDateTime
-
-
-def utc_now() -> datetime:
-    """Return the current aware UTC timestamp for ORM defaults."""
-    return datetime.now(UTC)
-
 
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
@@ -397,6 +392,11 @@ class ActionTable(Base):
     # The owner's "seen" watermark for later messages in the action's threads (ADR 0015).
     thread_seen_until_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
+    # Every UPDATE and DELETE carries "WHERE revision = <the revision this session loaded>",
+    # so a writer holding a stale row changes nothing and the ORM raises StaleDataError
+    # instead of silently overwriting a newer change. Services still set the next revision.
+    __mapper_args__ = {"version_id_col": revision, "version_id_generator": False}
+
 
 class ActionSuggestionTable(Base):
     """One validated action suggested by a cached analysis, at its position."""
@@ -611,6 +611,11 @@ class DraftTable(Base):
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
+
+    # Every UPDATE and DELETE carries "WHERE revision = <the revision this session loaded>",
+    # so a writer holding a stale row changes nothing and the ORM raises StaleDataError
+    # instead of silently overwriting a newer change. Services still set the next revision.
+    __mapper_args__ = {"version_id_col": revision, "version_id_generator": False}
 
 
 class DraftVersionTable(Base):

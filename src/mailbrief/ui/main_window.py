@@ -38,6 +38,7 @@ from mailbrief.domain.briefs import (
     TransmissionPreview,
 )
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
+from mailbrief.domain.common import counted
 from mailbrief.domain.digests import (
     DailyDigest,
     DigestStatus,
@@ -265,15 +266,15 @@ _AUTOMATIC = "Automatic refresh: "
 
 
 def _review_hint(limit: int) -> str:
-    noun = "message" if limit == 1 else "messages"
     return (
         "Review today's Inbox. Suggested messages are checked; add or remove any message, "
-        f"up to {limit} {noun}. Only checked messages will have their bodies retrieved."
+        f"up to {counted(limit, 'message')}. Only checked messages will have their bodies "
+        "retrieved."
     )
 
 
 def _too_many(limit: int) -> str:
-    return f"Choose at most {limit} {'message' if limit == 1 else 'messages'} before continuing."
+    return f"Choose at most {counted(limit, 'message')} before continuing."
 
 
 _EXCLUDED_TIP = (
@@ -290,15 +291,11 @@ def thread_check_text(sync: SyncResult) -> str:
     tracked, checked = sync.threads_tracked, sync.threads_checked
     if not tracked:
         return ""
-    noun = "thread" if tracked == 1 else "threads"
     if checked == tracked:
-        return f"Checked {checked} tracked {noun}."
-    return f"Checked {checked} of {tracked} tracked {noun}; {sync.threads_failed} failed."
-
-
-def _count_messages(count: int, *, new: bool = False) -> str:
-    noun = "new message" if new else "message"
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+        return f"Checked {counted(checked, 'tracked thread')}."
+    return (
+        f"Checked {checked} of {counted(tracked, 'tracked thread')}; {sync.threads_failed} failed."
+    )
 
 
 def _ready_text(ready: int) -> str:
@@ -701,6 +698,13 @@ class MainWindow(QMainWindow):
         self.status.setText("That changed or is no longer available; the view was reloaded.")
         await self._refresh_views()
 
+    async def _refused(self, exc: ActionConflictError) -> None:
+        """A change the action's rules refused, such as adding to a completed action: its
+        message is static and names no action or mail, so it is shown as is."""
+        log_failure(exc)
+        self.status.setText(str(exc))
+        await self._refresh_views()
+
     def _start_from_link(self, operation: Callable[[], Awaitable[None]]) -> None:
         """Brief links stay clickable while busy, so a refused click says why."""
         if not self.start(operation, cancellable=False) and not self._closing:
@@ -732,9 +736,7 @@ class MainWindow(QMainWindow):
         try:
             result = await self.backend.accept_into(suggestion_id, public_id, revision)
         except ActionConflictError as exc:
-            log_failure(exc)
-            self.status.setText(str(exc))  # Static; names no action or mail.
-            await self._refresh_views()
+            await self._refused(exc)
             return
         except _STALE as exc:
             await self._stale(exc)
@@ -775,9 +777,7 @@ class MainWindow(QMainWindow):
         try:
             action = await self.backend.apply_proposal(proposal_id, revision)
         except ActionConflictError as exc:
-            log_failure(exc)
-            self.status.setText(str(exc))  # Static; names no action or mail.
-            await self._refresh_views()
+            await self._refused(exc)
             return
         except _STALE as exc:
             await self._stale(exc)
@@ -795,9 +795,7 @@ class MainWindow(QMainWindow):
         try:
             await self.backend.dismiss_proposal(proposal_id)
         except ActionConflictError as exc:
-            log_failure(exc)
-            self.status.setText(str(exc))
-            await self._refresh_views()
+            await self._refused(exc)
             return
         except _STALE as exc:
             await self._stale(exc)
@@ -1639,8 +1637,9 @@ class MainWindow(QMainWindow):
             self.status.setText(f"{self.status.text()} {threads}")
         if result.proposals_created > 0:
             count = result.proposals_created
-            noun = "update" if count == 1 else "updates"
-            self.status.setText(f"{self.status.text()} Proposed {count} {noun} to your actions.")
+            self.status.setText(
+                f"{self.status.text()} Proposed {counted(count, 'update')} to your actions."
+            )
         if result.error_code == "AUTH_REQUIRED" or result.sync.error_code == "AUTH_REQUIRED":
             self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
         for code in dict.fromkeys((result.error_code, result.sync.error_code)):
@@ -1716,7 +1715,7 @@ class MainWindow(QMainWindow):
                 assert digest is not None  # A saved result always carries its digest.
                 analyzed = 0 if result.coverage is None else result.coverage.analyzed
                 text = f"Automatic brief at {stamp}: " + (
-                    f"analyzed {_count_messages(analyzed, new=True)}"
+                    f"analyzed {counted(analyzed, 'new message')}"
                     if analyzed
                     else "nothing new to analyze"
                 )
@@ -1727,8 +1726,7 @@ class MainWindow(QMainWindow):
                     text += "."
                 if result.proposals_created > 0:
                     count = result.proposals_created
-                    noun = "update" if count == 1 else "updates"
-                    text += f" Proposed {count} {noun} to your actions."
+                    text += f" Proposed {counted(count, 'update')} to your actions."
                 self._offer_undo()  # A new brief replaces the suggestions an Undo would refer to.
                 # Never pull the owner away from a past brief they're reading.
                 if self._shown is None:
@@ -1800,7 +1798,8 @@ class MainWindow(QMainWindow):
             self.status.setText("Automatic analysis is off. Every run asks you first.")
         else:
             self.status.setText(
-                f"Automatic runs may now send up to {_count_messages(status.limit)} without asking."
+                f"Automatic runs may now send up to {counted(status.limit, 'message')} "
+                "without asking."
             )
 
     def _progress(self, progress: SyncProgress) -> None:
@@ -1895,8 +1894,7 @@ class MainWindow(QMainWindow):
 
     def _selection_changed(self) -> None:
         count = len(self._checked_ids())
-        noun = "message" if count == 1 else "messages"
-        self.review_button.setText(f"Co&ntinue with {count} selected {noun}")
+        self.review_button.setText(f"Co&ntinue with {counted(count, 'selected message')}")
         self.review_button.setEnabled(1 <= count <= self._review_limit)
         if count == 0:
             self.status.setText(_PICK_ONE)

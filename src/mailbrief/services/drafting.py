@@ -10,14 +10,14 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Final, Protocol
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.bodies import BodyStatus
-from mailbrief.domain.common import normalize_utc
+from mailbrief.domain.common import normalize_utc, utc_now
 from mailbrief.domain.drafting import (
     ACTION_NOTES_SENT_CHARS,
     ACTION_STEPS_SENT_CHARS,
@@ -112,10 +112,6 @@ class DraftingPlan:
     preview: DraftingPreview
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 def disclosure_lines(preview: DraftingPreview) -> tuple[str, ...]:
     """Plain sentences describing a generation, shared by the CLI and the desktop."""
     provider = provider_display_name(preview.provider)
@@ -179,7 +175,7 @@ class DraftingService:
         provider: DraftingProvider,
         bodies: BodyService | None = None,
         *,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] = utc_now,
         zone: ZoneInfo,
         excluded_senders: tuple[str, ...] = (),
     ) -> None:

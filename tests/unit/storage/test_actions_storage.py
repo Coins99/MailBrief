@@ -15,7 +15,7 @@ from mailbrief.domain.actions import SuggestionState
 from mailbrief.domain.analysis import ActionSuggestion
 from mailbrief.domain.messages import AccountIdentity, EmailContact, ProviderKind
 from mailbrief.services.actions import ActionService, SuggestionNotFoundError
-from mailbrief.storage import actions as storage_actions
+from mailbrief.storage import database as storage_database
 from mailbrief.storage.actions import ActionRepository, DecisionKey, suggestion_views
 from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE, Database
 from mailbrief.storage.repositories import AccountRepository, AnalysisRepository, MessageRepository
@@ -324,7 +324,7 @@ async def test_views_take_one_query_per_kind_of_row(database: Database, selects:
 async def test_large_requests_are_chunked(
     database: Database, selects: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(storage_actions, "MAX_SQLITE_BATCH_SIZE", 2)
+    monkeypatch.setattr(storage_database, "MAX_SQLITE_BATCH_SIZE", 2)
     async with database.session() as session:
         message_id, analysis_id = await seed_every_state(session)
         others = (await messages(session, 5))[1:]

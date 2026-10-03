@@ -7,14 +7,13 @@ AI drafting (services/drafting.py) changes drafts only through apply_generated()
 """
 
 import re
-import uuid
-from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import datetime
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mailbrief.domain.common import normalize_utc
+from mailbrief.domain.common import utc_now
 from mailbrief.domain.drafting import DraftGenerationInfo, GeneratedDraft
 from mailbrief.domain.drafts import (
     DRAFT_TITLE_MAX_CHARS,
@@ -29,6 +28,7 @@ from mailbrief.domain.drafts import (
     DraftVersionOrigin,
 )
 from mailbrief.services.actions import ActionNotFoundError
+from mailbrief.services.owned import OwnedRecordService, new_public_id
 from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.drafts import (
     DraftRepository,
@@ -63,14 +63,6 @@ class SourceNotFoundError(LookupError):
     """The email to reply to is not in local mail."""
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-def _new_public_id() -> str:
-    return str(uuid.uuid4())
-
-
 def _touch(row: DraftTable, now: datetime) -> None:
     row.revision += 1
     row.updated_at_utc = now
@@ -92,7 +84,7 @@ def reply_recipient(sender_address: str) -> str:
     return "" if sender_address == UNKNOWN_SENDER else sender_address
 
 
-class DraftService:
+class DraftService(OwnedRecordService):
     """The owner's drafts. Every mutating method reads the clock once, commits once and
     rolls back on failure.
 
@@ -105,23 +97,14 @@ class DraftService:
         self,
         session: AsyncSession,
         *,
-        clock: Callable[[], datetime] = _utc_now,
-        id_factory: Callable[[], str] = _new_public_id,
+        clock: Callable[[], datetime] = utc_now,
+        id_factory: Callable[[], str] = new_public_id,
     ) -> None:
-        self._session = session
-        self._clock = clock
-        self._id_factory = id_factory
+        super().__init__(session, clock=clock, id_factory=id_factory)
         self._repository = DraftRepository(session)
 
-    async def _write[T](self, operation: Callable[[datetime], Awaitable[T]]) -> T:
-        now = normalize_utc(self._clock())
-        try:
-            result = await operation(now)
-            await self._session.commit()
-        except BaseException:
-            await self._session.rollback()
-            raise
-        return result
+    def _stale_error(self) -> Exception:
+        return DraftConflictError(_STALE)
 
     async def _live(self, public_id: str, expected_revision: int | None) -> DraftTable:
         row = await self._repository.get_draft(public_id)

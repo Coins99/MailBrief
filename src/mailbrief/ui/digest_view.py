@@ -19,6 +19,7 @@ from mailbrief.domain.actions import (
     ThreadLink,
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
+from mailbrief.domain.common import counted
 from mailbrief.domain.digests import SECTION_TITLES, DailyDigest
 from mailbrief.services.history import coverage_line
 from mailbrief.ui.deadline_text import deadline_text
@@ -165,7 +166,7 @@ class DigestView(QTextBrowser):
         count, unit = (age, "minute") if age < 60 else (age // 60, "hour")
         if age >= 1440:
             count, unit = age // 1440, "day"
-        age_label = f"{count} {unit}{'' if count == 1 else 's'}"
+        age_label = counted(count, unit)
         saved = digest.generated_at_utc.astimezone(self.zone).isoformat(timespec="minutes")
         parts = [
             f"<h2>{digest.local_date.isoformat()} · {escape(digest.status.value.title())}</h2>",

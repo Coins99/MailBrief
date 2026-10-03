@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from mailbrief.config import Settings
 from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
 from mailbrief.domain.briefs import AutoSendStatus
+from mailbrief.domain.common import counted
 from mailbrief.domain.preferences import (
     AI_BODY_CHARS_MAX,
     AI_OUTPUT_TOKENS_MAX,
@@ -247,9 +248,9 @@ class PreferencesPanel(QWidget):
         elif status.limit == 0 or status.granted_at_utc is None:
             text, changeable = _AUTO_OFF, True
         else:
-            noun = "message" if status.limit == 1 else "messages"
             since = status.granted_at_utc.astimezone(zone).date().isoformat()
-            text, changeable = f"Up to {status.limit} {noun} per run, since {since}", True
+            text = f"Up to {counted(status.limit, 'message')} per run, since {since}"
+            changeable = True
         self.auto_line.setText(text)
         self.auto_button.setEnabled(changeable)
 

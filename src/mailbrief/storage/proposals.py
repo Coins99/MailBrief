@@ -4,7 +4,7 @@ Rows change only through ORM objects, never bulk statements. actions.py imports 
 so it must never import actions.py.
 """
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -14,19 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.actions import ActionProposal, ActionStatus, ProposalState
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind, TargetReason
-from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
+from mailbrief.storage.database import chunked
 from mailbrief.storage.tables import (
     AccountTable,
     ActionProposalTable,
     ActionSourceTable,
     ActionTable,
 )
-
-
-def _chunks[T: (int, str)](values: Iterable[T]) -> Iterator[list[T]]:
-    ordered = sorted(set(values))
-    for start in range(0, len(ordered), MAX_SQLITE_BATCH_SIZE):
-        yield ordered[start : start + MAX_SQLITE_BATCH_SIZE]
 
 
 def proposal_from_row(
@@ -93,7 +87,7 @@ class ProposalRepository:
     ) -> list[ThreadSource]:
         """Every source in these threads of the account's live, open actions."""
         found: list[ThreadSource] = []
-        for chunk in _chunks(thread_ids):
+        for chunk in chunked(thread_ids):
             result = await self._session.execute(
                 select(
                     ActionTable,
@@ -119,18 +113,16 @@ class ProposalRepository:
         self, action_ids: Iterable[int], provider_message_ids: Iterable[str]
     ) -> set[tuple[int, str]]:
         """(action ID, provider message ID) for these actions' sources among these emails."""
-        messages = sorted(set(provider_message_ids))
+        messages = set(provider_message_ids)
         found: set[tuple[int, str]] = set()
-        for chunk in _chunks(action_ids):
-            for start in range(0, len(messages), MAX_SQLITE_BATCH_SIZE):
+        for chunk in chunked(action_ids):
+            for message_chunk in chunked(messages):
                 result = await self._session.execute(
                     select(
                         ActionSourceTable.action_id, ActionSourceTable.provider_message_id
                     ).where(
                         ActionSourceTable.action_id.in_(chunk),
-                        ActionSourceTable.provider_message_id.in_(
-                            messages[start : start + MAX_SQLITE_BATCH_SIZE]
-                        ),
+                        ActionSourceTable.provider_message_id.in_(message_chunk),
                     )
                 )
                 found.update(result.tuples())
@@ -142,7 +134,7 @@ class ProposalRepository:
         """For each of these emails of the account, the IDs of the actions that have a
         proposal from it in any state, whether or not the action is still live and open."""
         found: dict[str, set[int]] = {}
-        for chunk in _chunks(provider_message_ids):
+        for chunk in chunked(provider_message_ids):
             result = await self._session.execute(
                 select(
                     ActionProposalTable.provider_message_id, ActionProposalTable.action_id
@@ -160,17 +152,15 @@ class ProposalRepository:
         self, action_ids: Iterable[int], provider_message_ids: Iterable[str]
     ) -> dict[tuple[int, str], list[ActionProposalTable]]:
         """Proposals in any state for these actions and emails, by (action ID, email)."""
-        messages = sorted(set(provider_message_ids))
+        messages = set(provider_message_ids)
         found: dict[tuple[int, str], list[ActionProposalTable]] = {}
-        for chunk in _chunks(action_ids):
-            for start in range(0, len(messages), MAX_SQLITE_BATCH_SIZE):
+        for chunk in chunked(action_ids):
+            for message_chunk in chunked(messages):
                 result = await self._session.scalars(
                     select(ActionProposalTable)
                     .where(
                         ActionProposalTable.action_id.in_(chunk),
-                        ActionProposalTable.provider_message_id.in_(
-                            messages[start : start + MAX_SQLITE_BATCH_SIZE]
-                        ),
+                        ActionProposalTable.provider_message_id.in_(message_chunk),
                     )
                     .order_by(ActionProposalTable.id)
                 )
@@ -183,7 +173,7 @@ class ProposalRepository:
     ) -> dict[int, list[ActionProposalTable]]:
         """Pending proposals of these actions, oldest first, by action ID."""
         found: dict[int, list[ActionProposalTable]] = {}
-        for chunk in _chunks(action_ids):
+        for chunk in chunked(action_ids):
             result = await self._session.scalars(
                 select(ActionProposalTable)
                 .where(
@@ -219,7 +209,7 @@ class ProposalRepository:
         """Pending proposals of live, open actions made from these emails of the account,
         with each action's public ID, title and revision, oldest first."""
         found: list[tuple[ActionProposalTable, str, str, int]] = []
-        for chunk in _chunks(provider_message_ids):
+        for chunk in chunked(provider_message_ids):
             result = await self._session.execute(
                 select(
                     ActionProposalTable,

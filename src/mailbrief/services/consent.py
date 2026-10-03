@@ -11,14 +11,14 @@ other's, and turning it off clears them all. Nothing here logs an address.
 
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.briefs import AUTO_SEND_LIMIT_MAX, AutoSendPermission
-from mailbrief.domain.common import normalize_utc
+from mailbrief.domain.common import normalize_utc, utc_now
 from mailbrief.domain.messages import ProviderKind
 from mailbrief.errors import ConfigurationError
 from mailbrief.storage.repositories import ConsentRepository
@@ -27,10 +27,6 @@ from mailbrief.storage.tables import AccountTable, AIConsentTable
 logger = logging.getLogger(__name__)
 
 NO_CONSENT: Final = "Analyze once with Sync and review to give consent first."
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _permission(consent: AIConsentTable, account: AccountTable) -> AutoSendPermission:
@@ -78,7 +74,7 @@ async def set_auto_send(
     *,
     provider: str,
     version: str,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
 ) -> AutoSendPermission | None:
     """Allow automatic runs to send up to ``limit`` of the connected account's messages
     without asking; 0 turns it off for every account.

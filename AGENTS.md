@@ -28,7 +28,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   autosave, versions, copy and export, and AI drafting with Groq from context the owner
   chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
   ADR 0012 and ADR 0013.
-- M8 implemented, awaiting live acceptance, on `feat/m8-continuity` (PR #17), built in nine parts
+- M8 implemented and merged (PR #17), awaiting live acceptance, built in nine parts
   (`docs/m8-daily-operation.md`); preferences (Parts 1–2) implemented, awaiting live
   acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
   limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
@@ -55,6 +55,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 ## Layout (ports and adapters)
 
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
+  `domain/common.py` holds the helpers every layer shares: `utc_now` (the default injected
+  clock), `normalize_utc` and `counted` ("1 message", "3 messages"); reuse them.
 - `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` / `DraftingProvider` protocols
   (`drafting.py`), `ThreadReader` (`threads.py`) and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
@@ -62,6 +64,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
   analysis, deadlines, digest and brief; for M6: actions; for M7: drafts and drafting
   (AI drafting: parts, preview, consent, validation).
+- `src/mailbrief/services/owned.py`: `OwnedRecordService`, the transaction base of
+  ActionService, DraftService and ProposalService (one clock reading, one commit, rollback
+  on failure, stale writes as the service's conflict error). `build_brief_service` in
+  `services/brief.py` is the one brief wiring, for the desktop and the CLI.
 - `src/mailbrief/domain/messages.py`: normalized messages, `own_addresses` (the primary
   address plus the aliases; every owner address set is built with it) and
   `is_own_message`, the one definition of the owner's own message, shared by ranking,
@@ -83,6 +89,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   follow-up proposals, `drafts.py` for drafts, their versions and source snapshots, and
   `preferences.py` for the preferences row. Alembic revisions live in
   `migrations/versions/`.
+  `database.chunked()` splits every IN list to SQLite's batch size.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
 - `src/mailbrief/infra/`: HTTP retry classification, `vault.py`, the explicit OS
@@ -128,6 +135,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   the action's revision, and every change except restoring a deleted action needs the
   revision the caller saw. Change decisions and actions through ORM objects, never bulk
   UPDATE or DELETE statements, which leave loaded rows stale.
+  ActionTable and DraftTable map `revision` as SQLAlchemy's version_id_col, so every
+  UPDATE and DELETE also checks the loaded revision; a stale writer gets the service's
+  conflict error, across processes too. Never bypass it with bulk statements.
 - Drafts and notes belong to the owner (ADR 0012). They may store the owner's writing
   (title or subject, recipients as typed, body and its versions), a source-email snapshot
   (subject, sender address, link, received time) and an action link with a title snapshot.
