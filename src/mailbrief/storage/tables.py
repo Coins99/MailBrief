@@ -397,6 +397,11 @@ class ActionTable(Base):
     # The owner's "seen" watermark for later messages in the action's threads (ADR 0015).
     thread_seen_until_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
+    # Every UPDATE and DELETE carries "WHERE revision = <the revision this session loaded>",
+    # so a writer holding a stale row changes nothing and the ORM raises StaleDataError
+    # instead of silently overwriting a newer change. Services still set the next revision.
+    __mapper_args__ = {"version_id_col": revision, "version_id_generator": False}
+
 
 class ActionSuggestionTable(Base):
     """One validated action suggested by a cached analysis, at its position."""
@@ -611,6 +616,11 @@ class DraftTable(Base):
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
+
+    # Every UPDATE and DELETE carries "WHERE revision = <the revision this session loaded>",
+    # so a writer holding a stale row changes nothing and the ORM raises StaleDataError
+    # instead of silently overwriting a newer change. Services still set the next revision.
+    __mapper_args__ = {"version_id_col": revision, "version_id_generator": False}
 
 
 class DraftVersionTable(Base):
