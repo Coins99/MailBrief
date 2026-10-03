@@ -6,8 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from mailbrief.domain.briefs import (
+    AUTO_SEND_LIMIT_MAX,
     SENT_FIELDS,
     AnalysisOutcome,
+    AutoSendPermission,
+    AutoSendStatus,
     BriefRunResult,
     BriefStatus,
     TransmissionPreview,
@@ -58,6 +61,7 @@ def test_outcome_values_are_lowercase() -> None:
         "reused",
         "failed",
         "skipped",
+        "deferred",
     ]
 
 
@@ -106,6 +110,7 @@ def test_a_saved_run_carries_its_digest() -> None:
         "cancelled",
         "consent_declined",
         "analysis_failed",
+        "ready_for_review",
     ]
 
 
@@ -119,3 +124,74 @@ def test_a_digest_is_present_exactly_when_saved(
 ) -> None:
     with pytest.raises(ValidationError, match="present exactly when"):
         BriefRunResult(status=status, sync=SYNC, digest=digest)
+
+
+def test_a_run_that_only_checked_reports_what_is_ready_and_has_no_digest() -> None:
+    result = BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4)
+
+    assert (result.ready, result.deferred, result.digest) == (4, 0, None)
+    assert (BriefRunResult(status=BriefStatus.SAVED, sync=SYNC, digest=DIGEST).ready) == 0
+    with pytest.raises(ValidationError):  # A brief is saved, never merely "ready".
+        BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, digest=DIGEST)
+
+
+@pytest.mark.parametrize("field", ["ready", "deferred", "unrefreshed"])
+def test_ready_deferred_and_unrefreshed_counts_cannot_be_negative(field: str) -> None:
+    with pytest.raises(ValidationError):
+        BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, **{field: -1})
+
+
+def test_a_saved_run_counts_what_it_deferred() -> None:
+    result = BriefRunResult(status=BriefStatus.SAVED, sync=SYNC, digest=DIGEST, deferred=2)
+
+    assert result.deferred == 2
+
+
+def test_a_run_needs_a_review_exactly_when_it_left_carried_messages_unrefreshed() -> None:
+    checked = BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4)
+    waiting = BriefRunResult(status=BriefStatus.READY_FOR_REVIEW, sync=SYNC, ready=4, unrefreshed=2)
+
+    # The new messages and the carried ones are counted apart.
+    assert (checked.needs_review, checked.unrefreshed, checked.ready) == (False, 0, 4)
+    assert (waiting.needs_review, waiting.unrefreshed, waiting.ready) == (True, 2, 4)
+    assert waiting.digest is None
+    with pytest.raises(ValidationError):  # It is derived, never set.
+        BriefRunResult.model_validate(
+            {"status": BriefStatus.READY_FOR_REVIEW, "sync": SYNC, "needs_review": True}
+        )
+
+
+def test_only_a_run_that_is_ready_for_review_can_need_one() -> None:
+    for status, digest in ((BriefStatus.SAVED, DIGEST), (BriefStatus.ANALYSIS_FAILED, None)):
+        with pytest.raises(ValidationError, match="ready for review"):
+            BriefRunResult(status=status, sync=SYNC, digest=digest, unrefreshed=1)
+
+
+@pytest.mark.parametrize("limit", [0, 1, AUTO_SEND_LIMIT_MAX])
+def test_a_permission_holds_zero_to_ten_messages(limit: int) -> None:
+    permission = AutoSendPermission(account_email="me@example.com", limit=limit)
+
+    assert (permission.limit, permission.granted_at_utc) == (limit, None)
+
+
+@pytest.mark.parametrize("limit", [-1, AUTO_SEND_LIMIT_MAX + 1])
+def test_a_permission_outside_zero_to_ten_is_refused(limit: int) -> None:
+    with pytest.raises(ValidationError):
+        AutoSendPermission(account_email="me@example.com", limit=limit)
+
+
+def test_a_permission_keeps_its_time_in_utc_and_a_status_its_disclosure() -> None:
+    from datetime import timedelta, timezone
+
+    toronto = timezone(timedelta(hours=-4))
+    status = AutoSendStatus(
+        account_email="me@example.com",
+        limit=2,
+        granted_at_utc=datetime(2026, 9, 30, 8, tzinfo=toronto),
+        disclosure=preview(message_count=2, first_use=False),
+    )
+
+    assert status.granted_at_utc == datetime(2026, 9, 30, 12, tzinfo=UTC)
+    assert status.disclosure.message_count == 2
+    with pytest.raises(ValidationError):  # A status needs its disclosure.
+        AutoSendStatus.model_validate({"account_email": "me@example.com", "limit": 2})

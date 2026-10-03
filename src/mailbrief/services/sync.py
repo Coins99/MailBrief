@@ -31,7 +31,7 @@ MAX_SINGLE_WAIT_SECONDS = 60.0
 MAX_TOTAL_WAIT_SECONDS = 120.0
 
 
-def _sanitize_error_code(exc: Exception) -> str:
+def sanitize_error_code(exc: Exception) -> str:
     """Map exception types to closed, non-sensitive audit error codes."""
     if isinstance(exc, AuthenticationRequiredError):
         return "AUTH_REQUIRED"
@@ -80,12 +80,14 @@ class SyncService:
         window: DayWindow,
         progress: Callable[[SyncProgress], None] | None = None,
         cancel: asyncio.Event | None = None,
+        record_last_sync: bool = True,
     ) -> SyncResult:
         """Fetch every page for the local-day window, committing each page as it arrives.
 
-        Only a complete, error-free enumeration reconciles Inbox membership and advances
-        the account's last-sync time. Provider rate-limit waits of up to
-        MAX_SINGLE_WAIT_SECONDS are honored by resuming from the last committed page.
+        Only a complete, error-free enumeration reconciles Inbox membership, as it is now,
+        and, when ``record_last_sync`` is true (today's window), advances the account's
+        last-sync time. Provider rate-limit waits of up to MAX_SINGLE_WAIT_SECONDS are
+        honored by resuming from the last committed page.
         """
         tracker = RetryTracker()
         token = current_retry_tracker.set(tracker)
@@ -97,6 +99,7 @@ class SyncService:
                 progress=progress,
                 cancel=cancel,
                 tracker=tracker,
+                record_last_sync=record_last_sync,
             )
         finally:
             current_retry_tracker.reset(token)
@@ -110,6 +113,7 @@ class SyncService:
         progress: Callable[[SyncProgress], None] | None,
         cancel: asyncio.Event | None,
         tracker: RetryTracker,
+        record_last_sync: bool,
     ) -> SyncResult:
         sync_run = await self._sync_run_repo.create_sync_run(
             account_id=account_id,
@@ -244,7 +248,7 @@ class SyncService:
 
         except Exception as exc:
             await self._rollback()
-            error_code = _sanitize_error_code(exc)
+            error_code = sanitize_error_code(exc)
             logger.error("Synchronization failed for account %s: %s", account_id, error_code)
             status = SyncStatus.PARTIAL if pages_count > 0 else SyncStatus.FAILED
             return await finish(status, error_code)
@@ -257,5 +261,6 @@ class SyncService:
         await self._message_repo.reconcile_inbox(
             account_id, window.start_utc, window.end_utc, seen_ids
         )
-        await self._account_repo.update_last_sync(account_id, datetime.now(UTC))
+        if record_last_sync:
+            await self._account_repo.update_last_sync(account_id, datetime.now(UTC))
         return await finish(SyncStatus.COMPLETE, None)

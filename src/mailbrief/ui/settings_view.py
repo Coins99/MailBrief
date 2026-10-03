@@ -12,15 +12,20 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from mailbrief.providers.groq.credentials import GroqKeyError, parse_api_key
 from mailbrief.ui.preferences import DesktopPreferences
+from mailbrief.ui.preferences_view import PreferencesPanel
 
 
 class SettingsDialog(QDialog):
+    """Two tabs: this device's connection and AI settings, and the owner's preferences,
+    which are saved in the database and shared with the CLI."""
+
     save_requested = Signal(object)
     key_requested = Signal(object)
     remove_key_requested = Signal()
@@ -30,8 +35,11 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("MailBrief settings")
         self.setWindowModality(Qt.WindowModality.WindowModal)
-        self.resize(620, 400)
+        self.resize(640, 620)
         layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        connection = QWidget()
+        connection_layout = QVBoxLayout(connection)
         self.fields = QWidget()
         form = QFormLayout(self.fields)
         self.oauth_path = QLineEdit()
@@ -60,7 +68,7 @@ class SettingsDialog(QDialog):
         form.addRow(self.remove_key_button)
         self.revoke_button = QPushButton("Revoke AI consent (briefs and &drafting)")
         form.addRow(self.revoke_button)
-        layout.addWidget(self.fields)
+        connection_layout.addWidget(self.fields)
         notice = QLabel(
             "Choose a Google Desktop OAuth client JSON file and a Groq model that supports "
             "Structured Outputs. Enable Zero Data Retention in Groq Console before sending mail. "
@@ -69,7 +77,12 @@ class SettingsDialog(QDialog):
         )
         notice.setWordWrap(True)
         notice.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(notice)
+        connection_layout.addWidget(notice)
+        connection_layout.addStretch(1)
+        self.tabs.addTab(connection, "Co&nnection and AI")
+        self.preferences_panel = PreferencesPanel()
+        self.tabs.addTab(self.preferences_panel, "Pre&ferences")
+        layout.addWidget(self.tabs, 1)
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
@@ -82,6 +95,7 @@ class SettingsDialog(QDialog):
         self.key_button.clicked.connect(self._save_key)
         self.remove_key_button.clicked.connect(self.remove_key_requested.emit)
         self.revoke_button.clicked.connect(self.revoke_requested.emit)
+        self.preferences_panel.status_changed.connect(self.status.setText)
         self._picker: QFileDialog | None = None
 
     def set_preferences(self, preferences: DesktopPreferences) -> None:
@@ -92,6 +106,7 @@ class SettingsDialog(QDialog):
 
     def set_busy(self, busy: bool) -> None:
         self.fields.setEnabled(not busy)
+        self.preferences_panel.setEnabled(not busy)
         if busy:
             self.status.setText("Applying changes…")
 

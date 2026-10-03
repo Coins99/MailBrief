@@ -408,6 +408,17 @@ def _rows(path: Path, tables: Sequence[str]) -> dict[str, list[tuple[object, ...
         }
 
 
+def _earlier_columns(
+    rows: dict[str, list[tuple[object, ...]]], earlier: dict[str, list[tuple[object, ...]]]
+) -> dict[str, list[tuple[object, ...]]]:
+    """``rows`` cut to the columns ``earlier`` had: later revisions append columns."""
+    widths = {table: len(found[0]) for table, found in earlier.items() if found}
+    return {
+        table: [row[: widths.get(table, len(row))] for row in found]
+        for table, found in rows.items()
+    }
+
+
 def _foreign_keys(path: Path, table: str) -> set[tuple[str, str, str, str]]:
     """(target table, column, target column, on_delete) for each foreign key."""
     with closing(sqlite3.connect(path)) as connection:
@@ -690,7 +701,7 @@ def test_stable_decisions_keep_every_decision_and_never_reuse_suggestion_ids(
     assert _identity_decisions(path) == identified
     assert _query(path, "SELECT id FROM action_suggestions ORDER BY id") == [(4,), (9,)]
     assert _query(path, "PRAGMA foreign_key_check") == []
-    assert _rows(path, kept) == before
+    assert _earlier_columns(_rows(path, kept), before) == before
     assert _foreign_keys(path, "suggestion_decisions") == {
         ("actions", "action_id", "id", "SET NULL")
     }
@@ -922,3 +933,323 @@ def test_drafting_tables_upgrade_and_downgrade_keep_drafts(tmp_path: Path) -> No
     assert _schema(path) == _schema(fresh)
     command.upgrade(config, "head")
     assert table_names(path) >= _DRAFTING_TABLES
+
+
+def test_owner_preferences_table_upgrades_empty_and_downgrades(tmp_path: Path) -> None:
+    path = tmp_path / "m8.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    _seed_decisions(path)
+    command.upgrade(config, "20260928_0008")
+    kept = ("accounts", "messages", "actions", "suggestion_decisions")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260929_0009")
+
+    assert "owner_preferences" in table_names(path)
+    assert _rows(path, kept) == before
+    assert _schema(path)["owner_preferences"]["constraints"] == {
+        "pk_owner_preferences",
+        "ck_owner_preferences_single_row",
+        "ck_owner_preferences_shortlist_limit_range",
+        "ck_owner_preferences_draft_tone_known",
+        "ck_owner_preferences_draft_length_known",
+        "ck_owner_preferences_ai_batch_size_range",
+        "ck_owner_preferences_ai_body_character_limit_range",
+        "ck_owner_preferences_ai_max_output_tokens_range",
+        "ck_owner_preferences_ai_max_requests_per_run_range",
+        "ck_owner_preferences_ai_timeout_seconds_range",
+        "ck_owner_preferences_revision_positive",
+    }
+    assert _query(path, "SELECT count(*) FROM owner_preferences") == [(0,)]
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO owner_preferences(id,excluded_senders_json,updated_at_utc) "
+            "VALUES(1,'[]','2026-09-29 00:00:00')"
+        )
+        defaults = connection.execute(
+            "SELECT shortlist_limit,draft_tone,draft_length,revision,ai_batch_size "
+            "FROM owner_preferences"
+        ).fetchone()
+        for rejected in (
+            "INSERT INTO owner_preferences(id,excluded_senders_json,updated_at_utc) "
+            "VALUES(2,'[]','2026-09-29 00:00:00')",
+            "UPDATE owner_preferences SET shortlist_limit=0",
+            "UPDATE owner_preferences SET shortlist_limit=11",
+            "UPDATE owner_preferences SET draft_tone='angry'",
+            "UPDATE owner_preferences SET draft_length='epic'",
+            "UPDATE owner_preferences SET ai_batch_size=11",
+            "UPDATE owner_preferences SET ai_body_character_limit=0",
+            "UPDATE owner_preferences SET ai_max_output_tokens=255",
+            "UPDATE owner_preferences SET ai_max_requests_per_run=1001",
+            "UPDATE owner_preferences SET ai_timeout_seconds=9.5",
+            "UPDATE owner_preferences SET revision=0",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(rejected)
+        connection.commit()
+    assert defaults == (10, "neutral", "medium", 1, None)
+
+    command.downgrade(config, "20260928_0008")
+
+    assert "owner_preferences" not in table_names(path)
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0008.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260928_0008")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT count(*) FROM owner_preferences") == [(0,)]
+
+
+def test_thread_tracking_backfills_sources_and_downgrades_keeping_rows(tmp_path: Path) -> None:
+    path = tmp_path / "m8-threads.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)
+    command.upgrade(config, "20260929_0009")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE messages SET conversation_id = 'thread-1'")
+        connection.executemany(
+            "INSERT INTO action_sources(action_id,message_id,provider_message_id,subject,"
+            "sender_address,web_link,received_at_utc) VALUES(?,?,?,'Subject',"
+            "'sender@example.com','https://example.com','2026-09-25 00:00:00')",
+            [(action_id, 1, "message-1"), (action_id, None, "message-gone")],
+        )
+        connection.commit()
+    kept = ("accounts", "messages", "actions", "action_sources")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260930_0010")
+
+    assert _query(
+        path,
+        "SELECT provider_message_id,provider,provider_account_id,provider_thread_id "
+        "FROM action_sources ORDER BY id",
+    ) == [
+        ("message-1", "gmail", "account-1", "thread-1"),
+        ("message-gone", None, None, None),  # Its email had left local mail: untracked.
+    ]
+    assert _query(path, "SELECT is_sent FROM messages") == [(0,)]
+    assert _query(path, "SELECT thread_seen_until_utc FROM actions") == [(None,)]
+    assert ("ix_messages_account_conversation", ("account_id", "conversation_id")) in _schema(path)[
+        "messages"
+    ]["indexes"]  # type: ignore[operator]
+    assert _earlier_columns(_rows(path, kept), before) == before
+
+    command.downgrade(config, "20260929_0009")
+
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0009.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260929_0009")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT provider FROM action_sources WHERE message_id IS NOT NULL") == [
+        ("gmail",)
+    ]
+
+
+_PROPOSAL = (
+    "INSERT INTO action_proposals(action_id,message_id,kind,evidence,provider,"
+    "provider_account_id,provider_message_id,subject,sender_address,web_link,received_at_utc,"
+    "created_at_utc) VALUES(?,1,?,'Moved to Monday','gmail','account-1','message-1',"
+    "'Re: budget','sam@example.com','https://mail.google.com/x','2026-09-30 12:00:00',"
+    "'2026-09-30 12:00:00')"
+)
+
+
+def test_follow_up_proposals_upgrade_and_downgrade_keeping_rows(tmp_path: Path) -> None:
+    path = tmp_path / "m8-proposals.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)
+    command.upgrade(config, "20260930_0010")
+    kept = (*_OLD_ROWS, "actions", "action_suggestions", "suggestion_decisions")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260930_0011")
+
+    # Existing analyses read "no follow-up"; every other row is kept.
+    assert _query(path, "SELECT follow_up_kind, follow_up_evidence FROM analyses") == [
+        ("none", None)
+    ]
+    assert _earlier_columns(_rows(path, kept), before) == before
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(_PROPOSAL, (action_id, "cancelled"))
+        connection.execute(_PROPOSAL, (action_id, "delivered"))
+        for kind in ("cancelled", "none"):  # One per action, email and kind; never "none".
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(_PROPOSAL, (action_id, kind))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE analyses SET follow_up_kind = 'postponed'")
+        connection.commit()
+    assert _query(path, "SELECT state, source_added, deadline_precision FROM action_proposals") == [
+        ("pending", 0, "none"),
+        ("pending", 0, "none"),
+    ]
+    assert _schema(path)["action_proposals"]["autoincrement"] is True
+
+    command.downgrade(config, "20260930_0010")
+
+    assert "action_proposals" not in table_names(path)
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0010.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260930_0010")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT count(*) FROM action_proposals") == [(0,)]
+
+
+_CONSENT = (
+    "INSERT INTO ai_consents(account_id,provider,disclosure_version,granted_at_utc,"
+    "revoked_at_utc) VALUES(1,'groq',?,'2026-09-25 00:00:00',?)"
+)
+
+
+def test_daily_operation_columns_upgrade_with_defaults_and_downgrade_keeping_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "m8-daily.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)
+    command.upgrade(config, "20260929_0009")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO owner_preferences(id,excluded_senders_json,updated_at_utc) "
+            "VALUES(1,'[\"@example.org\"]','2026-09-29 00:00:00')"
+        )
+        connection.execute(_CONSENT, ("2", None))  # An active consent...
+        connection.execute(_CONSENT, ("1", "2026-09-26 00:00:00"))  # ...and a revoked one.
+        connection.commit()
+    command.upgrade(config, "20260930_0011")
+    kept = (*_OLD_ROWS, "ai_consents", "owner_preferences")
+    before = _rows(path, kept)
+
+    command.upgrade(config, "20260930_0012")
+
+    # Every existing row keeps its values and reads the new defaults: no refresh, no
+    # automatic-analysis permission, nothing deferred or declined.
+    assert _earlier_columns(_rows(path, kept), before) == before
+    assert _query(
+        path, "SELECT refresh_on_launch,refresh_interval_minutes,revision FROM owner_preferences"
+    ) == [(0, None, 1)]
+    assert _query(
+        path, "SELECT auto_send_limit,auto_send_granted_at_utc FROM ai_consents ORDER BY id"
+    ) == [(0, None), (0, None)]
+    assert _query(path, "SELECT deferred_count FROM digests") == [(0,)]
+    assert _query(path, "SELECT review_declined_at_utc FROM messages") == [(None,)]
+    schema = _schema(path)
+    assert {
+        "ck_owner_preferences_refresh_interval_known",
+        "ck_owner_preferences_shortlist_limit_range",  # The rebuild kept the old CHECKs.
+        "ck_owner_preferences_revision_positive",
+    } <= schema["owner_preferences"]["checks"]  # type: ignore[operator]
+    assert schema["ai_consents"]["constraints"] == {
+        "pk_ai_consents",
+        "uq_ai_consents_scope",
+        "fk_ai_consents_account_id_accounts",
+        "ck_ai_consents_auto_send_limit_range",
+    }
+    assert _foreign_keys(path, "ai_consents") == {("accounts", "account_id", "id", "CASCADE")}
+    with closing(sqlite3.connect(path)) as connection:
+        for minutes in ("NULL", "60", "120", "240"):
+            connection.execute(f"UPDATE owner_preferences SET refresh_interval_minutes={minutes}")
+        for limit in (0, 1, 10):
+            connection.execute(f"UPDATE ai_consents SET auto_send_limit={limit}")
+        for rejected in (
+            "UPDATE owner_preferences SET refresh_interval_minutes=0",
+            "UPDATE owner_preferences SET refresh_interval_minutes=30",
+            "UPDATE owner_preferences SET refresh_interval_minutes=90",
+            "UPDATE owner_preferences SET refresh_interval_minutes=-60",
+            "UPDATE ai_consents SET auto_send_limit=-1",
+            "UPDATE ai_consents SET auto_send_limit=11",
+            "UPDATE owner_preferences SET refresh_on_launch=NULL",
+            "UPDATE ai_consents SET auto_send_limit=NULL",
+            "UPDATE digests SET deferred_count=NULL",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(rejected)
+        connection.execute(
+            "UPDATE owner_preferences SET refresh_on_launch=1, refresh_interval_minutes=60"
+        )
+        connection.execute(
+            "UPDATE ai_consents SET auto_send_limit=3, "
+            "auto_send_granted_at_utc='2026-09-30 10:00:00'"
+        )
+        connection.execute("UPDATE digests SET deferred_count=2")
+        connection.execute("UPDATE messages SET review_declined_at_utc='2026-09-30 11:00:00'")
+        connection.commit()
+
+    command.downgrade(config, "20260930_0011")
+
+    # Everything the revision added is gone, and nothing else, rows included.
+    assert _rows(path, kept) == before
+    fresh = tmp_path / "fresh-0011.sqlite3"
+    command.upgrade(_alembic_config(fresh), "20260930_0011")
+    assert _schema(path) == _schema(fresh)
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT auto_send_limit FROM ai_consents ORDER BY id") == [(0,), (0,)]
+
+
+def test_the_m8_chain_round_trips_with_m7_data(tmp_path: Path) -> None:
+    """From 0008 to head, back to 0008 and up again: every M7 row survives each way."""
+    path = tmp_path / "m8-chain.sqlite3"
+    config = _alembic_config(path)
+    command.upgrade(config, "20260925_0004")
+    _seed_before_actions(path)  # An account, a message, an analysis and a brief.
+    command.upgrade(config, "20260927_0005")
+    action_id = _seed_decisions(path)  # An accepted action and its decisions.
+    command.upgrade(config, "20260928_0008")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO action_sources(action_id,message_id,provider_message_id,subject,"
+            "sender_address,web_link,received_at_utc) VALUES(?,1,'message-1','Subject',"
+            "'sender@example.com','https://example.com','2026-09-25 00:00:00')",
+            (action_id,),
+        )
+        connection.execute(
+            "INSERT INTO drafts(public_id,kind,body,action_id,created_at_utc,updated_at_utc) "
+            "VALUES(?,'note','Mine',?,'2026-09-28 00:00:00','2026-09-28 00:00:00')",
+            (_DRAFT_ID, action_id),
+        )
+        connection.execute(_CONSENT, ("1", None))
+        connection.execute(
+            "INSERT INTO owner_consents(provider,scope,disclosure_version,granted_at_utc) "
+            "VALUES('groq','drafting','1','2026-09-28 00:00:00')"
+        )
+        connection.commit()
+    kept = (
+        *_OLD_ROWS,
+        "actions",
+        "action_sources",
+        "action_suggestions",
+        "suggestion_decisions",
+        "drafts",
+        "ai_consents",
+        "owner_consents",
+    )
+    before = _rows(path, kept)
+    fresh_0008 = tmp_path / "fresh-0008.sqlite3"
+    command.upgrade(_alembic_config(fresh_0008), "20260928_0008")
+
+    for _ in range(2):  # Up to head and down again, twice: nothing wears away.
+        command.upgrade(config, "head")
+        assert _earlier_columns(_rows(path, kept), before) == before
+        assert _query(path, "PRAGMA foreign_key_check") == []
+        assert ScriptDirectory.from_config(config).get_heads() == ["20260930_0012"]
+        assert _query(path, "SELECT version_num FROM alembic_version") == [("20260930_0012",)]
+
+        command.downgrade(config, "20260928_0008")
+        assert _rows(path, kept) == before
+        assert _schema(path) == _schema(fresh_0008)
+
+    command.upgrade(config, "head")
+    assert _query(path, "SELECT auto_send_limit FROM ai_consents") == [(0,)]
+    assert _query(path, "SELECT count(*) FROM action_sources WHERE provider = 'gmail'") == [(1,)]

@@ -1,11 +1,11 @@
 """Database repositories implementing transactional persistence and domain mappings."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import cast
 
 from pydantic import HttpUrl
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import case, delete, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,8 +14,10 @@ from mailbrief.domain.analysis import (
     SUMMARY_MAX_CHARS,
     AnalysisCategory,
     DeadlinePrecision,
+    FollowUpKind,
     MessageAnalysis,
 )
+from mailbrief.domain.briefs import AUTO_SEND_LIMIT_MAX
 from mailbrief.domain.common import normalize_utc
 from mailbrief.domain.digests import (
     DailyDigest,
@@ -23,6 +25,7 @@ from mailbrief.domain.digests import (
     DigestItem,
     DigestSection,
     DigestStatus,
+    SavedBriefSummary,
     SyncStatus,
 )
 from mailbrief.domain.messages import (
@@ -196,6 +199,7 @@ class MessageRepository:
                     "received_at_utc": m.received_at_utc,
                     "is_read": m.is_read,
                     "is_in_inbox": m.is_in_inbox,
+                    "is_sent": m.is_sent,
                     "importance": (
                         m.importance.value
                         if isinstance(m.importance, MessageImportance)
@@ -223,6 +227,7 @@ class MessageRepository:
                     "received_at_utc": base_stmt.excluded.received_at_utc,
                     "is_read": base_stmt.excluded.is_read,
                     "is_in_inbox": base_stmt.excluded.is_in_inbox,
+                    "is_sent": base_stmt.excluded.is_sent,
                     "importance": base_stmt.excluded.importance,
                     "has_attachments": base_stmt.excluded.has_attachments,
                     "body_preview": base_stmt.excluded.body_preview,
@@ -230,6 +235,8 @@ class MessageRepository:
                     "synced_at_utc": base_stmt.excluded.synced_at_utc,
                 },
             ).returning(MessageTable)
+            # Refresh rows already loaded in this session instead of returning them stale.
+            stmt = stmt.execution_options(populate_existing=True)
 
             result = await self._session.scalars(stmt)
             saved_rows.extend(result.all())
@@ -359,6 +366,76 @@ class MessageRepository:
                 .values(is_in_inbox=True)
             )
 
+    async def get_by_provider_ids(
+        self, account_id: int, provider_message_ids: Iterable[str]
+    ) -> list[MessageTable]:
+        """The cached messages among these IDs, in any order; IDs no longer cached are
+        silently absent."""
+        found: list[MessageTable] = []
+        identifiers = sorted(set(provider_message_ids))
+        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+            result = await self._session.scalars(
+                select(MessageTable)
+                .where(
+                    MessageTable.account_id == account_id,
+                    MessageTable.provider_message_id.in_(
+                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
+                    ),
+                )
+                .execution_options(populate_existing=True)
+            )
+            found.extend(result)
+        return found
+
+    async def declined_among(
+        self, account_id: int, provider_message_ids: Iterable[str]
+    ) -> frozenset[str]:
+        """The IDs among these that the owner declined in a review (ADR 0017)."""
+        found: set[str] = set()
+        identifiers = sorted(set(provider_message_ids))
+        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+            result = await self._session.scalars(
+                select(MessageTable.provider_message_id).where(
+                    MessageTable.account_id == account_id,
+                    MessageTable.provider_message_id.in_(
+                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
+                    ),
+                    MessageTable.review_declined_at_utc.is_not(None),
+                )
+            )
+            found.update(result)
+        return frozenset(found)
+
+    async def set_review_declined(
+        self, account_id: int, provider_message_ids: Iterable[str], now_utc: datetime | None
+    ) -> int:
+        """Remember that the owner declined these messages (``now_utc``), or forget it
+        (None); returns how many rows changed.
+
+        Rows change as ORM objects, never by a bulk UPDATE, so messages already loaded in
+        the session show the change. The caller commits.
+        """
+        changed = 0
+        identifiers = sorted(set(provider_message_ids))
+        stamp = None if now_utc is None else normalize_utc(now_utc)
+        for offset in range(0, len(identifiers), MAX_SQLITE_BATCH_SIZE):
+            result = await self._session.scalars(
+                select(MessageTable)
+                .where(
+                    MessageTable.account_id == account_id,
+                    MessageTable.provider_message_id.in_(
+                        identifiers[offset : offset + MAX_SQLITE_BATCH_SIZE]
+                    ),
+                )
+                .execution_options(populate_existing=True)
+            )
+            for row in result:
+                if (row.review_declined_at_utc is None) != (stamp is None):
+                    row.review_declined_at_utc = stamp
+                    changed += 1
+        await self._session.flush()
+        return changed
+
     async def get_by_provider_message_id(
         self,
         account_id: int,
@@ -398,6 +475,7 @@ class MessageRepository:
             received_at_utc=row.received_at_utc,
             is_read=row.is_read,
             is_in_inbox=row.is_in_inbox,
+            is_sent=row.is_sent,
             importance=MessageImportance(row.importance),
             has_attachments=row.has_attachments,
             body_preview=row.body_preview,
@@ -450,6 +528,8 @@ class AnalysisRepository:
             confidence=analysis.confidence,
             evidence=analysis.evidence,
             analyzed_at_utc=datetime.now(UTC),
+            follow_up_kind=analysis.follow_up.value,
+            follow_up_evidence=analysis.follow_up_evidence,
         )
         stmt = base_stmt.on_conflict_do_update(
             index_elements=[
@@ -473,6 +553,8 @@ class AnalysisRepository:
                 "confidence": base_stmt.excluded.confidence,
                 "evidence": base_stmt.excluded.evidence,
                 "analyzed_at_utc": base_stmt.excluded.analyzed_at_utc,
+                "follow_up_kind": base_stmt.excluded.follow_up_kind,
+                "follow_up_evidence": base_stmt.excluded.follow_up_evidence,
             },
         ).returning(AnalysisTable)
         result_table = await self._session.scalar(stmt)
@@ -594,6 +676,8 @@ class AnalysisRepository:
             confidence=row.confidence,
             evidence=row.evidence,
             suggestions=tuple(suggestion_from_row(item) for item in suggestions),
+            follow_up=FollowUpKind(row.follow_up_kind),
+            follow_up_evidence=row.follow_up_evidence,
         )
 
 
@@ -612,9 +696,10 @@ _COVERAGE_COLUMNS = (
 
 
 def _coverage_columns(coverage: DigestCoverage | None) -> dict[str, bool | int | str | None]:
-    """Map brief coverage onto digest columns; no coverage leaves every column NULL."""
+    """Map brief coverage onto digest columns; no coverage leaves every column NULL, except
+    the deferred count, which is never NULL."""
     if coverage is None:
-        return dict.fromkeys(_COVERAGE_COLUMNS)
+        return {**dict.fromkeys(_COVERAGE_COLUMNS), "deferred_count": 0}
     return {
         "sync_complete": coverage.sync_complete,
         "shortlisted_count": coverage.shortlisted,
@@ -622,6 +707,7 @@ def _coverage_columns(coverage: DigestCoverage | None) -> dict[str, bool | int |
         "reused_count": coverage.reused,
         "failed_count": coverage.failed,
         "skipped_count": coverage.skipped,
+        "deferred_count": coverage.deferred,
         "input_tokens": coverage.input_tokens,
         "output_tokens": coverage.output_tokens,
         "ai_provider": coverage.ai_provider,
@@ -664,6 +750,7 @@ def _coverage_from_row(digest: DigestTable) -> DigestCoverage | None:
         reused=digest.reused_count or 0,
         failed=digest.failed_count or 0,
         skipped=digest.skipped_count or 0,
+        deferred=digest.deferred_count,
         input_tokens=digest.input_tokens,
         output_tokens=digest.output_tokens,
         ai_provider=digest.ai_provider,
@@ -747,27 +834,142 @@ class DigestRepository:
         result = await self._session.scalars(stmt)
         return result.first()
 
-    async def get_latest(self) -> DailyDigest | None:
-        """Restore the newest brief across all local Gmail accounts, regardless of sign-in.
+    async def message_ids_for_date(
+        self, account_id: int, local_date: date
+    ) -> tuple[tuple[str, ...], frozenset[str]]:
+        """The provider message IDs in the saved brief of one account and day, in brief order,
+        and which of them the brief lists as replies from outside today's Inbox."""
+        result = await self._session.execute(
+            select(MessageTable.provider_message_id, DigestItemTable.section)
+            .join(DigestItemTable, DigestItemTable.message_id == MessageTable.id)
+            .join(DigestTable, DigestTable.id == DigestItemTable.digest_id)
+            .where(DigestTable.account_id == account_id, DigestTable.local_date == local_date)
+            .order_by(DigestItemTable.position)
+        )
+        rows = result.all()
+        return (
+            tuple(key for key, _ in rows),
+            frozenset(key for key, section in rows if section == DigestSection.FOLLOW_UPS.value),
+        )
 
-        The desktop shows its account explicitly; offline startup needs no active session.
+    async def get_latest(self) -> DailyDigest | None:
+        """Restore the brief for the newest local day across all local Gmail accounts,
+        regardless of sign-in.
+
+        The newest day wins, not the newest save: a brief made today for a missed day never
+        replaces today's. The desktop shows its account explicitly; offline startup needs
+        no active session.
         """
         result = await self._session.execute(
             select(DigestTable, AccountTable)
             .join(AccountTable, DigestTable.account_id == AccountTable.id)
             .where(AccountTable.provider == ProviderKind.GMAIL.value)
-            .order_by(DigestTable.generated_at_utc.desc(), DigestTable.id.desc())
+            .order_by(
+                DigestTable.local_date.desc(),
+                DigestTable.generated_at_utc.desc(),
+                DigestTable.id.desc(),
+            )
             .limit(1)
         )
         row = result.first()
         if row is None:
             return None
         digest, account = row
+        return await self._domain(digest, account.email_address)
+
+    async def get_for_account_date(
+        self, account_email: str, local_date: date
+    ) -> DailyDigest | None:
+        """The saved brief of a Gmail account for one local date, with its suggestions."""
+        result = await self._session.execute(
+            select(DigestTable)
+            .join(AccountTable, DigestTable.account_id == AccountTable.id)
+            .where(
+                AccountTable.provider == ProviderKind.GMAIL.value,
+                AccountTable.email_address == account_email,
+                DigestTable.local_date == local_date,
+            )
+            .order_by(DigestTable.generated_at_utc.desc(), DigestTable.id.desc())
+            .limit(1)
+        )
+        digest = result.scalar_one_or_none()
+        return None if digest is None else await self._domain(digest, account_email)
+
+    async def _domain(self, digest: DigestTable, account_email: str) -> DailyDigest:
         items = await self.get_digest_items(digest.id)
         views = await suggestion_views(
             self._session, [(item.message_id, item.analysis_id) for item, _, _ in items]
         )
-        return self.to_domain(digest, items, account.email_address, suggestions=views)
+        return self.to_domain(digest, items, account_email, suggestions=views)
+
+    async def list_summaries(self, limit: int) -> tuple[SavedBriefSummary, ...]:
+        """Saved Gmail briefs, newest local day first, with item counts from one query."""
+        item_count = func.count(DigestItemTable.message_id)
+        follow_ups = func.coalesce(
+            func.sum(case((DigestItemTable.section == DigestSection.FOLLOW_UPS.value, 1), else_=0)),
+            0,
+        )
+        result = await self._session.execute(
+            select(
+                AccountTable.email_address,
+                DigestTable.local_date,
+                DigestTable.timezone_name,
+                DigestTable.status,
+                DigestTable.generated_at_utc,
+                item_count,
+                follow_ups,
+            )
+            .join(AccountTable, DigestTable.account_id == AccountTable.id)
+            .outerjoin(DigestItemTable, DigestItemTable.digest_id == DigestTable.id)
+            .where(AccountTable.provider == ProviderKind.GMAIL.value)
+            .group_by(DigestTable.id, AccountTable.email_address)
+            .order_by(
+                DigestTable.local_date.desc(),
+                DigestTable.generated_at_utc.desc(),
+                DigestTable.id.desc(),
+            )
+            .limit(limit)
+        )
+        return tuple(
+            SavedBriefSummary(
+                account_email=email,
+                local_date=local_date,
+                timezone_name=timezone_name,
+                status=DigestStatus(status),
+                generated_at_utc=generated_at_utc,
+                item_count=count,
+                follow_up_count=outside,
+            )
+            for email, local_date, timezone_name, status, generated_at_utc, count, outside in result
+        )
+
+    async def saved_dates(self, account_email: str, first: date, last: date) -> frozenset[date]:
+        """The local dates from ``first`` to ``last`` with a saved brief for a Gmail account."""
+        result = await self._session.scalars(
+            select(DigestTable.local_date)
+            .join(AccountTable, DigestTable.account_id == AccountTable.id)
+            .where(
+                AccountTable.provider == ProviderKind.GMAIL.value,
+                AccountTable.email_address == account_email,
+                DigestTable.local_date >= first,
+                DigestTable.local_date <= last,
+            )
+        )
+        return frozenset(result)
+
+    async def accounts_with_brief(self, local_date: date) -> tuple[str, ...]:
+        """The Gmail accounts that have a saved brief for a local date, sorted."""
+        result = await self._session.scalars(
+            select(AccountTable.email_address)
+            .join(DigestTable, DigestTable.account_id == AccountTable.id)
+            .where(
+                AccountTable.provider == ProviderKind.GMAIL.value,
+                DigestTable.local_date == local_date,
+            )
+            .distinct()
+            .order_by(AccountTable.email_address)
+        )
+        return tuple(result)
 
     async def get_digest_items(
         self,
@@ -900,8 +1102,47 @@ class ConsentRepository:
         assert consent is not None
         return consent
 
+    async def with_auto_send(self, provider: str) -> list[AIConsentTable]:
+        """Every consent to this provider that holds an automatic-analysis permission
+        (ADR 0017), whichever account or disclosure version it belongs to."""
+        result = await self._session.scalars(
+            select(AIConsentTable)
+            .where(AIConsentTable.provider == provider, AIConsentTable.auto_send_limit > 0)
+            .order_by(AIConsentTable.id)
+            .execution_options(populate_existing=True)
+        )
+        return list(result)
+
+    async def set_auto_send(
+        self,
+        account_id: int,
+        provider: str,
+        disclosure_version: str,
+        limit: int,
+        now_utc: datetime,
+    ) -> AIConsentTable | None:
+        """Set how many messages an automatic run may send without asking (ADR 0017), on the
+        active consent for this disclosure version; None when there is no active consent.
+
+        A limit above 0 records when it was given; 0 clears both. Raises ValueError for a
+        limit outside 0 to AUTO_SEND_LIMIT_MAX. The consent changes as an ORM object, so a
+        loaded copy always shows it.
+        """
+        if not 0 <= limit <= AUTO_SEND_LIMIT_MAX:
+            raise ValueError(f"The limit must be 0 to {AUTO_SEND_LIMIT_MAX}.")
+        consent = await self.get_active(account_id, provider, disclosure_version)
+        if consent is None:
+            return None
+        consent.auto_send_limit = limit
+        consent.auto_send_granted_at_utc = normalize_utc(now_utc) if limit else None
+        await self._session.flush()
+        return consent
+
     async def revoke_all(self, account_id: int, provider: str, now_utc: datetime) -> int:
-        """Revoke every active consent for the provider and return how many were revoked."""
+        """Revoke every active consent for the provider and return how many were revoked.
+
+        A revoked consent keeps no automatic-analysis permission (ADR 0017).
+        """
         stmt = (
             update(AIConsentTable)
             .where(
@@ -909,7 +1150,11 @@ class ConsentRepository:
                 AIConsentTable.provider == provider,
                 AIConsentTable.revoked_at_utc.is_(None),
             )
-            .values(revoked_at_utc=normalize_utc(now_utc))
+            .values(
+                revoked_at_utc=normalize_utc(now_utc),
+                auto_send_limit=0,
+                auto_send_granted_at_utc=None,
+            )
             .returning(AIConsentTable.id)
         )
         revoked = await self._session.scalars(stmt)

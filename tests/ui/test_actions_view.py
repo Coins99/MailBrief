@@ -9,10 +9,17 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.actions import Action, ActionFilter, ActionSource, ActionStatus, ActionStep
+from mailbrief.domain.actions import (
+    Action,
+    ActionFilter,
+    ActionSource,
+    ActionStatus,
+    ActionStep,
+    ThreadActivity,
+)
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.drafts import DraftKind
-from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPanel
+from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, SEEN, ActionsPanel
 from tests.factories import make_action
 
 UTC_ZONE = ZoneInfo("UTC")
@@ -233,3 +240,68 @@ def test_a_reply_draft_needs_an_email_in_local_mail(qtbot: QtBot) -> None:
 
     assert not panel.reply_draft.isEnabled()
     assert found == [(DraftKind.NOTE, action)]
+
+
+def test_thread_activity_reads_in_the_owner_s_zone(panel: ActionsPanel) -> None:
+    recent = action(
+        5,
+        thread=ThreadActivity(
+            new_messages=2,
+            latest_at_utc=datetime(2026, 9, 29, 18, 2, tzinfo=UTC),
+            latest_sender="Sam <b>Lee</b>",
+            owner_replied_at_utc=datetime(2026, 9, 30, 15, tzinfo=UTC),
+        ),
+    )
+    older = action(
+        6,
+        thread=ThreadActivity(
+            new_messages=1,
+            latest_at_utc=datetime(2026, 9, 20, 14, 30, tzinfo=UTC),
+            latest_sender="sam@example.com",
+            owner_replied_at_utc=datetime(2026, 9, 26, 12, tzinfo=UTC),
+        ),
+    )
+    quiet = action(7, thread=ThreadActivity())
+
+    panel.show_actions(
+        ActionFilter.OPEN,
+        (recent, older, quiet),
+        today=TODAY,
+        zone=ZoneInfo("America/Toronto"),
+        now=NOW,
+    )
+
+    assert row_text(panel, ActionFilter.OPEN, 0) == (
+        "Action 5 — 2 new in thread, latest Tue 14:02 from Sam <b>Lee</b> · you replied Wed"
+    )
+    # More than a week back, a weekday would be ambiguous: the date is shown instead.
+    assert row_text(panel, ActionFilter.OPEN, 1) == (
+        "Action 6 — 1 new in thread, latest 2026-09-20 10:30 from sam@example.com · "
+        "you replied 2026-09-26"
+    )
+    assert row_text(panel, ActionFilter.OPEN, 2) == "Action 7"
+
+
+def test_mark_seen_is_offered_only_for_an_action_with_activity(panel: ActionsPanel) -> None:
+    quiet = action(1, thread=ThreadActivity())
+    replied = action(
+        2, thread=ThreadActivity(owner_replied_at_utc=datetime(2026, 10, 2, tzinfo=UTC))
+    )
+    untracked = action(3)
+    show(panel, ActionFilter.OPEN, quiet, replied, untracked)
+    requests: list[tuple[str, Action]] = []
+    panel.action_requested.connect(lambda kind, item: requests.append((kind, item)))
+
+    assert panel.seen_button.text() == "Mar&k seen"
+    assert not panel.seen_button.isEnabled()
+    panel._mark_seen()  # Refused even when called directly.
+    panel.lists[ActionFilter.OPEN].setCurrentRow(2)
+    assert not panel.seen_button.isEnabled()
+    panel.lists[ActionFilter.OPEN].setCurrentRow(1)
+    assert panel.seen_button.isEnabled()
+    panel.seen_button.click()
+    panel.set_busy(True)
+    assert not panel.seen_button.isEnabled()
+    panel._mark_seen()
+
+    assert requests == [(SEEN, replied)]

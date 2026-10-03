@@ -62,22 +62,21 @@ def _local_midnight_utc(d: date, tz: ZoneInfo) -> datetime:
     return naive.replace(tzinfo=tz, fold=0).astimezone(UTC)
 
 
+def day_window(local_date: date, tz: ZoneInfo) -> DayWindow:
+    """Compute the UTC boundaries of one local calendar day in ``tz``."""
+    tz_name = getattr(tz, "key", None) or str(tz)
+    return DayWindow(
+        local_date=local_date,
+        timezone_name=tz_name,
+        start_utc=_local_midnight_utc(local_date, tz),
+        end_utc=_local_midnight_utc(local_date + timedelta(days=1), tz),
+    )
+
+
 def local_day_window(now: datetime, tz: ZoneInfo) -> DayWindow:
     """Compute the UTC boundaries for the local calendar day containing `now`."""
     aware_now = normalize_utc(now) if now.tzinfo is None else now
-    local_now = aware_now.astimezone(tz)
-    local_d = local_now.date()
-
-    start_utc = _local_midnight_utc(local_d, tz)
-    end_utc = _local_midnight_utc(local_d + timedelta(days=1), tz)
-
-    tz_name = getattr(tz, "key", None) or str(tz)
-    return DayWindow(
-        local_date=local_d,
-        timezone_name=tz_name,
-        start_utc=start_utc,
-        end_utc=end_utc,
-    )
+    return day_window(aware_now.astimezone(tz).date(), tz)
 
 
 def graph_date_filter(window: DayWindow) -> str:

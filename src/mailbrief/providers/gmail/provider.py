@@ -1,4 +1,5 @@
-"""Gmail Inbox pagination, bounded metadata retrieval and shortlisted body reading."""
+"""Gmail Inbox pagination, bounded metadata retrieval, thread metadata and shortlisted body
+reading."""
 
 import asyncio
 import math
@@ -14,10 +15,23 @@ from mailbrief.ports.errors import (
     MessageUnavailableError,
     ProviderResponseError,
 )
+from mailbrief.ports.threads import ThreadSnapshot
 from mailbrief.providers.gmail.body import extract_body
 from mailbrief.providers.gmail.client import GmailClient, message_id
 from mailbrief.providers.gmail.errors import response_error
 from mailbrief.providers.gmail.mapper import map_metadata
+
+# A tracked thread never counts drafts, trashed or spam messages (ADR 0015).
+_IGNORED_LABELS = frozenset({"DRAFT", "TRASH", "SPAM"})
+# Mail the owner or Gmail threw away: forgotten by the cache, and its body is never read.
+_DISCARDED_LABELS = frozenset({"TRASH", "SPAM"})
+
+
+def _labels(item: dict[str, object]) -> frozenset[str]:
+    labels = item.get("labelIds", [])
+    if not isinstance(labels, list):
+        return frozenset()
+    return frozenset(label for label in labels if isinstance(label, str))
 
 
 class GmailSession(Protocol):
@@ -52,17 +66,64 @@ class GmailProvider:
         await self._auth.disconnect()
 
     async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
-        """Readable text of one shortlisted message; attachments are never downloaded."""
+        """Readable text of one shortlisted message; attachments are never downloaded.
+
+        A message in Trash or Spam is unavailable: its text is never extracted.
+        """
         identifier = message_id(provider_message_id)
         async with self._slots:
             raw = await self._client.message(identifier)
             if raw is None:
                 raise MessageUnavailableError("The Gmail message is no longer available.")
+            if _DISCARDED_LABELS & _labels(raw):
+                raise MessageUnavailableError("The Gmail message is in Trash or Spam.")
 
             async def fetch_part(attachment: str) -> dict[str, object] | None:
                 return await self._client.part_data(identifier, attachment)
 
             return await extract_body(raw, identifier, fetch_part)
+
+    async def fetch_thread(self, provider_thread_id: str) -> ThreadSnapshot:
+        """A thread's message metadata, oldest first; never bodies or attachments.
+
+        Drafts, trash and spam are skipped, as are items from another thread and items that
+        can't be mapped: one bad message never fails the thread. The IDs of the thread's
+        messages in Trash or Spam are returned beside them. No Inbox or date filtering
+        happens here. A thread that no longer exists raises MessageUnavailableError.
+        """
+        if self._account is None:
+            raise AuthenticationRequiredError("Connect Gmail before reading threads.")
+        identifier = message_id(provider_thread_id)
+        account = self._account
+        async with self._slots:
+            raw = await self._client.thread(identifier)
+        if raw is None:
+            raise MessageUnavailableError("The Gmail thread is no longer available.")
+        items = raw.get("messages", [])
+        if not isinstance(items, list):
+            raise response_error("Gmail returned an invalid thread.")
+        messages: list[NormalizedMessage] = []
+        discarded: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict) or item.get("threadId") != identifier:
+                continue
+            labels = _labels(item)
+            if _DISCARDED_LABELS & labels:
+                found = item.get("id")
+                if isinstance(found, str) and found:
+                    discarded.add(found)
+            if _IGNORED_LABELS & labels:
+                continue
+            try:
+                messages.append(map_metadata(item, account))
+            except ProviderResponseError:
+                continue
+        return ThreadSnapshot(
+            messages=tuple(
+                sorted(messages, key=lambda item: (item.received_at_utc, item.provider_message_id))
+            ),
+            discarded_ids=frozenset(discarded),
+        )
 
     async def iter_message_pages(
         self,

@@ -1,0 +1,871 @@
+# M8 thread continuity and daily operation
+
+**Status: M8 implemented, awaiting live acceptance.** All nine parts are done; what remains
+is the [live acceptance](#live-acceptance) below, which needs a real Gmail account, Groq and
+a desktop session.
+
+M8 turns the daily brief into something to rely on every day: the owner's preferences, a
+history of saved briefs, follow-up on open actions as their threads continue, and refresh
+while MailBrief runs. The milestone's scope is in
+[email-implementation-plan.md](email-implementation-plan.md#m8--thread-continuity-and-daily-operation).
+M8 is one pull request ([#17](https://github.com/Coins99/MailBrief/pull/17), branch
+`feat/m8-continuity`), built in nine parts.
+
+| Part | What it adds | Schema | Status |
+| --- | --- | --- | --- |
+| 1. Preferences core | Time zone, messages per brief, sender exclusions, drafting defaults, AI limits in SQLite; CLI | 0009, ADR 0014 | Done |
+| 2. Preferences in the desktop | The Settings Preferences tab; the owner's zone and drafting defaults in the window | None | Done |
+| 3. Brief history and bounded catch-up | Browse saved briefs; brief one missed day (within the last 7) per explicit run | None | Done |
+| 4. Thread tracking backend | Metadata of later messages in open actions' threads, including the owner's replies | 0010, ADR 0015 | Done |
+| 5. Thread tracking in the desktop | Tracked threads in the window; "Add to existing action" in the brief | None | Done |
+| 6. Follow-up proposals backend | A new deadline, a cancellation or a delivery from later replies, applied only by the owner | 0011, analysis schema 7, ADR 0016 | Done |
+| 7. Follow-up proposals in the desktop; earlier tracked replies offered in review | Reviewing and applying proposals; up to 3 tracked replies outside today's Inbox join the review | None | Done |
+| 8. Daily operation | Refresh on launch and while running; automatic analysis only by explicit opt-in; missed runs coalesce | 0012, [ADR 0017](adr/0017-automatic-runs.md) | Done |
+| 9. Closeout | Cumulative runs through the day, acceptance, documentation and cleanup | None | Done |
+
+The optional Gmail history cursor for incremental Inbox reconciliation is not part of this
+pull request.
+
+## Live acceptance
+
+M8's automated checks run on synthetic mailboxes; these checks need a real Gmail account,
+Groq and the desktop. Run them in order; the exit test comes first.
+
+### Exit test, end to end
+
+1. Accept an action with a deadline from an email (Sync and review, then accept its
+   suggestion).
+2. From another account, reply in that thread with a new deadline ("Can we move this to next
+   Monday?").
+3. Sync and review: the reply is ranked in, its card says "Continues: …", the action shows
+   "1 new in thread", and the brief proposes "Set the deadline to …" with the reply's quote.
+4. Apply the proposal. The action's deadline changes; a target date you set yourself, its
+   steps and notes are unchanged; and no second action was created. Undo apply restores the
+   old deadline.
+5. Each view says exactly what it covers:
+   - a catch-up brief for yesterday says it covers the messages still in the Inbox when it
+     was made;
+   - Briefs… and the offline browser say which days have a brief, which are missed, and that
+     a past day needs a connection;
+   - a partial sync (stop it, or hit a rate limit) is labelled partial in the status line
+     and the brief's coverage line, never "complete".
+
+### Preferences (Parts 1–2)
+
+1. Add a rule for a sender in today's Inbox: review shows it excluded and unselectable, and
+   the brief has no item from it. `brief --include <that ID>` exits 3.
+2. Set messages per brief to 3: the automatic selection has at most 3, and review refuses a
+   fourth.
+3. Choose a time zone where today's date differs from the system's: the brief's date,
+   "carried over" and overdue labels, and drafting's "today" follow it.
+4. A saved AI limit applies; the same `MAILBRIEF_AI_*` variable wins in the CLI. Write with AI
+   opens on the saved tone and length.
+5. After a restart everything persists, and the packaged app lists time zones.
+
+### History and catch-up (Part 3)
+
+1. Brief today, then yesterday from Briefs…: after a restart, today's brief shows.
+2. Archive one of yesterday's messages in Gmail and brief yesterday again: the replace
+   confirmation appears first, and the archived message is gone.
+3. Accept a suggestion while viewing a past brief, then Undo: the view stays on that brief.
+4. `brief --date` for 8 days back exits 3.
+
+### Thread tracking and Add to (Parts 4–5)
+
+1. Reply to an accepted action's email from another account, then run `brief`: `actions list`
+   shows "1 new". Archive that reply: it is still counted.
+2. Reply yourself from Gmail: "you replied …" appears; Mark seen (or `actions seen <id>`)
+   clears both. A Gmail draft in the thread isn't counted.
+3. Click Add to “…” on the reply's suggestion: no new action appears, the action has two
+   sources, and its "new" count clears. Undo add reverses it. `actions accept N --into <id>`
+   does the same from the CLI.
+4. Complete the action: its thread is no longer checked.
+5. Search the database: none of the replies' text is stored beyond Gmail's preview snippet.
+
+### Follow-up proposals and outside replies (Parts 6–7)
+
+1. A reply "No longer needed, thanks" gives a cancelled proposal; applying it completes the
+   action. Dismiss a proposal and run again: it doesn't come back.
+2. Your own reply in the thread never gets a proposal.
+3. Archive a tracked reply in Gmail, then Sync and review: it is listed as "reply in a
+   tracked thread, not in today's Inbox", checked by default, and the brief shows it under
+   "Replies in threads you track" with the coverage sentence.
+4. Dismiss from the Proposals… dialog, then Undo dismiss: it is pending again.
+
+### Daily operation (Part 8) and the day's brief (Part 9)
+
+1. Refresh every hour with analysis off: sleep 3+ hours, then wake it. There is exactly one
+   "Checked Gmail at …" status, no Groq request in `desktop.log` and no new brief; with
+   nothing new it says "Nothing new to review."
+2. Give permission for 2: the dialog shows the disclosure, and the next automatic run
+   analyzes at most 2 new messages and defers the rest.
+3. Uncheck an auto-selected message in a review: later automatic runs never send it, and the
+   next review lists it unchecked.
+4. Include a message by hand in a review, then let an automatic run happen: the message is
+   still in the day's brief (one brief per day).
+5. Revoke consent in Settings: the next automatic run only checks Gmail.
+6. Close MailBrief for a day and reopen it with "Refresh when MailBrief starts": one run for
+   today; yesterday stays missed.
+
+## Known limits
+
+- The "seen" mark is a received time: a message cached late whose received time is before
+  the mark isn't counted as new.
+- At most 25 tracked threads and the newest 20 later messages per thread are read per run.
+- At most 3 outside replies join a run; the rest wait for later runs.
+- Proposals are for open actions only, and an email proposes to at most 3 actions.
+- Automatic runs happen only while the desktop is open, and never for past days.
+- Automatic analysis is allowed for one account at a time, the connected one.
+- A cached reply you trash is forgotten when its thread is next checked, so only while its
+  action is open and among the 25 threads read. Replies outside today's Inbox come only
+  from the threads read in the same run, so a thread that wasn't read (over the cap, or a
+  failed or stopped check) offers none that run. On every other path the body download's
+  refusal is the guard: a body in Trash or Spam is never read or sent.
+- A day has one brief, carried forward through the day: a later run keeps the messages the
+  earlier brief had unless they were archived, newly blocked or declined.
+- An automatic run that can't refresh a carried message (its permission can't cover those
+  that need analysis again, a body can't be read, or an analysis fails) saves nothing until
+  you run Sync and review. A manual run can still leave out a carried message whose refresh
+  fails; the coverage counts it as failed.
+- There is no Gmail history cursor; Inbox sync reads the day's window (not in this pull
+  request).
+- The dormant Microsoft adapter has no thread reader, so it tracks no threads.
+
+## Preferences (Parts 1–2)
+
+Parts 1 and 2 are implemented and await live acceptance. The policy is
+[ADR 0014](adr/0014-owner-preferences.md).
+
+### What it does
+
+Your preferences are saved in the MailBrief database, so the desktop app and the
+diagnostic CLI use the same ones, and a backup of the database includes them:
+
+- **Time zone:** when your day starts and ends, and the zone for "carried over", overdue
+  and today's date in AI drafting. UTC or a region such as `America/Toronto`; abbreviations
+  (`EST`) and fixed offsets (`Etc/GMT+5`) are refused. Unset means the system time zone.
+- **Messages per brief** (1 to 10, default 10): the most messages the automatic selection
+  picks and the most you can select in review.
+- **Excluded senders:** an exact address, or `@domain`, which also covers its subdomains
+  (`@example.com` covers `news.example.com` but not `notexample.com`). The accepted forms
+  are below. A message from an
+  excluded sender is never selected automatically, can't be included in review or with
+  `--include`, never has its body downloaded and is never offered to AI drafting. It still
+  appears in review, marked as excluded. Briefs saved before a rule keep their analyses;
+  new briefs leave the message out.
+- **Drafting defaults:** the tone and length Write with AI starts with.
+- **AI limits:** body characters sent, output tokens, requests per run, messages per AI
+  request and the timeout, within the ranges in [ai-analysis.md](ai-analysis.md).
+
+Device settings stay where they were: the OAuth client file and Groq model in
+`desktop-settings.json`, and secrets in the OS credential store.
+
+### Desktop
+
+**Settings** has two tabs. **Connection and AI** is the earlier dialog. **Preferences**
+holds the choices above: the time zone list starts with "System time zone (…)", excluded
+senders take one address or `@domain` per line, and each AI limit's lowest setting reads
+"Default (…)". **Save preferences** saves them. **Reset to defaults** restores every
+default, whatever is saved, and also repairs preferences that can't be read. If another
+save happened since Settings opened, the save is refused with "Preferences changed since
+they were loaded; reopen Settings."
+
+The window applies your time zone and drafting defaults at startup and after each save or
+reset, and redraws the brief, actions and drafts. Browse saved mail opens on today in your
+time zone, whatever the computer's zone, each time you open it. Changing the time zone changes where
+today starts: today's messages are analyzed again once, because the analysis includes the
+zone, and the change can start a new day's brief.
+
+If the saved preferences can't be read, the window says so, and briefs and AI drafting
+refuse to run until you reset them in Settings > Preferences. Running with defaults
+instead would drop your exclusions. Views that only display local data, such as the
+actions lists and offline browsing, use the system time zone meanwhile.
+
+### CLI
+
+- `mailbrief-gmail-diagnostic preferences show [--database PATH]` prints the time zone,
+  messages per brief, excluded senders one per line, drafting defaults, and each AI limit
+  with where its value comes from (environment, saved or default). It uses no network and
+  never creates a missing database.
+- `sync`, `bodies`, `brief`, `actions list` and `drafts generate` read your preferences
+  before building any provider. A database that doesn't exist yet is still not created
+  before Gmail sign-in succeeds.
+- `sync --show-metadata` marks messages from excluded senders `excluded`.
+- `brief --include <ID>` for an excluded sender exits 3 without downloading anything.
+- Unreadable preferences exit 3 wherever data could be sent; `actions list` only displays,
+  so it says so and uses the system time zone.
+
+### Precedence
+
+- AI limits: an explicit `MAILBRIEF_AI_*` variable, then the saved preference, then the
+  built-in default. A variable set to the default's value still counts as set.
+- `--timezone`, `--tone` and `--length`: the flag, then the saved preference, then the
+  default (the system time zone, neutral, medium).
+
+### Sender rule forms
+
+Every rule that is accepted can match a sender; anything else is refused with "A sender
+rule must be an address or @domain." (the Preferences tab names the line).
+
+- `alice@example.com`: that exact address. It has one `@`, and nothing before it that is
+  whitespace, a control character or one of `< > ( ) [ ] , ; : " \`.
+- `@example.com` or `example.com`: that domain and its subdomains.
+- `*@example.com` and `*.example.com`: saved as `@example.com`.
+- A domain has two or more dot-separated labels of letters, digits and hyphens, none empty,
+  so `@.com`, `localhost` and `a@b` are refused.
+- Refused, because they could never match: a trailing comma (`alice@example.com,`),
+  `<alice@example.com>`, `mailto:alice@example.com`, `"alice@example.com"`, and a `*`
+  anywhere else.
+
+A rule saved by an earlier build of this branch that no longer validates makes the
+preferences unreadable, which stops briefs and AI drafting as described above. **Reset to
+defaults** in Settings > Preferences fixes it; then add the rules again in an accepted form.
+
+### Limits
+
+At most 200 excluded senders of at most 320 characters each; a time zone name of at most
+64 characters; messages per brief 1 to 10. The AI limits keep the ranges of their
+`MAILBRIEF_AI_*` variables.
+
+### Live acceptance
+
+1. Add a rule for a sender in today's Inbox: review shows the row excluded and it can't be
+   checked; the brief has no item from it.
+2. `brief --include <that ID>` exits 3; `preferences show` lists the rule.
+3. Set messages per brief to 3: the automatic selection has at most 3 messages, and review
+   refuses a fourth.
+4. Choose a time zone where today's date differs from the system's: the brief's date,
+   "carried over" and overdue labels, and drafting's "today" follow it, and `brief`
+   without `--timezone` uses it.
+5. A saved AI limit applies; setting the same `MAILBRIEF_AI_*` variable wins in the CLI.
+6. Write with AI opens on the saved tone and length; a reply to an excluded sender doesn't
+   offer the email.
+7. After a restart everything persists, and the packaged app lists time zones.
+
+### For developers
+
+- `domain/preferences.py`: the model, bounds, `is_region_zone`, `normalize_exclusion` and
+  `sender_excluded`. `storage/preferences.py` and `OwnerPreferencesTable`: one row with
+  `id = 1`, changed only through ORM objects; migration `20260929_0009`.
+- `services/preferences.py`: `PreferencesService` (`get`, `save` with the expected
+  revision, `reset`), `effective_settings`, `ai_limits` and `owner_zone`. Only
+  `AI_LIMIT_FIELDS` are taken from preferences, and only when absent from
+  `Settings.model_fields_set`: `DesktopPreferences.settings()` passes the OAuth path and
+  model by name, so their presence there says nothing.
+- Exclusions are enforced by services: `review_shortlist` and
+  `ApplicationService.prepare_daily_shortlist` raise `ExcludedSenderError` before any body
+  is read, and `DraftingService` withholds the email. `ShortlistGate.review` takes
+  keyword-only `blocked_ids` and `limit`. Per-run `exclude_ids` are not backfilled; blocked
+  messages never take a shortlist slot.
+- Sender rules are the owner's text: `preferences show` and Settings display them, but
+  logs carry only their count.
+
+## Brief history and catch-up (Part 3)
+
+Part 3 is implemented and awaits live acceptance. It needs no migration.
+
+### What it does
+
+- **Saved briefs by day.** Every saved brief can be opened again, newest day first. The
+  brief shown at startup is the one for the newest day, not the newest save, so catching
+  up on yesterday never hides today's brief.
+- **Bounded catch-up.** A day with no brief within the last 7 days is a missed day. You can
+  brief one missed day at a time, and briefing a day that already has a brief replaces it
+  after you confirm. Nothing briefs a past day by itself.
+- **What each brief covers.** Every brief says so under its heading, in its own zone:
+  - made on its own day: "Covers messages received on 2026-09-29 up to 09:14
+    (America/Toronto) that were in your Inbox then.";
+  - made later: "Covers messages received on 2026-09-28 (America/Toronto) that were still
+    in your Inbox on 2026-09-29 at 10:02."
+- A past day's brief uses the same review, consent, messages per brief and sender rules as
+  today's. Its messages are ranked with the real current time.
+
+### Desktop
+
+- **Briefs…** opens a dialog with **Saved briefs** (date · status · items · account;
+  Return or a double-click opens one) and **Missed days** for the connected account. Without
+  a connection it reads "Connect Gmail to brief missed days."
+- **Open** shows a saved brief. Unless it is the latest, a banner reads "Viewing the brief
+  for <date>." with **Back to latest**. Accept, Dismiss and Undo keep you on that brief.
+- **Brief this day…** is offered for a missed day, or for a saved brief within the last 7
+  days other than today's; it briefs the connected account, so another account's brief
+  can't be replaced from here. For a saved day it asks first: "This replaces the saved
+  brief for <date>." It needs a connected Gmail account, like **Sync and review**; offline
+  it says so.
+- **Sync and review** always briefs today and returns to the latest brief.
+
+### CLI
+
+- `brief --date YYYY-MM-DD` briefs one of the previous 7 days. An unreadable date, or one
+  outside today and the previous 7 days, exits 3 before Gmail is contacted. With `--show`,
+  the brief's coverage line comes before its items.
+- `briefs list [--database PATH] [--limit N] [--timezone ZONE]` lists saved briefs, newest
+  first (default 30), each with its coverage line, then each Gmail account's missed days. It
+  is offline and never creates a missing database.
+- `briefs show DATE [--account EMAIL] [--database PATH]` prints one saved brief as
+  `brief --show` does, with its coverage line. No brief exits 3 with "No saved brief for
+  that date."; briefs from several accounts exit 3 until you pass `--account`.
+- "Today" is in the `--timezone` zone, else your saved time zone, else the system's.
+
+### Limits
+
+- At most 7 days back, one day per run, and never automatic.
+- A past day covers only the messages still in the Inbox when its brief is made; messages
+  archived or deleted since are not in it.
+- Only today's sync moves the account's last complete sync time. A past day's sync still
+  records which of that day's cached messages are still in the Inbox.
+
+### Live acceptance
+
+1. Brief today, then brief yesterday from Briefs…: after a restart, today's brief shows,
+   not yesterday's.
+2. Yesterday's brief says it covers the messages still in the Inbox when it was made.
+3. Archive one of yesterday's messages in Gmail and brief yesterday again: the replace
+   confirmation appears first, and the archived message is gone.
+4. Accept a suggestion while viewing a past brief, then Undo: the view stays on that brief.
+5. `briefs list` shows the same briefs and missed days; `brief --date` for 8 days back exits
+   3.
+6. Offline: Briefs… still opens saved briefs, and "Brief this day…" says a connection is
+   needed.
+
+### For developers
+
+- `services/calendar.py`: `day_window(local_date, zone)` gives any local day's UTC bounds;
+  `local_day_window()` delegates to it.
+- `services/history.py`: `CATCH_UP_DAYS`, `check_brief_date` (raises `BriefDateError` with a
+  static message), `catch_up_days`, `coverage_line` and `BriefHistory` (`list_saved`, `get`,
+  `accounts_for`, `missed_days`). Any saved brief, even an empty or partial one, counts as
+  saved.
+- `DigestRepository.get_latest()` orders by local date, then save time; `list_summaries()`
+  counts items in one grouped query.
+- `BriefService.generate(local_date=...)` checks the date before contacting Gmail;
+  `ApplicationService.prepare_daily_shortlist(local_date=...)` syncs that day's window and
+  passes `record_last_sync` to `SyncService.sync_day`, true only for the window containing
+  now.
+- The desktop window remembers the connected account and the brief shown (`None` for the
+  latest); `_reload_brief()` reloads the shown brief.
+
+## Thread tracking (Part 4)
+
+Part 4 is implemented and awaits live acceptance. The policy is
+[ADR 0015](adr/0015-thread-continuity.md); the desktop shows it from Part 5.
+
+### What it does
+
+- After today's sync or brief, MailBrief reads the Gmail threads of your open actions, both
+  yours and those waiting for someone, and caches the messages that arrived after each
+  action's email. `actions list` then shows how many are new, the latest one and whether
+  you replied.
+- **Bounds:** at most 25 threads per run, most urgent action first; at most the newest 20
+  messages per thread, and only those after the action's latest email in that thread.
+  Completed and deleted actions stop being tracked. Past-day briefs and anything scheduled
+  don't check threads.
+- **Nothing changes by itself:** a reply, from someone else or from you, never completes or
+  changes an action, and thread checks use no AI. The only change is yours: marking the
+  activity seen.
+- A failed or stopped check (a sign-in, permission or rate-limit problem) never fails the
+  sync or the brief; it is counted and reported, and what was already saved stays.
+
+### Privacy
+
+- Metadata only: the same four headers (From, To, Subject, Message-ID), labels, received
+  time and Gmail's preview snippet as the Inbox sync. Never bodies or attachments.
+- Drafts, trash and spam in a thread are ignored. A reply cached earlier that you then
+  trash, or that Gmail marks as spam, is removed from the cache the next time its thread is
+  checked, with anything analyzed from it; actions, drafts and proposals keep their own
+  snapshots. Taking it out of Trash brings it back on the next check. A body in Trash or
+  Spam is never read, so it is never sent.
+- Your own messages are cached only inside tracked threads. The Sent folder, and every
+  other folder or label, is never listed.
+- Cached sent messages never reach a brief: the shortlist reads Inbox messages only, as
+  before.
+- Sender exclusions keep governing AI only; metadata from excluded senders is cached like
+  any Inbox message.
+
+### CLI
+
+- `sync` and `brief` print `Tracked threads: C checked, F failed, S messages saved` when any
+  threads were tracked, plus the reason if the check stopped. The log's counts-only line
+  also says how many cached messages were removed.
+- `actions list` adds `; thread: N new, latest <time> from <sender>` and
+  `; you replied <date>`, in your time zone.
+- `actions seen PUBLIC_ID [--database PATH]` marks them seen ("Marked seen." or "Nothing
+  new in its threads."); an unknown ID exits 3. It is offline.
+
+### Limits
+
+- Sources accepted before migration 0010 whose email had already left local mail aren't
+  tracked.
+- The desktop display, and adding an email to an existing action, are Part 5 (below).
+- A message that arrives later but carries an earlier received time than your "seen" mark
+  isn't counted as new (see Part 5's limits).
+
+### Live acceptance
+
+1. Accept an action from an email, reply to that email from another account, then run
+   `brief`: `actions list` shows "1 new".
+2. Reply yourself from Gmail: "you replied …" appears, and `actions seen <id>` clears both.
+3. Archive the other account's reply: it's still counted, because tracking isn't
+   Inbox-bound.
+4. Save a Gmail draft in the thread: it isn't counted.
+5. Complete the action: its thread is no longer checked (the tracked count drops).
+6. Search the database: none of the replies' text is stored beyond Gmail's preview
+   snippet.
+
+### For developers
+
+- `ports/threads.py`: `ThreadReader.fetch_thread(thread_id)` returns a `ThreadSnapshot`:
+  the thread's messages and `discarded_ids`, the IDs labelled TRASH or SPAM. `GmailProvider`
+  implements it with `threads.get`, `format=metadata` and a field mask;
+  `providers/microsoft/` has none. `ThreadService.check` deletes this account's cached rows
+  in `discarded_ids` and counts them in `ThreadCheck.removed`.
+- `is_own_message` and `own_addresses(primary, aliases)` live in `domain/messages.py`;
+  ranking (direct recipient and tracked-thread bonus), thread activity
+  (`storage/actions.py`), outside replies and proposals share them. `ThreadCheck.read_ids`
+  names the threads read successfully; `SyncResult.threads_read` carries them to
+  `outside_replies(read_threads=...)`.
+- `services/threads.py`: `ThreadService.tracked()` and `check()`, with
+  `MAX_TRACKED_THREADS`, `MAX_THREAD_MESSAGES` and `THREAD_CONCURRENCY`. It commits per
+  thread and never writes to actions.
+- `ApplicationService(threads=...)` runs the check after a complete or partial sync of
+  today's window and adds its counts to `SyncResult`.
+- Migration 0010 adds `messages.is_sent`, the `(account_id, conversation_id)` index, source
+  snapshots (`provider`, `provider_account_id`, `provider_thread_id`) and
+  `actions.thread_seen_until_utc`.
+- `ActionRepository.load()` derives `Action.thread` with a fixed number of queries;
+  `ActionService.mark_thread_seen()` is the only change thread activity allows.
+
+## Thread activity and adding to an action (Part 5)
+
+Part 5 is implemented and awaits live acceptance. It needs no migration. The policy is
+[ADR 0015](adr/0015-thread-continuity.md#adding-to-an-existing-action).
+
+### What it does
+
+- **Continuations in the brief.** Under an email, "Continues: “<title>” (mine)" or
+  "(waiting for)" names each live, open action with a source in the same Gmail thread of
+  the same account: at most 3, most urgent first. An action the email already belongs to
+  isn't named.
+- **Add to an existing action.** After **Accept** and **Dismiss**, a pending suggestion
+  offers **Add to “<title>”** for each of those actions, including one the email already
+  belongs to. It accepts the suggestion into that action instead of creating another: the
+  email becomes one more source unless it already is one, the suggestion shows as
+  accepted, and the action gets one new revision. Its title, plan, dates and notes don't
+  change.
+- **Thread activity in your actions.** A row adds " · 2 new in thread, latest Tue 14:02 from
+  Sam" and " · you replied Wed", in your time zone. For a day more than a week back, the
+  date replaces the weekday.
+- **Mark seen** clears both. It is enabled only when the selected action
+  has something new, and makes one revision. **Open source** still opens the thread in
+  Gmail.
+- **The status line** after Sync and review, or a brief from Briefs…, adds one sentence when
+  threads were tracked: "Checked 3 tracked threads.", "Checked 3 of 5 tracked threads;
+  2 failed." or "Thread checks stopped early." It never shows an error code, and says
+  nothing when no threads were tracked or the run was cancelled.
+- Nothing here is automatic or uses AI: only you add an email to an action or mark
+  activity seen.
+
+### Undo
+
+- **Undo add** reverses an addition while the action is exactly as the addition left it.
+  Undo restores exactly what was there before: the suggestion is pending again, or
+  dismissed again, or back with the deleted action it belonged to, and the email stops
+  being a source if the addition made it one. An action's last source always stays.
+- An action that changed nothing offers no Undo: choosing **Add to** for an action the
+  suggestion already belongs to says "Already added to: <title>." and changes nothing.
+- Any later change to the action (an edit, completing it, marking it seen, another
+  addition) makes Undo refuse with "Can't undo: it has changed since then." As before,
+  Undo covers only the latest change and is withdrawn by an edit or a new brief.
+- If the action changed or was deleted before **Add to** runs, the window says so and
+  reloads. A suggestion already accepted into another action shows "That suggestion already
+  belongs to another action."
+
+### CLI
+
+- `actions accept N --into PUBLIC_ID [--database PATH]` accepts suggestion N into that
+  action and prints "Added to: <title> (<id>)", or "Already added to: <title>." (exit 0)
+  when it already belongs to that action. An unknown action or suggestion exits 3; a
+  suggestion accepted into another action exits 3 with "That suggestion already belongs to
+  another action." Only an open action takes an email: a completed one exits 3 with "Reopen
+  the action before adding to it." When you name the action, any thread is allowed; the
+  brief offers only those that continue the email's thread.
+- `brief --show` and `briefs show` print "Continues: <title> (<id>)" under an item for each
+  action it continues, so you can pass that ID to `--into`.
+
+### Limits
+
+- The "seen" mark is a received time. A message cached late whose received time is before
+  the mark isn't counted as new. That takes a missed thread check (a failed check, or a
+  thread with more than 20 later messages), and it only hides the "new" count: the message
+  is still cached and visible in Gmail.
+- At most 3 actions are named, and offered, per email.
+- Continuations are read when a brief is shown, so a past brief names the actions open now.
+- An action's source accepted before migration 0010 whose email had already left local mail
+  has no thread snapshot, so it isn't matched.
+
+### Live acceptance
+
+1. Accept an action from an email, reply to it from another account, then Sync and review:
+   the reply's card says "Continues: …", and the action row shows "1 new in thread".
+2. On the reply's suggestion, click Add to “…”: no new action appears, the action has two
+   sources, and its "new" count clears.
+3. Undo add: the suggestion is pending again, and the action is back to one source.
+4. Reply yourself from Gmail and sync: "you replied …" appears, and Mark seen clears it.
+5. `actions accept N --into <id>` does the same from the CLI.
+
+### For developers
+
+- `ActionService.thread_links(account_email, message_keys)` returns `ThreadLink`s
+  (`public_id`, `title`, `revision`, `ownership`, `is_source`), at most `MAX_THREAD_LINKS`
+  per message, ordered by `urgency()`. `ActionRepository.thread_link_rows()` reads them with
+  one query per 100 keys (a brief has at most 10), matching sources on provider, account and
+  thread snapshot; `is_source` is an `EXISTS` on the action's sources.
+- `ActionService.accept_into()` returns `AcceptedInto(action, source_added)`.
+  `undo_accept_into(suggestion_id, public_id, expected_revision, remove_source)` deletes the
+  decision and, when asked, the source (`ActionRepository.remove_source()`), but never the
+  last one.
+- Desktop: `DesktopBackend` gains `brief_links`, `accept_into`, `undo_accept_into` and
+  `mark_thread_seen`. `MainWindow._show_digest()` shows every brief, with its links when
+  they can be read. `DigestView.accept_into_requested(suggestion_id, public_id, revision)`
+  comes from internal `mailbrief:into/<n>` links; `thread_check_text()` builds the status
+  sentence; `ActionsPanel.seen_button` emits `SEEN`.
+
+## Follow-up proposals (Part 6)
+
+Part 6 is implemented and awaits live acceptance. It adds migration `20260930_0011` and
+analysis schema version 7. The policy is [ADR 0016](adr/0016-follow-up-proposals.md); the
+desktop shows proposals from Part 7.
+
+### What it does
+
+- **A signal from each analyzed email.** Groq also says whether the email moves a deadline
+  (`new_deadline`), cancels a request (`cancelled`) or delivers what was asked (`delivered`),
+  judged from that email alone and with a quote from it. MailBrief checks the quote like
+  other evidence ([ai-analysis.md](ai-analysis.md#follow-up-signal-m8)); a signal it can't
+  check is dropped, never the email.
+- **Proposals.** After a brief is saved, each signal becomes a pending proposal for the open
+  actions (yours and those you wait for) whose thread the email continues in the same
+  account, when the action's latest email in that thread is older and the email isn't
+  already one of its sources, most urgent first. An email proposes to at most 3 actions
+  ever: the actions that already have a proposal from it, in any state and even if since
+  closed, use up its slots, so applying one never frees a place for a fourth. A new deadline
+  equal to the action's current one proposes nothing and uses no slot.
+- **Your own mail proposes nothing.** A message you sent, or that comes from one of your
+  account's addresses, is skipped.
+- **Any saved brief makes proposals**, a past day's included.
+- **One proposal per action, email and kind.** Running the brief again doesn't repeat it. A
+  newer analysis replaces a still-pending proposal of another kind for the same action and
+  email; applied and dismissed ones stay, and a dismissed proposal never comes back.
+- **Replies rank higher.** A message in a tracked thread that is newer than the thread's
+  sources and not sent by you gets +20, "reply in a thread you track", so it is usually in
+  the shortlist.
+- Nothing about your actions is sent to Groq, and the consent disclosure is unchanged. The
+  first brief after upgrading sends today's shortlist again once, under your existing
+  consent.
+
+### Applying and undoing
+
+- **Applying is your choice** and makes one revision:
+  - a new deadline sets the deadline and the suggested target date, and moves the target
+    date only if you never changed it (it still equals the old suggested target);
+  - a cancellation or delivery completes the action; a reply is never proof, so nothing
+    completes it without you;
+  - the email becomes one of the action's sources, from local mail or else from the
+    proposal's snapshot;
+  - the title, notes, steps and ownership never change.
+- **Undo** (in the desktop from Part 7) restores the previous deadline, targets and status
+  while the action is unchanged since the apply, and removes the source the apply added
+  unless it is the last one. The proposal is pending again.
+- **Dismiss** and restore change no action.
+
+### CLI
+
+- `brief` prints "Proposed N updates to your actions." when it made any. With `--show`, and
+  in `briefs show`, each item lists "Proposes: <kind> for <title> (P<id>)".
+- `actions proposals [--timezone ZONE] [--database PATH]` lists pending proposals of open
+  actions, newest first: `P<id> · <action ID> <title> · <kind> · "<quote>" · <sender>,
+  <date>, <subject>`. The kind reads "new deadline <date or time>", "cancelled" or
+  "delivered".
+- `actions apply-proposal ID [--timezone ZONE]` applies one and prints what changed;
+  `actions dismiss-proposal ID` dismisses it. The ID is `P3` or `3`. An unknown proposal, one
+  already applied or dismissed, or an action that is no longer open or has changed exits 3.
+- `actions list` adds "; N proposals" to an action with pending ones.
+- `sync --show-metadata` prints each message's rank reasons, such as "reply in a thread you
+  track".
+
+### Limits
+
+- A signal becomes a proposal only for an action whose thread the email continues. An
+  update sent in a new thread proposes nothing; accept its suggestion into the action
+  instead (`actions accept N --into`).
+- Proposals are made when a brief is saved, from the brief's shortlist; a reply that isn't
+  analyzed proposes nothing.
+- Undo is the desktop's (Part 7); the CLI has no undo for an applied proposal.
+- Proposals are for open actions only: an action you complete or delete no longer shows
+  them, and its pending ones can't be applied.
+
+### Live acceptance
+
+1. Accept an action with a deadline. From another account, reply in the thread "Can we
+   move this to next Monday?", then run `brief`: it prints "Proposed 1 update", and
+   `actions proposals` shows the proposal with its quote.
+2. `actions apply-proposal`: the deadline and the suggested target change, but a target
+   date you set yourself doesn't.
+3. Reply "No longer needed, thanks": a cancelled proposal appears, and applying it
+   completes the action.
+4. Dismiss a proposal and run `brief` again: it doesn't come back.
+5. The reply was ranked in with "reply in a thread you track" (`sync --show-metadata`).
+
+### For developers
+
+- `domain/analysis.py`: `FollowUpKind`, `FOLLOW_UP_EVIDENCE_CHARS`, schema version 7; the
+  signal is on `AnalysisCandidate` and `MessageAnalysis`. `domain/actions.py`:
+  `ProposalState`, `ActionProposal`, and `Action.proposals` (pending ones).
+- `services/analysis.py` `_follow_up()` checks the signal after the email's own evidence and
+  before `_suggestions`, which get the budget it leaves. `services/deadlines.py`
+  `suggest_target_for()` works from a received time and zone.
+- `services/proposals.py` `ProposalService`: `derive`, `get`, `pending`,
+  `pending_for_messages`, `apply`, `undo_apply`, `dismiss` and `restore`.
+  `storage/proposals.py` holds the queries; `ActionRepository.load()` fills pending
+  proposals with one more query. `BriefService` derives after the save and logs a failure
+  by type only.
+- `services/ranking.py`: `rank_messages(..., tracked=...)` and `reason_text()`;
+  `ThreadService.tracked(limit=None)` gives ranking every tracked thread.
+- Migration 0011 rebuilds `analyses` (`follow_up_kind`, default `none`, and
+  `follow_up_evidence`) and adds `action_proposals`, whose snapshot also keeps the email's
+  thread.
+
+## Proposals in the desktop, and replies outside the Inbox (Part 7)
+
+Part 7 is implemented and awaits live acceptance. It adds no migration (the head is still
+`20260930_0011`). The policy is [ADR 0016](adr/0016-follow-up-proposals.md), including
+"Replies outside today's Inbox".
+
+### What shows where
+
+- **In the brief**, under the email that proposes, for each pending proposal:
+  `Proposes for “Send the deck”: “Can we move this to next Monday?”`, then two links. The
+  first is named by what it does:
+  - `Set the deadline to 2026-10-05 17:00`: an exact time, in the brief's own time zone;
+  - `Set the deadline to 2026-10-05`: a date;
+  - `Set the deadline to “when the board meets”`: a deadline given only in words;
+  - `Complete it (cancelled)` or `Complete it (delivered)`.
+
+  The second is `Dismiss`. Clicking applies or dismisses at once, and Undo is offered.
+- **In Your actions**, an open action's line ends with "· N proposals". **Proposals…** (Alt+R
+  on Windows) opens a dialog listing that action's pending proposals: what each would
+  change, the email's quote, its sender and when it arrived in your time zone. The button
+  above the list reads "Apply: <the selected row's effect>" (Alt+A on Windows) and applies
+  it; **Dismiss** (Alt+D) dismisses it; **Close** closes the dialog. Only those buttons act:
+  Return and a double-click on a row do nothing. A completed action shows no proposals.
+- **After a run**, the status line adds "Proposed N updates to your actions." when a brief
+  made any.
+
+### Applying, dismissing and undoing
+
+- Applying, dismissing and undoing each run as one operation, like every other change, so
+  only one runs at a time; a click while MailBrief is busy says so and does nothing.
+- **Applying** is exactly Part 6's rule, at the action revision the screen showed: it
+  changes only the deadline and suggested target date, or completes the action, and makes
+  the email a source. It never touches the title, notes, steps or owner, and never moves a
+  target date you changed.
+- **Undo apply** restores the previous deadline, targets and status, and removes the source
+  the apply added unless it is the last, while the action is unchanged since the apply. If
+  you edited it in between, the status says "Can't undo: it has changed since then."
+- **Undo dismiss** makes the proposal pending again. A dismissed proposal is otherwise never
+  proposed again.
+- If the action changed since the screen was loaded (or was deleted), nothing is applied:
+  the status shows the reason and the brief, the actions and an open dialog reload.
+- Only the latest change can be undone, and an edit, Mark seen or a new brief clears the
+  offer, as elsewhere.
+
+### Replies outside today's Inbox
+
+A reply to an action's thread is often archived, or arrives on an earlier day, so today's
+Inbox sync never lists it. Sync and review now also offers such replies from the local
+cache, so they can be analyzed and propose updates.
+
+- **Which.** Cached messages in the threads of your open actions that:
+  - arrived after that thread's baseline (the action's latest email there);
+  - are not your own (sent, or from one of your account's addresses);
+  - are not from a sender you excluded in Settings;
+  - have not been analyzed at the current analysis schema;
+  - are not both received today and still in the Inbox, which today's sync already covers.
+- **Bounds.** At most 3 a run, newest first. Only today's run brings them in, never a
+  past day's. They come from the cache the thread check fills, and only from the threads
+  that run's check read, so nothing extra is read from Gmail to find them.
+- **Review.** They are listed as `<sender> — <subject> — reply in a tracked thread, not in
+  today's Inbox`. They get the same +20 rank bonus as any reply in a tracked thread, so they
+  are usually checked. You can check or uncheck them, they count toward messages per brief,
+  and `--include` or `--exclude` can name them. A checked one's body is downloaded, shown in
+  the consent preview and sent only after you approve, exactly like any other message:
+  nothing extra is sent without it.
+- **In the brief.** They form their own last section, "Replies in threads you track",
+  whatever their category, and the coverage line adds "Also includes N replies from threads
+  you track that weren't in today's Inbox." `briefs list` says the same.
+- Once a reply is analyzed it is not offered again. One you left unchecked is offered again
+  on the next run.
+
+### CLI
+
+- `sync --show-metadata` lists the outside replies after today's Inbox messages, each as
+  `[selected]` or `[omitted]` with a line "reply in a tracked thread, not in today's Inbox".
+- `brief --show` and `briefs show` print them under `[follow_ups]`; the coverage line and
+  `briefs list` carry the sentence above.
+
+### Limits
+
+- More than 3 outside replies wait for later runs, as earlier ones are analyzed.
+- If the thread check stopped early (for example a rate limit), replies it didn't reach are
+  missing until the next run.
+- A reply is offered only while its action is open; completing the action stops it.
+- Proposals still come only from analyzed emails, for actions whose thread the email
+  continues, at most 3 actions per email.
+
+### Live acceptance
+
+1. Reply in an action's thread from another account with a new deadline, archive the reply
+   in Gmail, then Sync and review: it is listed as "reply in a tracked thread, not in
+   today's Inbox" and is checked by default.
+2. The brief shows it under "Replies in threads you track", and the coverage line mentions
+   it.
+3. Click "Set the deadline to …": the action's deadline changes. Undo apply restores it.
+4. Dismiss a proposal from the Proposals… dialog, then Undo dismiss: it is pending again.
+5. Your own reply in the thread never gets a proposal.
+
+### For developers
+
+- `services/threads.py`: `ThreadService.outside_replies(account, window, *, limit,
+  excluded_senders, tracked, read_threads)` runs two queries however much there is (one
+  when the caller passes `tracked`) and draws only on `read_threads`; `MAX_OUTSIDE_REPLIES`;
+  `own_addresses(account)`, a call to the domain `own_addresses`, and `is_own_message()` from
+  `domain/messages.py`, the one rule for "the owner's own", shared with
+  `ProposalService.derive`, ranking and thread activity.
+- `services/application.py` `prepare_daily_shortlist` adds them for today's window when a
+  thread service is composed, persists their ranks, drops blocked senders again, and sets
+  `SyncResult.outside_ids` to the selected ones. `ShortlistGate.review(...,
+  outside_ids)` is a required keyword so every implementer labels them.
+- `domain/digests.py`: `DigestSection.FOLLOW_UPS`, `SECTION_TITLES` (used by `DigestView`;
+  the CLI prints the raw value) and `SavedBriefSummary.follow_up_count`.
+  `DigestService.save(..., outside_ids)`; `services/history.py` `coverage_line()`.
+- `services/proposals.py` `derive`: `ProposalRepository.proposed_actions()` counts the
+  actions that already have a proposal from an email, for the exact cap.
+- `domain/actions.py` `ActionProposal.action_revision`. `ui/runtime.py`:
+  `brief_proposals`, `apply_proposal`, `undo_apply_proposal`, `dismiss_proposal` and
+  `restore_proposal`, mirrored on `DesktopBackend` and the test fakes.
+- `ui/proposals_view.py`: `ProposalsDialog`, `effect_text()` and `pending_proposals()`;
+  `ui/digest_view.py` `proposal_requested(kind, proposal_id, action_revision)`;
+  `ui/actions_view.py` `PROPOSALS` and `action_with_id()`.
+- macOS runs UI tests only with `MACOS_GUI_AVAILABLE` set; `QT_QPA_PLATFORM=offscreen` needs
+  no window server.
+
+## Daily operation (Part 8)
+
+Part 8 is implemented and awaits live acceptance. It adds migration `20260930_0012` and
+[ADR 0017](adr/0017-automatic-runs.md). While the desktop is open, MailBrief refreshes on its
+own. Nothing runs when it is closed, and nothing briefs past days.
+
+### When runs happen
+
+- In Settings, Preferences: **Refresh when MailBrief starts**, and **Refresh while running**
+  (off, every hour, every 2 hours, every 4 hours). Both are off by default.
+- A timer checks the wall clock once a minute, so a run that came due while the computer
+  slept starts soon after it wakes, once. Runs coalesce: one at a time, never a pile.
+- A run waits while another operation is running or a dialog is open, and is skipped with a
+  status message when Gmail isn't connected. It never opens a panel or a dialog.
+
+### Without permission (the default)
+
+A run syncs today's Inbox metadata, checks the threads of open actions and ranks, then
+reports how many messages are ready to review. It downloads no bodies, sends nothing to Groq
+and saves no brief. Reviewing and analyzing stay a click away (Sync and review).
+
+### With permission
+
+- Settings, Preferences, **Automatic analysis: Change…** (or
+  `ai-consent auto-send N`) lets automatic runs send up to N messages (1–10) without asking.
+  It is set on your active Groq consent, shows the same disclosure as the first-use consent
+  and says that the runs will not ask again. It needs that consent to exist.
+- The permission belongs to the connected Gmail account, the one whose mail a run would
+  send, and at most one account holds one: granting it to an account clears any other
+  account's. With no Gmail connected, the line reads "Connect Gmail to change automatic
+  analysis." and **Change…** is off.
+- Off is off for every account: choosing 0 clears the permission wherever it was.
+- Revoking consent clears it, and a new disclosure version starts without it.
+- A run sends at most N messages. The lowest-ranked messages over the cap are **deferred**:
+  never sent, never cached, counted in the brief's coverage line ("· N deferred") and listed
+  again by your next review. A run that selects nothing saves nothing; a saved automatic
+  brief replaces today's earlier one.
+- Messages carried from the day's earlier brief that need analysis again (after an upgrade,
+  or a change of model, body limit or time zone) are sent before new ones. An automatic run
+  never saves a brief that would lose one of the brief's messages: if more of them need
+  analysis than it may send, or one can't be read or fails in analysis, it saves nothing
+  (what it did analyze stays cached), and the status line and `brief --automatic` say
+  "Today's brief needs your review: N messages from it couldn't be refreshed automatically.",
+  then "M new messages are also ready." when there are any.
+
+### Declines
+
+A message you uncheck in a review, or leave out with `--exclude` when it was selected
+automatically, is remembered and never auto-selected again (automatic runs, reviews and the
+CLI alike), and the next review lists it unchecked with "you left this out earlier". Checking
+it, or `--include`, forgets the decline. Being pushed out by a limit is not a decline.
+
+An uncheck is remembered once you confirm the review, even if you then cancel or decline the
+consent question and nothing is sent. That is deliberate: a decline can only make automatic
+runs send less.
+
+### CLI
+
+- `brief --automatic` runs one automatic run: no prompts, today only, and it rejects
+  `--date`, `--include`, `--exclude` and `--yes`. It implies `--silent-only`: it never opens
+  a browser, and with an expired Gmail session it prints the sign-in message and exits 2.
+  Without permission it prints "N messages are
+  ready to review; automatic analysis is off."; with it, the usual result plus "N deferred to
+  your next review." when messages wait. A run that needs your review prints that sentence. If
+  it only stopped over its permission, it exits 0; if a carried message couldn't be read, or
+  its analysis failed, it also prints the usual result lines and the reason, and exits 4.
+- `ai-consent auto-send N` shows the disclosure and asks for a typed "yes" (`--yes` skips the
+  question, not the disclosure). The account is the one in the stored Gmail credential, read
+  without connecting; with none stored it exits 3 with "Connect Gmail first.". `auto-send 0`
+  turns it off for every account without asking, and works even with no connection and no
+  consent.
+- `ai-consent status` lists each account's consent and permission, then "Automatic
+  analysis: …" for the connected account, which is what the next run reads; `preferences
+  show` prints that same line, and the refresh settings.
+- `sync --show-metadata` marks declined messages.
+
+### Limits
+
+- Desktop only, only while open; there is no background service.
+- At most 10 messages per automatic run, and the usual messages-per-brief and AI limits still
+  apply (an explicit `MAILBRIEF_*` variable wins).
+- "Ready" counts only new messages: the selection minus those in the day's saved brief.
+- Automatic runs never write to the mailbox, to actions or to drafts.
+
+### Live acceptance
+
+1. Refresh every hour with automatic analysis off: sleep the computer for 3+ hours, then
+   wake it. There is exactly one "Checked Gmail at …" status, no Groq request in
+   `desktop.log` and no new brief.
+2. Give permission for 2: the dialog shows the disclosure, and the next automatic run
+   analyzes at most 2 new messages and defers the rest.
+3. Uncheck an auto-selected message in a review: later automatic runs never send it, and the
+   next review lists it unchecked.
+4. Revoke consent in Settings: the next automatic run only checks Gmail.
+5. Close MailBrief for a day and reopen it with "Refresh when MailBrief starts": one run for
+   today; yesterday stays missed.
+
+### For developers
+
+- `ui/scheduler.py` `RefreshScheduler` (minute tick, injected clock, `due` signal,
+  `note_run`, `retry_soon`); `ui/main_window.py` `_refresh_due`, `_automatic_refresh`,
+  `_automatic_finished`; `ui/auto_send_view.py` `AutoSendDialog`.
+- `services/brief.py` `generate(automatic=True)`, `permission_preview`,
+  `permission_sentence`; `services/consent.py` `auto_send_permission`, `set_auto_send`
+  (both take the connected account's address);
+  `AnalysisPlan.defer_after`; `AnalysisOutcome.DEFERRED`; `BriefStatus.READY_FOR_REVIEW`.
+- `MessageRepository.set_review_declined` and `declined_among`;
+  `ConsentRepository.set_auto_send` and `with_auto_send`; `review_shortlist(declined=...)`;
+  `ShortlistGate.review` takes `outside_ids` and `declined_ids`.
+- `ui/diagnostics.py` `log_automatic_run` logs counts only.

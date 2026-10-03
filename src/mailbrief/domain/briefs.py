@@ -1,13 +1,17 @@
 """Brief-generation contracts shared by the analysis, digest and brief services."""
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Final, Self
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS
-from mailbrief.domain.common import DomainModel
+from mailbrief.domain.common import DomainModel, normalize_utc
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, SyncResult
+
+# The most messages an automatic run may send without asking (ADR 0017).
+AUTO_SEND_LIMIT_MAX: Final = 10
 
 
 class AnalysisOutcome(StrEnum):
@@ -17,6 +21,7 @@ class AnalysisOutcome(StrEnum):
     REUSED = "reused"  # A valid cached analysis.
     FAILED = "failed"  # A body failure, or no valid result.
     SKIPPED = "skipped"  # An empty or unavailable body; never sent.
+    DEFERRED = "deferred"  # Over an automatic run's send limit; never sent or cached.
 
 
 # Sent for each message before the body; TransmissionPreview.fields adds the body with the
@@ -54,6 +59,30 @@ class TransmissionPreview(DomainModel):
         return self
 
 
+class AutoSendPermission(DomainModel):
+    """How many messages an automatic run may send without asking, on one account's active
+    consent (ADR 0017). ``limit`` 0 means none: every analysis asks first."""
+
+    account_email: str = Field(min_length=1, max_length=320)
+    limit: int = Field(ge=0, le=AUTO_SEND_LIMIT_MAX)
+    granted_at_utc: datetime | None = None
+
+    @field_validator("granted_at_utc")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else normalize_utc(value)
+
+
+class AutoSendStatus(AutoSendPermission):
+    """The permission with the disclosure it would rest on, for the desktop's dialog.
+
+    ``disclosure`` describes what one automatic run would send; its message count is at least
+    one, and the dialog sets it to the limit the owner is choosing.
+    """
+
+    disclosure: TransmissionPreview
+
+
 class BriefStatus(StrEnum):
     """Terminal state of one brief-generation run."""
 
@@ -62,6 +91,9 @@ class BriefStatus(StrEnum):
     CANCELLED = "cancelled"
     CONSENT_DECLINED = "consent_declined"
     ANALYSIS_FAILED = "analysis_failed"
+    # An automatic run that saved nothing: it had no permission to send, found nothing new,
+    # or would have lost a carried message (BriefRunResult.needs_review).
+    READY_FOR_REVIEW = "ready_for_review"
 
 
 class BriefRunResult(DomainModel):
@@ -77,9 +109,31 @@ class BriefRunResult(DomainModel):
     ai_calls: int = Field(default=0, ge=0)  # HTTP requests this run, even failed or retried.
     # The HTTP status and sanitized provider code behind error_code, e.g. "HTTP 403".
     provider_detail: str | None = Field(default=None, max_length=100)
+    proposals_created: int = Field(default=0, ge=0)  # Follow-up proposals made (ADR 0016).
+    # New messages an automatic run found ready to review: its selection minus the carried
+    # ones, whether it only checked or needs a review.
+    ready: int = Field(default=0, ge=0)
+    # Messages an automatic run deferred to the next review: over its send limit (ADR 0017).
+    deferred: int = Field(default=0, ge=0)
+    # Carried messages an automatic run couldn't refresh: over its send limit, unreadable, or
+    # failed in analysis (ADR 0017). With any, it saved nothing rather than lose them. Only
+    # the last kind got as far as the analysis, so only it has a coverage.
+    unrefreshed: int = Field(default=0, ge=0)
+
+    @property
+    def needs_review(self) -> bool:
+        """Whether an automatic run saved nothing because a saved brief would have lost a
+        carried message; ``unrefreshed`` counts them."""
+        return self.unrefreshed > 0
 
     @model_validator(mode="after")
     def validate_digest(self) -> Self:
         if (self.digest is not None) != (self.status is BriefStatus.SAVED):
             raise ValueError("a digest is present exactly when the brief was saved")
+        return self
+
+    @model_validator(mode="after")
+    def validate_unrefreshed(self) -> Self:
+        if self.unrefreshed and self.status is not BriefStatus.READY_FOR_REVIEW:
+            raise ValueError("only a run that is ready for review can need one")
         return self

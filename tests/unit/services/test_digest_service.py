@@ -14,7 +14,7 @@ from mailbrief.domain.digests import DigestCoverage, DigestSection, DigestStatus
 from mailbrief.domain.messages import AccountIdentity, ProviderKind, RankedMessage
 from mailbrief.services.analysis import PlannedMessage
 from mailbrief.services.calendar import DayWindow
-from mailbrief.services.digest import DigestService, section_for
+from mailbrief.services.digest import SECTION_ORDER, DigestService, section_for
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
     AccountRepository,
@@ -203,6 +203,67 @@ async def test_items_follow_sections_due_times_then_tie_breaks(
     assert [item.position for item in digest.items] == list(range(10))
     assert digest.status is DigestStatus.COMPLETE
     assert digest.account_id == OWNER
+
+
+async def test_outside_replies_go_last_in_their_own_section_whatever_their_category(
+    session: AsyncSession, account_id: int
+) -> None:
+    planned = [
+        await entry(session, account_id, "h", highlight()),
+        await entry(session, account_id, "out-action", action(), score=90),
+        await entry(session, account_id, "a", action(**NO_DEADLINE)),
+        await entry(session, account_id, "out-deadline", deadline(**DATE_ONLY), score=50),
+        await entry(session, account_id, "out-highlight", highlight(), score=70),
+    ]
+    outside = frozenset({"out-action", "out-deadline", "out-highlight"})
+
+    digest = await DigestService(session).save(
+        account_id=account_id,
+        account_email=OWNER,
+        window=WINDOW,
+        messages=planned,
+        coverage=coverage(analyzed=5),
+        outside_ids=outside,
+    )
+
+    assert digest is not None
+    assert [(item.message_key, item.section) for item in digest.items] == [
+        ("a", DigestSection.ACTIONS),
+        ("h", DigestSection.HIGHLIGHTS),
+        # Among themselves like any section: by due time, undated last.
+        ("out-action", DigestSection.FOLLOW_UPS),
+        ("out-deadline", DigestSection.FOLLOW_UPS),
+        ("out-highlight", DigestSection.FOLLOW_UPS),
+    ]
+    assert SECTION_ORDER[-1] is DigestSection.FOLLOW_UPS
+    repository = DigestRepository(session)
+    row = await repository.get_by_account_and_date(account_id, WINDOW.local_date)
+    assert row is not None
+    stored = await repository.get_digest_items(row.id)
+    assert [item.section for item, _, _ in stored] == [item.section.value for item in digest.items]
+
+
+async def test_without_outside_ids_nothing_moves_to_follow_ups(
+    session: AsyncSession, account_id: int
+) -> None:
+    planned = [
+        await entry(session, account_id, "a", action()),
+        await entry(session, account_id, "h", highlight()),
+    ]
+
+    digest = await DigestService(session).save(
+        account_id=account_id,
+        account_email=OWNER,
+        window=WINDOW,
+        messages=planned,
+        coverage=coverage(analyzed=2),
+    )
+
+    assert digest is not None
+    assert {item.section for item in digest.items} == {
+        DigestSection.ACTIONS,
+        DigestSection.HIGHLIGHTS,
+    }
 
 
 @pytest.mark.parametrize(

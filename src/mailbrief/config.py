@@ -7,6 +7,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
 from mailbrief.domain.messages import ProviderKind
+from mailbrief.domain.preferences import (
+    AI_BODY_CHARS_MAX,
+    AI_OUTPUT_TOKENS_MAX,
+    AI_OUTPUT_TOKENS_MIN,
+    AI_REQUESTS_MAX,
+    AI_TIMEOUT_MAX,
+    AI_TIMEOUT_MIN,
+)
 from mailbrief.errors import ConfigurationError
 
 
@@ -21,10 +29,12 @@ class Settings(BaseSettings):
     graph_base_url: HttpUrl = HttpUrl("https://graph.microsoft.com/v1.0")
     groq_model: str | None = None
     ai_batch_size: int = Field(default=1, ge=1, le=MAX_ANALYSIS_BATCH)
-    ai_body_character_limit: int = Field(default=4_000, ge=1, le=8_000)
-    ai_max_output_tokens: int = Field(default=4_000, ge=256, le=64_000)
-    ai_max_requests_per_run: int = Field(default=10, ge=1, le=1_000)
-    ai_timeout_seconds: float = Field(default=120, ge=10, le=600)
+    ai_body_character_limit: int = Field(default=4_000, ge=1, le=AI_BODY_CHARS_MAX)
+    ai_max_output_tokens: int = Field(
+        default=4_000, ge=AI_OUTPUT_TOKENS_MIN, le=AI_OUTPUT_TOKENS_MAX
+    )
+    ai_max_requests_per_run: int = Field(default=10, ge=1, le=AI_REQUESTS_MAX)
+    ai_timeout_seconds: float = Field(default=120, ge=AI_TIMEOUT_MIN, le=AI_TIMEOUT_MAX)
 
     @field_validator("graph_base_url")
     @classmethod

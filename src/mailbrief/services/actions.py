@@ -5,7 +5,8 @@ static messages, and nothing logs action text.
 """
 
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Final
 
@@ -19,11 +20,19 @@ from mailbrief.domain.actions import (
     ActionStatus,
     StepEdit,
     SuggestionState,
+    ThreadLink,
 )
-from mailbrief.domain.analysis import ActionSuggestion
+from mailbrief.domain.analysis import (
+    ActionOwnership,
+    ActionSuggestion,
+    DeadlinePrecision,
+    deadline_due_at,
+)
 from mailbrief.domain.common import normalize_utc
+from mailbrief.domain.messages import ProviderKind
 from mailbrief.storage.actions import ActionRepository, DecisionKey, suggestion_from_row
 from mailbrief.storage.tables import (
+    AccountTable,
     ActionStepTable,
     ActionTable,
     MessageTable,
@@ -33,8 +42,10 @@ from mailbrief.storage.tables import (
 _NOT_FOUND: Final = "That action was not found."
 _SUGGESTION_NOT_FOUND: Final = "That suggestion was not found."
 _STALE: Final = "The action changed since it was loaded; reload it and try again."
+_UNDO_ADD: Final = "Only an unchanged addition can be undone."
 _LATEST: Final = datetime.max.replace(tzinfo=UTC)
 COMPLETED_LIST_LIMIT: Final = 200  # The newest completed actions a list shows by default.
+MAX_THREAD_LINKS: Final = 3  # The actions named for one email, most urgent first.
 
 
 class ActionNotFoundError(LookupError):
@@ -49,6 +60,28 @@ class ActionConflictError(ValueError):
     """The action changed since it was read, or the change is not allowed now."""
 
 
+@dataclass(frozen=True, slots=True)
+class DecisionSnapshot:
+    """A suggestion's decision as it was before accept_into, for its undo to put back:
+    ``decision`` is None when there was none (the suggestion was pending)."""
+
+    decision: SuggestionState | None = None
+    action_id: int | None = None
+    decided_at_utc: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedInto:
+    """What accept_into did: the action, whether the email became a new source of it,
+    whether anything changed at all (repeating an addition changes nothing, and so has
+    nothing to undo), and the decision it replaced."""
+
+    action: Action
+    source_added: bool
+    changed: bool
+    previous: DecisionSnapshot
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -57,7 +90,16 @@ def _new_public_id() -> str:
     return str(uuid.uuid4())
 
 
-def _touch(row: ActionTable, now: datetime) -> None:
+def urgency(
+    target_date: date | None, due_at_utc: datetime | None, created_at_utc: datetime
+) -> tuple[date, datetime, datetime]:
+    """How open actions are ordered: by target date, then due time, then creation, with
+    undated actions last."""
+    return (target_date or date.max, due_at_utc or _LATEST, created_at_utc)
+
+
+def touch(row: ActionTable, now: datetime) -> None:
+    """Record a change to an action: one more revision, at ``now``."""
     row.revision += 1
     row.updated_at_utc = now
 
@@ -126,8 +168,8 @@ class ActionService:
 
     async def _suggestion(
         self, suggestion_id: int
-    ) -> tuple[ActionSuggestion, MessageTable, DecisionKey]:
-        """The suggestion, its message and the key its decision is kept under."""
+    ) -> tuple[ActionSuggestion, MessageTable, AccountTable, DecisionKey]:
+        """The suggestion, its message and account, and the key its decision is kept under."""
         found = await self._repository.get_suggestion(suggestion_id)
         if found is None:
             raise SuggestionNotFoundError(_SUGGESTION_NOT_FOUND)
@@ -142,7 +184,7 @@ class ActionService:
             provider_message_id=message.provider_message_id,
             fingerprint=suggestion.fingerprint,
         )
-        return suggestion, message, key
+        return suggestion, message, account, key
 
     async def _live(self, public_id: str, expected_revision: int | None) -> ActionTable:
         row = await self._repository.get_action(public_id)
@@ -181,7 +223,7 @@ class ActionService:
         """
 
         async def run(now: datetime) -> Action:
-            suggestion, message, key = await self._suggestion(suggestion_id)
+            suggestion, message, account, key = await self._suggestion(suggestion_id)
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id is not None:
@@ -189,7 +231,7 @@ class ActionService:
                 if existing is not None:
                     if existing.deleted_at_utc is not None:
                         existing.deleted_at_utc = None
-                        _touch(existing, now)
+                        touch(existing, now)
                     return await self._load(existing)
             row = await self._repository.add_action(
                 ActionTable(
@@ -217,7 +259,7 @@ class ActionService:
             )
             for position, text in enumerate(suggestion.steps):
                 self._repository.add_step(row.id, position, text, None)
-            await self._repository.add_source(row.id, message)
+            await self._repository.add_source(row.id, message, account)
             await self._repository.save_decision(
                 key, decision=SuggestionState.ACCEPTED, action_id=row.id, decided_at_utc=now
             )
@@ -227,32 +269,101 @@ class ActionService:
 
     async def accept_into(
         self, suggestion_id: int, public_id: str, expected_revision: int
-    ) -> Action:
-        """Add a suggestion's message to an existing action as another source.
+    ) -> AcceptedInto:
+        """Accept a suggestion into an existing action instead of creating another, adding
+        its email as a source unless it already is one; one revision.
 
-        Repeating this for the same action returns it unchanged, even with an old revision.
-        Nothing exposes this yet: it is reserved for M8's thread continuity.
+        Only a live, open action takes it: a completed or deleted one raises
+        ActionConflictError, so it is reopened first. The brief offers this for the open
+        actions that track the email's thread; naming the action (``actions accept N
+        --into``) allows any thread or account. Repeating it for the same action returns
+        the action unchanged, even with an old revision, with ``changed`` false: there is
+        nothing to undo then. Otherwise ``previous`` is the decision it replaced (none, a
+        dismissal, or an acceptance into a deleted action), which undo_accept_into() puts
+        back while the action is unchanged.
         """
 
-        async def run(now: datetime) -> Action:
-            _, message, key = await self._suggestion(suggestion_id)
-            target = await self._live(public_id, None)
+        async def run(now: datetime) -> AcceptedInto:
+            _, message, account, key = await self._suggestion(suggestion_id)
+            target = await self._repository.get_action(public_id, include_deleted=True)
+            if target is None:
+                raise ActionNotFoundError(_NOT_FOUND)
+            if target.deleted_at_utc is not None or target.status != ActionStatus.OPEN.value:
+                raise ActionConflictError("Reopen the action before adding to it.")
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
+            previous = (
+                DecisionSnapshot()
+                if decision is None
+                else DecisionSnapshot(
+                    decision=SuggestionState(decision.decision),
+                    action_id=decision.action_id,
+                    decided_at_utc=decision.decided_at_utc,
+                )
+            )
             if accepted_id == target.id:
-                return await self._load(target)
+                return AcceptedInto(
+                    await self._load(target), source_added=False, changed=False, previous=previous
+                )
             if accepted_id is not None:
                 other = await self._repository.get_action_by_id(accepted_id)
                 if other is not None and other.deleted_at_utc is None:
                     raise ActionConflictError("That suggestion already belongs to another action.")
             if target.revision != expected_revision:
                 raise ActionConflictError(_STALE)
-            await self._repository.add_source(target.id, message)
+            added = await self._repository.add_source(target.id, message, account)
             await self._repository.save_decision(
                 key, decision=SuggestionState.ACCEPTED, action_id=target.id, decided_at_utc=now
             )
-            _touch(target, now)
-            return await self._load(target)
+            touch(target, now)
+            return AcceptedInto(
+                await self._load(target), source_added=added, changed=True, previous=previous
+            )
+
+        return await self._write(run)
+
+    async def undo_accept_into(
+        self,
+        suggestion_id: int,
+        public_id: str,
+        expected_revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
+    ) -> Action:
+        """Reverse accept_into while the action is exactly as it left it; one revision.
+
+        The suggestion's decision becomes exactly ``previous`` (accept_into's): none, so it
+        is pending again, or the earlier dismissal or acceptance with its original time.
+        With ``remove_source`` (accept_into's ``source_added``), its email stops being a
+        source, but an action's last source always stays. Raises ActionConflictError unless
+        the action is live, still at ``expected_revision``, and the suggestion is still
+        accepted into it.
+        """
+
+        async def run(now: datetime) -> Action:
+            _, message, _, key = await self._suggestion(suggestion_id)
+            row = await self._repository.get_action(public_id)
+            decision = await self._repository.get_decision(key)
+            if (
+                row is None
+                or row.revision != expected_revision
+                or _accepted_action_id(decision) != row.id
+            ):
+                raise ActionConflictError(_UNDO_ADD)
+            if previous.decision is None or previous.decided_at_utc is None:
+                await self._repository.delete_decision(key)
+            else:
+                await self._repository.save_decision(
+                    key,
+                    decision=previous.decision,
+                    action_id=previous.action_id,
+                    decided_at_utc=previous.decided_at_utc,
+                )
+            if remove_source and await self._repository.source_count(row.id) > 1:
+                await self._repository.remove_source(row.id, message.provider_message_id)
+            touch(row, now)
+            return await self._load(row)
 
         return await self._write(run)
 
@@ -260,7 +371,7 @@ class ActionService:
         """Hide a suggestion from later briefs; repeating it changes nothing."""
 
         async def run(now: datetime) -> None:
-            _, _, key = await self._suggestion(suggestion_id)
+            _, _, _, key = await self._suggestion(suggestion_id)
             decision = await self._repository.get_decision(key)
             accepted_id = _accepted_action_id(decision)
             if accepted_id is not None:
@@ -283,7 +394,7 @@ class ActionService:
         """Undo a dismissal: the suggestion is pending again, or its deleted action returns."""
 
         async def run(now: datetime) -> None:
-            _, _, key = await self._suggestion(suggestion_id)
+            _, _, _, key = await self._suggestion(suggestion_id)
             decision = await self._repository.get_decision(key)
             if decision is None:
                 return
@@ -297,7 +408,7 @@ class ActionService:
                 await self._repository.delete_decision(key)
             elif action.deleted_at_utc is not None:
                 action.deleted_at_utc = None
-                _touch(action, now)
+                touch(action, now)
 
         await self._write(run)
 
@@ -334,7 +445,7 @@ class ActionService:
             _apply_edit(row, edit)
             if steps is not None:
                 await self._apply_steps(row, steps, listed, now)
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -348,7 +459,7 @@ class ActionService:
                 raise ActionConflictError("The action is already completed.")
             row.status = ActionStatus.COMPLETED.value
             row.completed_at_utc = now
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -362,7 +473,7 @@ class ActionService:
                 raise ActionConflictError("The action is already open.")
             row.status = ActionStatus.OPEN.value
             row.completed_at_utc = None
-            _touch(row, now)
+            touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
@@ -373,7 +484,7 @@ class ActionService:
         async def run(now: datetime) -> None:
             row = await self._live(public_id, expected_revision)
             row.deleted_at_utc = now
-            _touch(row, now)
+            touch(row, now)
 
         await self._write(run)
 
@@ -386,10 +497,73 @@ class ActionService:
                 raise ActionNotFoundError(_NOT_FOUND)
             if row.deleted_at_utc is not None:
                 row.deleted_at_utc = None
-                _touch(row, now)
+                touch(row, now)
             return await self._load(row)
 
         return await self._write(run)
+
+    async def mark_thread_seen(self, public_id: str, expected_revision: int) -> Action:
+        """Move the owner's "seen" watermark past the latest message in the action's threads
+        (ADR 0015), from others or the owner.
+
+        With nothing new, the action is returned unchanged, without a new revision. This is
+        the only thing that changes an action because of its threads.
+        """
+
+        async def run(now: datetime) -> Action:
+            row = await self._live(public_id, expected_revision)
+            action = await self._load(row)
+            thread = action.thread
+            if thread is None or not thread.unseen:
+                return action
+            seen = [
+                at for at in (thread.latest_at_utc, thread.owner_replied_at_utc) if at is not None
+            ]
+            row.thread_seen_until_utc = max(seen)
+            touch(row, now)
+            return await self._load(row)
+
+        return await self._write(run)
+
+    async def thread_links(
+        self, account_email: str, message_keys: Iterable[str]
+    ) -> dict[str, tuple[ThreadLink, ...]]:
+        """The live, open actions that continue each email's thread (ADR 0015).
+
+        ``message_keys`` are Gmail message IDs of ``account_email``'s cached messages. An
+        action continues a message's thread when one of its sources has the same provider,
+        account and thread snapshot. Each message gets at most MAX_THREAD_LINKS, most urgent
+        first; one that is not cached, has no thread or has no such action gets no entry.
+        The number of queries does not grow with the number of messages or actions.
+        """
+        rows = await self._repository.thread_link_rows(
+            ProviderKind.GMAIL.value, account_email, message_keys
+        )
+        found: dict[str, dict[int, tuple[tuple[date, datetime, datetime, int], ThreadLink]]] = {}
+        for row in rows:
+            due = deadline_due_at(
+                DeadlinePrecision(row.deadline_precision),
+                row.deadline_date,
+                row.deadline_at_utc,
+                row.deadline_timezone,
+            )
+            links = found.setdefault(row.message_key, {})
+            earlier = links.get(row.action_id)
+            links[row.action_id] = (
+                (*urgency(row.target_date, due, row.created_at_utc), row.action_id),
+                ThreadLink(
+                    public_id=row.public_id,
+                    title=row.title,
+                    revision=row.revision,
+                    ownership=ActionOwnership(row.ownership),
+                    is_source=row.is_source or (earlier is not None and earlier[1].is_source),
+                ),
+            )
+        ranked: dict[str, tuple[ThreadLink, ...]] = {}
+        for key, links in found.items():
+            ordered = sorted(links.values(), key=lambda pair: pair[0])
+            ranked[key] = tuple(link for _, link in ordered[:MAX_THREAD_LINKS])
+        return ranked
 
     async def get(self, public_id: str) -> Action:
         """A live action; deleted actions are not found."""
@@ -415,10 +589,8 @@ class ActionService:
         # The rows arrive in ID order and sorted() is stable, so equal keys keep that order.
         ordered = sorted(
             actions,
-            key=lambda action: (
-                action.target_date or date.max,
-                action.due_at_utc() or _LATEST,
-                action.created_at_utc,
+            key=lambda action: urgency(
+                action.target_date, action.due_at_utc(), action.created_at_utc
             ),
         )
         return tuple(ordered if limit is None else ordered[:limit])

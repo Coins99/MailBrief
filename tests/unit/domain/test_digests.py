@@ -230,6 +230,17 @@ def test_coverage_counts_must_add_up_to_the_shortlist(shortlisted: int) -> None:
         make_coverage(shortlisted=shortlisted)
 
 
+def test_deferred_messages_count_toward_the_shortlist_and_default_to_none() -> None:
+    assert make_coverage().deferred == 0
+    deferred = make_coverage(shortlisted=7, deferred=2)
+    assert (deferred.shortlisted, deferred.deferred) == (7, 2)
+    with pytest.raises(ValidationError, match="must add up"):
+        make_coverage(shortlisted=5, deferred=2)
+    with pytest.raises(ValidationError):
+        make_coverage(shortlisted=4, deferred=-1)
+    assert DigestCoverage.model_validate_json(deferred.model_dump_json()) == deferred
+
+
 @pytest.mark.parametrize(
     "field",
     ["shortlisted", "analyzed", "reused", "failed", "skipped", "input_tokens", "output_tokens"],

@@ -304,6 +304,10 @@ modifying Gmail or losing action state.
 
 ## M8 — Thread continuity and daily operation
 
+**Status:** M8 implemented, awaiting live acceptance (PR #17, built in nine parts;
+[m8-daily-operation.md](m8-daily-operation.md) has the live acceptance and known limits).
+The history cursor above is not part of it.
+
 **Work**
 
 - Add selected-date digest history and bounded catch-up for missed days. Show the

@@ -29,9 +29,13 @@ waits for the write to finish before disposing application resources.
 
 On first use, the two desktop fields inherit `MAILBRIEF_GMAIL_OAUTH_CLIENT_PATH`
 and `MAILBRIEF_GROQ_MODEL` when present. Once saved, desktop settings override
-those environment values, including deliberately blank fields. Other analysis
-limits still come from the existing environment configuration. Diagnostic CLIs
-continue to use their own environment settings.
+those environment values, including deliberately blank fields. Diagnostic CLIs
+continue to use their own environment settings for these two.
+
+Since M8, Settings has a second tab, **Preferences**: your time zone, messages per
+brief, excluded senders, drafting defaults and AI limits. They are saved in the database,
+shared with the diagnostic CLI, and an explicit `MAILBRIEF_AI_*` variable still wins over
+a saved AI limit. See [M8 daily operation](m8-daily-operation.md#preferences-parts-12).
 
 Settings also supports key removal and revocation of Groq consent for all locally
 stored Gmail accounts. Neither operation removes saved briefs or cached analyses.
@@ -66,7 +70,8 @@ can access the database. An incomplete sync with no usable messages also preserv
 the last good brief rather than saving a misleading empty one.
 
 **Browse saved mail (offline)** opens a read-only view of locally cached Gmail
-metadata. Choose an account and received date in your local timezone, and use
+metadata. Choose an account and received date in your time zone (M8: it opens on today
+there, from the Preferences time zone), and use
 100-message pages. The browser includes messages no longer marked as being in the
 Inbox, labels the snapshot as potentially stale, and shows the account's last
 complete sync time. Sender, subject, received time and the existing Gmail preview

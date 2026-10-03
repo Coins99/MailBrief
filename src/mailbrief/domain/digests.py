@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Self
+from typing import Final, Self
 
 from pydantic import ConfigDict, Field, HttpUrl, field_validator, model_validator
 
@@ -19,12 +19,27 @@ from mailbrief.domain.messages import EmailContact
 
 
 class DigestSection(StrEnum):
-    """Visible sections in a daily brief."""
+    """Visible sections in a daily brief.
+
+    FOLLOW_UPS holds replies in tracked threads that weren't in today's Inbox, whatever
+    their category (ADR 0016).
+    """
 
     HIGHLIGHTS = "highlights"
     ACTIONS = "actions"
     DEADLINES = "deadlines"
     DECISIONS = "decisions"
+    FOLLOW_UPS = "follow_ups"
+
+
+# How each section is titled wherever a brief is shown; the CLI prints the raw value.
+SECTION_TITLES: Final = {
+    DigestSection.ACTIONS: "Actions",
+    DigestSection.DEADLINES: "Deadlines",
+    DigestSection.DECISIONS: "Decisions",
+    DigestSection.HIGHLIGHTS: "Highlights",
+    DigestSection.FOLLOW_UPS: "Replies in threads you track",
+}
 
 
 class DigestStatus(StrEnum):
@@ -68,6 +83,8 @@ class DigestCoverage(DomainModel):
     - reused: valid cached analyses.
     - failed: body or analysis failures.
     - skipped: empty or unavailable bodies, which are never sent.
+    - deferred: messages an automatic run left for the next review because they were over
+      its send limit (ADR 0017); never sent and never cached.
     """
 
     sync_complete: bool
@@ -76,6 +93,7 @@ class DigestCoverage(DomainModel):
     reused: int = Field(ge=0)
     failed: int = Field(ge=0)
     skipped: int = Field(ge=0)
+    deferred: int = Field(default=0, ge=0)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     ai_provider: str | None = Field(default=None, max_length=64)
@@ -83,7 +101,8 @@ class DigestCoverage(DomainModel):
 
     @model_validator(mode="after")
     def validate_counts(self) -> Self:
-        if self.analyzed + self.reused + self.failed + self.skipped != self.shortlisted:
+        total = self.analyzed + self.reused + self.failed + self.skipped + self.deferred
+        if total != self.shortlisted:
             raise ValueError("coverage counts must add up to the shortlist size")
         return self
 
@@ -125,11 +144,30 @@ class DailyDigest(DomainModel):
         return self
 
 
+class SavedBriefSummary(DomainModel):
+    """One saved brief in the history list, without its items."""
+
+    account_email: str = Field(min_length=1, max_length=320)
+    local_date: date
+    timezone_name: str = Field(min_length=1, max_length=128)
+    status: DigestStatus
+    generated_at_utc: datetime
+    item_count: int = Field(ge=0)
+    # How many items are replies from tracked threads that weren't in that day's Inbox.
+    follow_up_count: int = Field(default=0, ge=0)
+
+    @field_validator("generated_at_utc")
+    @classmethod
+    def normalize_generated_at(cls, value: datetime) -> datetime:
+        return normalize_utc(value)
+
+
 class SyncStage(StrEnum):
     """Progress stages emitted by the synchronization workflow."""
 
     CONNECTING = "connecting"
     FETCHING = "fetching"
+    THREADS = "threads"
     RANKING = "ranking"
     ANALYZING = "analyzing"
     ASSEMBLING = "assembling"
@@ -167,6 +205,16 @@ class SyncResult(DomainModel):
     failed_message_count: int = Field(default=0, ge=0)
     shortlisted_message_keys: tuple[str, ...] = ()
     error_code: str | None = Field(default=None, max_length=128)
+    # The threads of open actions checked after today's sync (ADR 0015).
+    threads_tracked: int = Field(default=0, ge=0)
+    threads_checked: int = Field(default=0, ge=0)
+    threads_failed: int = Field(default=0, ge=0)
+    thread_messages: int = Field(default=0, ge=0)
+    threads_stopped_code: str | None = Field(default=None, max_length=128)
+    # The threads that check read successfully: outside replies come only from these.
+    threads_read: frozenset[str] = frozenset()
+    # Selected messages that are replies in tracked threads outside today's Inbox (ADR 0016).
+    outside_ids: frozenset[str] = frozenset()
 
     @field_validator("range_start_utc", "range_end_utc")
     @classmethod

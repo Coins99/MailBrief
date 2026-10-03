@@ -4,11 +4,11 @@ Titles come from the owner or, originally, from AI suggestions about an email, s
 shown only as plain list-item text and never in tooltips, which Qt may render as rich text.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -25,12 +25,17 @@ from mailbrief.domain.actions import Action, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.lists import ActivatingList
+from mailbrief.ui.proposals_view import pending_proposals
 
 EDIT = "edit"
 COMPLETE = "complete"
 REOPEN = "reopen"
 DELETE = "delete"
+SEEN = "seen"
+PROPOSALS = "proposals"
 
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _TAB_NAMES = {
     ActionFilter.OPEN: "Open",
     ActionFilter.WAITING: "Waiting",
@@ -61,7 +66,36 @@ def describe(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> s
             details.append("carried over")
     if not any(source.available for source in action.sources) and action.sources:
         details.append("source no longer in local mail")
+    thread = action.thread
+    if thread is not None:
+        if thread.latest_at_utc is not None and thread.latest_sender is not None:
+            latest = _when(thread.latest_at_utc, today=today, zone=zone, clock=True)
+            details.append(
+                f"{thread.new_messages} new in thread, latest {latest} from {thread.latest_sender}"
+            )
+        if thread.owner_replied_at_utc is not None:
+            replied = _when(thread.owner_replied_at_utc, today=today, zone=zone, clock=False)
+            details.append(f"you replied {replied}")
+    if proposals := len(pending_proposals(action)):
+        details.append(f"{proposals} {'proposal' if proposals == 1 else 'proposals'}")
     return action.title + (" — " + " · ".join(details) if details else "")
+
+
+def _when(moment: datetime, *, today: date, zone: ZoneInfo, clock: bool) -> str:
+    """A moment of the past week by weekday ("Tue 14:02"), an older one by date, in ``zone``.
+
+    Weekday names are fixed, like the rest of the window's English text.
+    """
+    local = moment.astimezone(zone)
+    time = f" {local:%H:%M}" if clock else ""
+    if today - timedelta(days=6) <= local.date() <= today:
+        return _WEEKDAYS[local.weekday()] + time
+    return local.date().isoformat() + time
+
+
+def has_activity(action: Action) -> bool:
+    """Whether the action's threads have anything the owner hasn't marked seen."""
+    return action.thread is not None and action.thread.unseen
 
 
 def can_reply(action: Action) -> bool:
@@ -83,26 +117,12 @@ def gmail_source(action: Action) -> str | None:
     return None
 
 
-class _ActionList(QListWidget):
-    """Return and Enter activate the current row on every platform.
-
-    On macOS, Qt's item views only try to edit an item on Return, so they never activate it.
-    """
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        item = self.currentItem()
-        if item is not None and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.itemActivated.emit(item)
-            return
-        super().keyPressEvent(event)
-
-
 class ActionsPanel(QWidget):
     """Lists actions per view and asks the window to act; it changes nothing itself.
 
-    ``action_requested(kind, action)`` carries EDIT, COMPLETE, REOPEN or DELETE and the
-    selected Action, and ``draft_requested(kind, action)`` a DraftKind and the Action.
-    Opening a source needs no backend, so the panel does it directly.
+    ``action_requested(kind, action)`` carries EDIT, COMPLETE, REOPEN, DELETE, SEEN or
+    PROPOSALS and the selected Action, and ``draft_requested(kind, action)`` a DraftKind and
+    the Action. Opening a source needs no backend, so the panel does it directly.
     """
 
     action_requested = Signal(str, object)
@@ -122,7 +142,7 @@ class ActionsPanel(QWidget):
         self.tabs = QTabWidget()
         self.lists: dict[ActionFilter, QListWidget] = {}
         for view in ActionFilter:
-            listing = _ActionList()
+            listing = ActivatingList()
             listing.setAccessibleName(f"{_TAB_NAMES[view]} actions")
             listing.currentRowChanged.connect(lambda _row: self._update_buttons())
             listing.itemActivated.connect(lambda _item: self._request(EDIT))
@@ -135,6 +155,13 @@ class ActionsPanel(QWidget):
         self.complete_button = QPushButton("Com&plete")
         self.delete_button = QPushButton("De&lete")
         self.source_button = QPushButton("Open s&ource")
+        # K: the window's Sync and review already takes S.
+        self.seen_button = QPushButton("Mar&k seen")
+        self.seen_button.setToolTip("Clear the new-in-thread and you-replied notes.")
+        # R: the other letters of "Proposals" are taken by Complete, Delete, Open source and
+        # the window's Sync and review.
+        self.proposals_button = QPushButton("P&roposals…")
+        self.proposals_button.setToolTip("Review follow-up replies that propose an update.")
         self.draft_button = QPushButton("Dra&ft…")
         self.draft_menu = QMenu(self.draft_button)
         self.reply_draft = self.draft_menu.addAction("Reply to its email")
@@ -154,6 +181,8 @@ class ActionsPanel(QWidget):
             self.complete_button,
             self.delete_button,
             self.source_button,
+            self.seen_button,
+            self.proposals_button,
             self.draft_button,
         ):
             buttons.addWidget(button)
@@ -161,6 +190,8 @@ class ActionsPanel(QWidget):
         self.edit_button.clicked.connect(lambda: self._request(EDIT))
         self.complete_button.clicked.connect(self._complete_or_reopen)
         self.delete_button.clicked.connect(lambda: self._request(DELETE))
+        self.seen_button.clicked.connect(self._mark_seen)
+        self.proposals_button.clicked.connect(self._show_proposals)
         self.source_button.clicked.connect(self._open_source)
         self._busy = False
         self._update_buttons()
@@ -220,6 +251,10 @@ class ActionsPanel(QWidget):
         for button in (self.edit_button, self.complete_button, self.delete_button):
             button.setEnabled(enabled)
         self.source_button.setEnabled(action is not None and gmail_source(action) is not None)
+        self.seen_button.setEnabled(enabled and action is not None and has_activity(action))
+        self.proposals_button.setEnabled(
+            enabled and action is not None and bool(pending_proposals(action))
+        )
         self.draft_button.setEnabled(enabled)
         self.reply_draft.setEnabled(action is not None and can_reply(action))
 
@@ -236,6 +271,24 @@ class ActionsPanel(QWidget):
 
     def _complete_or_reopen(self) -> None:
         self._request(REOPEN if self.view() is ActionFilter.COMPLETED else COMPLETE)
+
+    def _mark_seen(self) -> None:
+        action = self.selected()
+        if action is not None and has_activity(action):
+            self._request(SEEN)
+
+    def _show_proposals(self) -> None:
+        action = self.selected()
+        if action is not None and pending_proposals(action):
+            self._request(PROPOSALS)
+
+    def action_with_id(self, public_id: str) -> Action | None:
+        """The action with this ID in any view, as last shown."""
+        for actions in self._actions.values():
+            for action in actions:
+                if action.public_id == public_id:
+                    return action
+        return None
 
     def _open_source(self) -> None:
         action = self.selected()

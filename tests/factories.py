@@ -3,14 +3,16 @@
 import hashlib
 from datetime import UTC, date, datetime
 
-from mailbrief.domain.actions import Action, ActionStatus
+from mailbrief.domain.actions import Action, ActionProposal, ActionStatus, ProposalState
 from mailbrief.domain.analysis import (
     ActionOwnership,
     ActionSuggestion,
     AnalysisCategory,
     DeadlinePrecision,
+    FollowUpKind,
     MessageAnalysis,
 )
+from mailbrief.domain.briefs import AutoSendStatus, TransmissionPreview
 from mailbrief.domain.digests import DigestItem, DigestSection
 from mailbrief.domain.messages import (
     EmailContact,
@@ -94,6 +96,48 @@ def make_action(**overrides: object) -> Action:
     }
     values.update(overrides)
     return Action.model_validate(values)
+
+
+def make_proposal(**overrides: object) -> ActionProposal:
+    """Build a valid pending "cancelled" proposal for make_action's action by default."""
+    values: dict[str, object] = {
+        "id": 3,
+        "action_public_id": "0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44",
+        "action_title": "Approve the proposal",
+        "action_revision": 1,
+        "kind": FollowUpKind.CANCELLED,
+        "state": ProposalState.PENDING,
+        "evidence": "No longer needed, thanks",
+        "provider_message_id": "reply-1",
+        "subject": "Re: deck",
+        "sender_address": "sam@example.com",
+        "received_at_utc": datetime(2026, 9, 3, 13, 0, tzinfo=UTC),
+        "web_link": "https://mail.google.com/mail/u/0/#inbox/reply-1",
+        "created_at_utc": datetime(2026, 9, 3, 14, 0, tzinfo=UTC),
+    }
+    values.update(overrides)
+    return ActionProposal.model_validate(values)
+
+
+def make_auto_send(**overrides: object) -> AutoSendStatus:
+    """The automatic-analysis permission of owner@example.com: off, with its disclosure."""
+    values: dict[str, object] = {
+        "account_email": "owner@example.com",
+        "limit": 0,
+        "granted_at_utc": None,
+        "disclosure": TransmissionPreview(
+            provider_name="groq",
+            model_name="test-model",
+            message_count=1,
+            truncated_count=0,
+            reused_count=0,
+            first_use=False,
+            body_character_limit=4_000,
+            privacy_notice="Enable Zero Data Retention.",
+        ),
+    }
+    values.update(overrides)
+    return AutoSendStatus.model_validate(values)
 
 
 def make_digest_item(**overrides: object) -> DigestItem:

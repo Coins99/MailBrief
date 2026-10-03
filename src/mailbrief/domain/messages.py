@@ -1,8 +1,9 @@
 """Normalized email and ranking models."""
 
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
-from typing import Self
+from typing import Protocol, Self
 
 from pydantic import Field, HttpUrl, field_validator, model_validator
 
@@ -37,6 +38,7 @@ class RankReason(StrEnum):
     VERY_RECENT = "very_recent"
     RECENT = "recent"
     AUTOMATED_SENDER = "automated_sender"
+    TRACKED_THREAD_REPLY = "tracked_thread_reply"  # A later message in a thread (ADR 0016).
 
 
 class EmailContact(DomainModel):
@@ -89,6 +91,7 @@ class NormalizedMessage(DomainModel):
     received_at_utc: datetime
     is_read: bool
     is_in_inbox: bool = True
+    is_sent: bool = False  # Sent from this account (Gmail's SENT label).
     importance: MessageImportance = MessageImportance.NORMAL
     has_attachments: bool
     body_preview: str = Field(default="", max_length=2_048)
@@ -98,6 +101,32 @@ class NormalizedMessage(DomainModel):
     @classmethod
     def normalize_received_at(cls, value: datetime) -> datetime:
         return normalize_utc(value)
+
+
+class SentMessage(Protocol):
+    """What tells the owner's own mail apart: a message, or a cached row's few fields."""
+
+    @property
+    def is_sent(self) -> bool: ...
+
+    @property
+    def sender(self) -> EmailContact: ...
+
+
+def own_addresses(primary: str, aliases: Sequence[str] | None) -> frozenset[str]:
+    """The account's own addresses, stripped and casefolded for comparing: its primary
+    address plus its aliases, whether or not the alias list repeats the primary. Empty
+    entries are dropped. Every owner address set is built here."""
+    addresses = (primary, *(aliases or ()))
+    return frozenset(address.strip().casefold() for address in addresses if address.strip())
+
+
+def is_own_message(message: SentMessage, addresses: frozenset[str]) -> bool:
+    """Whether the owner sent it: Gmail's SENT label, or a sender that is one of the
+    account's addresses (an alias the label may not cover). ``addresses`` are the account's
+    own, as own_addresses returns them. The one definition ranking, thread activity,
+    outside replies and proposals share."""
+    return message.is_sent or message.sender.address.strip().casefold() in addresses
 
 
 class MessagePage(DomainModel):

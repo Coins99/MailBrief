@@ -30,6 +30,7 @@ from mailbrief.services.actions import (
     ActionConflictError,
     ActionNotFoundError,
     ActionService,
+    DecisionSnapshot,
     SuggestionNotFoundError,
 )
 from mailbrief.services.analysis import suggestion_fingerprint
@@ -138,6 +139,7 @@ async def seed(
     *,
     message: str = "msg-1",
     prompt_version: str = "prompt-1",
+    thread: str = "conversation-1",
 ) -> Seeded:
     account = await AccountRepository(session).upsert(
         AccountIdentity(
@@ -149,6 +151,7 @@ async def seed(
         [
             make_message(
                 provider_message_id=message,
+                conversation_id=thread,
                 subject=f"Subject of {message}",
                 web_link=f"https://mail.google.com/mail/u/?authuser=me%40x.com#all/{message}",
             )
@@ -966,14 +969,33 @@ async def test_accept_into_adds_a_second_source_to_an_existing_action(
     second = await seed(session, (suggestion(0, "Send the deck, again"),), message="msg-2")
     action = await service.accept(first.suggestion_ids[0])
 
-    linked = await service.accept_into(second.suggestion_ids[0], action.public_id, 1)
+    added = await service.accept_into(second.suggestion_ids[0], action.public_id, 1)
     repeated = await service.accept_into(second.suggestion_ids[0], action.public_id, 1)
 
-    assert repeated == linked
+    linked = added.action
+    assert added.source_added and added.changed and added.previous == DecisionSnapshot()
+    assert repeated.action == linked and not repeated.source_added and not repeated.changed
     assert [source.provider_message_id for source in linked.sources] == ["msg-1", "msg-2"]
     assert linked.revision == 2
     assert (await states(session, second))[0] == (SuggestionState.ACCEPTED, action.public_id)
     assert (await states(session, first))[0] == (SuggestionState.ACCEPTED, action.public_id)
+
+
+async def test_accept_into_adds_no_source_for_an_email_already_linked(
+    session: AsyncSession, service: ActionService
+) -> None:
+    seeded = await seed(session)
+    action = await service.accept(seeded.suggestion_ids[0])
+
+    added = await service.accept_into(seeded.suggestion_ids[1], action.public_id, 1)
+
+    assert not added.source_added
+    assert [source.provider_message_id for source in added.action.sources] == ["msg-1"]
+    assert added.action.revision == 2
+    assert await states(session, seeded) == [
+        (SuggestionState.ACCEPTED, action.public_id),
+        (SuggestionState.ACCEPTED, action.public_id),
+    ]
 
 
 async def test_accept_into_refuses_deleted_targets_and_suggestions_owned_elsewhere(
@@ -987,9 +1009,45 @@ async def test_accept_into_refuses_deleted_targets_and_suggestions_owned_elsewhe
         await service.accept_into(seeded.suggestion_ids[0], target.public_id, 1)
 
     await service.delete(target.public_id, 1)
-    with pytest.raises(ActionNotFoundError):
+    with pytest.raises(ActionConflictError, match="Reopen the action before adding to it."):
         await service.accept_into(seeded.suggestion_ids[0], target.public_id, 2)
+    with pytest.raises(ActionNotFoundError):
+        await service.accept_into(
+            seeded.suggestion_ids[0], "00000000-0000-4000-8000-999999999999", 1
+        )
     assert (await service.get(owner.public_id)).revision == 1
+
+
+async def test_accept_into_refuses_a_completed_action_until_it_is_reopened(
+    session: AsyncSession, service: ActionService
+) -> None:
+    first = await seed(session)
+    second = await seed(session, (suggestion(0, "Send the deck, again"),), message="msg-2")
+    action = await service.accept(first.suggestion_ids[0])
+    await service.complete(action.public_id, 1)
+    before = await counts(session)
+
+    with pytest.raises(ActionConflictError, match="Reopen the action before adding to it."):
+        await service.accept_into(second.suggestion_ids[0], action.public_id, 2)
+
+    assert await counts(session) == before
+    assert (await states(session, second))[0] == (SuggestionState.PENDING, None)
+    await service.reopen(action.public_id, 2)
+    added = await service.accept_into(second.suggestion_ids[0], action.public_id, 3)
+    assert (added.action.revision, added.source_added) == (4, True)
+
+
+async def test_accept_into_takes_an_email_from_another_thread_when_named(
+    session: AsyncSession, service: ActionService
+) -> None:
+    first = await seed(session)
+    other = await seed(session, (suggestion(0, "Other"),), message="msg-2", thread="elsewhere")
+    action = await service.accept(first.suggestion_ids[0])
+
+    added = await service.accept_into(other.suggestion_ids[0], action.public_id, 1)
+
+    assert added.source_added
+    assert [source.provider_message_id for source in added.action.sources] == ["msg-1", "msg-2"]
 
 
 async def test_accept_into_takes_over_a_suggestion_whose_action_was_deleted(
@@ -1001,12 +1059,178 @@ async def test_accept_into_takes_over_a_suggestion_whose_action_was_deleted(
     target = await service.accept(second.suggestion_ids[0])
     await service.delete(previous.public_id, 1)
 
-    linked = await service.accept_into(first.suggestion_ids[0], target.public_id, 1)
+    linked = (await service.accept_into(first.suggestion_ids[0], target.public_id, 1)).action
 
     assert (linked.public_id, linked.revision) == (target.public_id, 2)
     assert [source.provider_message_id for source in linked.sources] == ["msg-2", "msg-1"]
     assert (await states(session, first))[0] == (SuggestionState.ACCEPTED, target.public_id)
     assert await count(session, SuggestionDecisionTable) == 2  # Re-pointed, not added.
+
+
+# Undoing an addition
+
+
+async def added_into(
+    session: AsyncSession, service: ActionService
+) -> tuple[Seeded, Seeded, Action]:
+    """An action from msg-1, with msg-2's suggestion added into it (revision 2)."""
+    first = await seed(session)
+    second = await seed(session, (suggestion(0, "Send the deck, again"),), message="msg-2")
+    action = await service.accept(first.suggestion_ids[0])
+    added = await service.accept_into(second.suggestion_ids[0], action.public_id, 1)
+    assert added.source_added
+    return first, second, added.action
+
+
+@pytest.mark.parametrize("remove_source", [True, False])
+async def test_undo_add_returns_the_suggestion_to_pending_in_one_revision(
+    session: AsyncSession, service: ActionService, clock: Clock, remove_source: bool
+) -> None:
+    first, second, action = await added_into(session, service)
+    clock.advance(minutes=5)
+
+    undone = await service.undo_accept_into(
+        second.suggestion_ids[0], action.public_id, 2, remove_source, previous=DecisionSnapshot()
+    )
+
+    assert (undone.revision, undone.updated_at_utc) == (3, clock.now)
+    kept = ["msg-1"] if remove_source else ["msg-1", "msg-2"]
+    assert [source.provider_message_id for source in undone.sources] == kept
+    assert await service.get(action.public_id) == undone
+    assert (await states(session, second))[0] == (SuggestionState.PENDING, None)
+    assert (await states(session, first))[0] == (SuggestionState.ACCEPTED, action.public_id)
+    assert await count(session, SuggestionDecisionTable) == 1
+
+
+async def test_undo_add_never_removes_the_last_source(
+    session: AsyncSession, service: ActionService
+) -> None:
+    seeded = await seed(session)
+    action = await service.accept(seeded.suggestion_ids[0])
+    await service.accept_into(seeded.suggestion_ids[1], action.public_id, 1)
+
+    undone = await service.undo_accept_into(
+        seeded.suggestion_ids[1], action.public_id, 2, True, previous=DecisionSnapshot()
+    )
+
+    assert [source.provider_message_id for source in undone.sources] == ["msg-1"]
+    assert undone.revision == 3
+    assert await states(session, seeded) == [
+        (SuggestionState.ACCEPTED, action.public_id),
+        (SuggestionState.PENDING, None),
+    ]
+
+
+async def decision_row(
+    session: AsyncSession, provider_message_id: str
+) -> tuple[str, int | None, datetime]:
+    """The one stored decision on that email's suggestions."""
+    (row,) = (
+        await session.scalars(
+            select(SuggestionDecisionTable).where(
+                SuggestionDecisionTable.provider_message_id == provider_message_id
+            )
+        )
+    ).all()
+    await session.refresh(row)
+    return row.decision, row.action_id, row.decided_at_utc
+
+
+async def test_repeating_an_add_changes_nothing_and_leaves_nothing_to_undo(
+    session: AsyncSession, service: ActionService, clock: Clock
+) -> None:
+    _, second, action = await added_into(session, service)
+    stored = await decision_row(session, "msg-2")
+    before = await counts(session)
+    clock.advance(minutes=5)
+
+    repeated = await service.accept_into(second.suggestion_ids[0], action.public_id, 2)
+
+    assert not repeated.changed and repeated.action == await service.get(action.public_id)
+    assert repeated.previous.decision is SuggestionState.ACCEPTED
+    assert await decision_row(session, "msg-2") == stored  # Intact, with its time.
+    # Accepting it again later finds the action it already belongs to: no duplicate.
+    again = await service.accept(second.suggestion_ids[0])
+    assert again.public_id == action.public_id
+    assert await counts(session) == before
+
+
+async def test_undoing_an_add_over_a_dismissal_dismisses_it_again(
+    session: AsyncSession, service: ActionService, clock: Clock
+) -> None:
+    first = await seed(session)
+    second = await seed(session, (suggestion(0, "Send the deck, again"),), message="msg-2")
+    action = await service.accept(first.suggestion_ids[0])
+    await service.dismiss(second.suggestion_ids[0])
+    dismissed = await decision_row(session, "msg-2")
+    clock.advance(minutes=5)
+
+    added = await service.accept_into(second.suggestion_ids[0], action.public_id, 1)
+    assert added.changed and added.previous == DecisionSnapshot(
+        SuggestionState.DISMISSED, None, dismissed[2]
+    )
+    clock.advance(minutes=5)
+    await service.undo_accept_into(
+        second.suggestion_ids[0], action.public_id, 2, added.source_added, previous=added.previous
+    )
+
+    assert await decision_row(session, "msg-2") == dismissed  # The original time, too.
+    assert (await states(session, second))[0] == (SuggestionState.DISMISSED, None)
+
+
+async def test_undoing_an_add_over_a_deleted_action_s_decision_restores_that_decision(
+    session: AsyncSession, service: ActionService, clock: Clock
+) -> None:
+    first = await seed(session)
+    second = await seed(session, (suggestion(0, "Other"),), message="msg-2")
+    deleted = await service.accept(first.suggestion_ids[0])
+    target = await service.accept(second.suggestion_ids[0])
+    await service.delete(deleted.public_id, 1)
+    before = await decision_row(session, "msg-1")
+    before_view = (await states(session, first))[0]
+    clock.advance(minutes=5)
+
+    added = await service.accept_into(first.suggestion_ids[0], target.public_id, 1)
+    assert added.previous.decision is SuggestionState.ACCEPTED
+    await service.undo_accept_into(
+        first.suggestion_ids[0], target.public_id, 2, added.source_added, previous=added.previous
+    )
+
+    assert await decision_row(session, "msg-1") == before
+    assert (await states(session, first))[0] == before_view
+    # Restoring the deleted action still brings the suggestion back with it.
+    assert (await service.restore(deleted.public_id)).public_id == deleted.public_id
+    assert (await states(session, first))[0] == (SuggestionState.ACCEPTED, deleted.public_id)
+
+
+@pytest.mark.parametrize("change", ["edited", "pending", "other_action", "deleted"])
+async def test_undo_add_is_refused_once_anything_changed(
+    session: AsyncSession, service: ActionService, change: str
+) -> None:
+    first, second, action = await added_into(session, service)
+    suggestion_id, revision = second.suggestion_ids[0], 2
+    if change == "edited":
+        await service.complete(action.public_id, 2)
+    elif change == "pending":
+        suggestion_id = first.suggestion_ids[1]  # Never added: it has no decision.
+    elif change == "other_action":
+        other = await service.accept(first.suggestion_ids[1])
+        suggestion_id = first.suggestion_ids[1]
+        assert other.public_id != action.public_id
+    else:
+        await service.delete(action.public_id, 2)
+        revision = 3
+    before = await counts(session)
+
+    with pytest.raises(ActionConflictError, match="Only an unchanged addition can be undone."):
+        await service.undo_accept_into(
+            suggestion_id, action.public_id, revision, True, previous=DecisionSnapshot()
+        )
+
+    assert await counts(session) == before  # No decision or source was removed.
+    if change != "deleted":
+        expected = 3 if change == "edited" else 2  # Completing was the only change.
+        assert (await service.get(action.public_id)).revision == expected
 
 
 # Durability
@@ -1119,7 +1343,7 @@ async def test_an_action_survives_closing_and_reopening_the_database(tmp_path: P
 
 @pytest.fixture
 def failing_source(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    async def fail(self: ActionRepository, action_id: int, message: Any) -> bool:
+    async def fail(self: ActionRepository, action_id: int, message: Any, account: Any) -> bool:
         raise RuntimeError("disk full")
 
     monkeypatch.setattr(ActionRepository, "add_source", fail)

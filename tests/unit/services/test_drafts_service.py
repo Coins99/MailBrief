@@ -30,6 +30,7 @@ from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, MessageRepository
 from mailbrief.storage.tables import (
+    AccountTable,
     ActionTable,
     DraftSourceTable,
     DraftTable,
@@ -140,7 +141,9 @@ async def seed_action(
         )
     )
     for message in messages:
-        await repository.add_source(row.id, message)
+        account = await session.get(AccountTable, message.account_id)
+        assert account is not None
+        await repository.add_source(row.id, message, account)
     await session.commit()
     return row
 

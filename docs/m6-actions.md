@@ -21,7 +21,10 @@ recorded in [ADR 0011](adr/0011-actions-and-suggestions.md).
 ## Desktop
 
 - Under each email in the brief, pending suggestions show **Accept** and **Dismiss**
-  links; accepted ones say so. The links work from the keyboard.
+  links; accepted ones say so. The links work from the keyboard. Since M8 Part 5, an email
+  that continues an open action's thread also offers **Add to “<title>”**, which accepts
+  the suggestion into that action as another source instead of creating a new one
+  ([m8-daily-operation.md](m8-daily-operation.md#thread-activity-and-adding-to-an-action-part-5)).
 - **Your actions** lists the three views. **Edit…** (or Return on a row) changes the
   title, whose it is, effort, target date, notes and the plan: add, rename (F2; Return on
   macOS), reorder, check off or remove steps. One save is one revision. The editor stays
@@ -29,8 +32,8 @@ recorded in [ADR 0011](adr/0011-actions-and-suggestions.md).
   edits stay in the dialog with a message saying what to do.
   **Complete**/**Reopen**, **Delete** and **Open source** (Gmail only) act on the selected
   action.
-- **Undo** reverses the latest accept, dismiss, complete, reopen or delete. It is withdrawn
-  by an edit or a new brief, and refuses when the action changed in between.
+- **Undo** reverses the latest accept, add, dismiss, complete, reopen or delete. It is
+  withdrawn by an edit or a new brief, and refuses when the action changed in between.
 - **Continue** in the shortlist review needs at least one checked message, so an empty
   selection can no longer overwrite today's saved brief.
 
@@ -39,6 +42,7 @@ recorded in [ADR 0011](adr/0011-actions-and-suggestions.md).
 ```bash
 uv run mailbrief-gmail-diagnostic brief --show          # suggestions show as [pending #N]
 uv run mailbrief-gmail-diagnostic actions accept N
+uv run mailbrief-gmail-diagnostic actions accept N --into PUBLIC_ID   # M8: add to an action
 uv run mailbrief-gmail-diagnostic actions dismiss N
 uv run mailbrief-gmail-diagnostic actions list [--view open|waiting|completed] [--timezone ZONE]
 ```

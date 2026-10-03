@@ -9,6 +9,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.drafting import DraftContextPart, DraftingOutcome, DraftingStatus
 from mailbrief.domain.drafts import DraftKind
+from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.drafting import DraftingContextError
@@ -18,7 +19,9 @@ from tests.ui.test_workflow import FakeBackend
 
 @pytest.fixture
 def backend() -> FakeBackend:
-    return FakeBackend()
+    result = FakeBackend()
+    result.owner_preferences = OwnerPreferences(revision=1, time_zone="UTC")
+    return result
 
 
 @pytest.fixture

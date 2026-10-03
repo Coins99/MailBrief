@@ -11,14 +11,39 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
+from mailbrief.domain.actions import (
+    Action,
+    ActionEdit,
+    ActionFilter,
+    ActionProposal,
+    StepEdit,
+    SuggestionState,
+    ThreadLink,
+)
 from mailbrief.domain.analysis import DeadlinePrecision
-from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
+from mailbrief.domain.briefs import (
+    AutoSendStatus,
+    BriefRunResult,
+    BriefStatus,
+    TransmissionPreview,
+)
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
-from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncResult, SyncStatus
+from mailbrief.domain.digests import (
+    DailyDigest,
+    DigestStatus,
+    SavedBriefSummary,
+    SyncProgress,
+    SyncResult,
+    SyncStatus,
+)
 from mailbrief.domain.messages import RankedMessage
+from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
+from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
+from mailbrief.services.actions import AcceptedInto, DecisionSnapshot
 from mailbrief.services.brief import ConsentGate, ShortlistGate
+from mailbrief.services.consent import NO_CONSENT
+from mailbrief.services.preferences import PreferencesConflictError
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
 from tests.factories import make_action, make_digest_item, make_message
@@ -51,6 +76,10 @@ class FakeBackend(FakeDrafts):
         self.action_counts: dict[ActionFilter, int] = {}
         self.count_calls: list[ActionFilter] = []
         self.candidates: tuple[str, ...] = ("message-1",)
+        self.blocked: frozenset[str] = frozenset()
+        self.outside: frozenset[str] = frozenset()
+        self.declined: frozenset[str] = frozenset()
+        self.limit = 10
         self.closed = False
         self.cleaned = False
         self.fail: Exception | None = None
@@ -59,8 +88,42 @@ class FakeBackend(FakeDrafts):
         self.selected: tuple[str, ...] | None = None
         self.approved = False
         self.preferences = DesktopPreferences()
+        # The owner's preferences, as the database would hold them.
+        self.owner_preferences = OwnerPreferences.defaults()
+        self.owner_fail: Exception | None = None
+        self.owner_saves: list[tuple[PreferencesEdit, int]] = []
+        # Saved briefs by account and day, the missed days offered, and each generate's day.
+        self.briefs: dict[tuple[str, date], DailyDigest] = {}
+        self.missed: tuple[date, ...] = ()
+        self.generated_days: list[date | None] = []
         self.key_value: SecretStr | None = None
         self.revoked = False
+        # The actions continuing each message's thread, for every brief shown; links_fail
+        # makes every read fail. source_added and add_changed are what accept_into reports,
+        # and undo_previous the decision the last undo was given to put back.
+        self.links: dict[str, tuple[ThreadLink, ...]] = {}
+        self.links_fail: Exception | None = None
+        self.link_calls: list[DailyDigest] = []
+        # The pending proposals of each message's email, for every brief shown;
+        # proposals_fail makes every read fail.
+        self.proposals: dict[str, tuple[ActionProposal, ...]] = {}
+        self.proposals_fail: Exception | None = None
+        self.proposal_calls: list[DailyDigest] = []
+        self.proposals_created = 0  # What a brief run reports having proposed.
+        # Automatic runs: what each returns (or raises), how many ran, and an optional hold.
+        self.automatic_calls = 0
+        self.window: MainWindow | None = None  # Set by a test that watches the window's panels.
+        self.automatic_result: BriefRunResult | Exception | None = None
+        self.automatic_hold: asyncio.Event | None = None
+        self.automatic_panels: list[tuple[bool, bool]] = []
+        # The automatic-analysis permission: None is "no consent yet".
+        self.permission: AutoSendStatus | None = None
+        self.permission_fail: Exception | None = None
+        self.permission_saves: list[int] = []
+        self.permission_accounts: list[str | None] = []
+        self.source_added = True
+        self.add_changed = True
+        self.undo_previous: DecisionSnapshot | None = None
         self.sync = SyncResult(
             account_id="owner@example.com",
             range_start_utc=datetime(2026, 9, 4, tzinfo=UTC),
@@ -94,6 +157,61 @@ class FakeBackend(FakeDrafts):
     async def accept_suggestion(self, suggestion_id: int) -> Action:
         await self._act("accept_suggestion", suggestion_id)
         return make_action(title="Approve the budget")
+
+    async def brief_links(self, digest: DailyDigest) -> dict[str, tuple[ThreadLink, ...]]:
+        self.link_calls.append(digest)
+        if self.links_fail is not None:
+            raise self.links_fail
+        return self.links
+
+    async def brief_proposals(self, digest: DailyDigest) -> dict[str, tuple[ActionProposal, ...]]:
+        self.proposal_calls.append(digest)
+        if self.proposals_fail is not None:
+            raise self.proposals_fail
+        return self.proposals
+
+    async def apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        await self._act("apply_proposal", proposal_id, revision)
+        return make_action(title="Send the deck", revision=revision + 1)
+
+    async def undo_apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        await self._act("undo_apply_proposal", proposal_id, revision)
+        return make_action(title="Send the deck", revision=revision + 1)
+
+    async def dismiss_proposal(self, proposal_id: int) -> None:
+        await self._act("dismiss_proposal", proposal_id)
+
+    async def restore_proposal(self, proposal_id: int) -> None:
+        await self._act("restore_proposal", proposal_id)
+
+    async def accept_into(self, suggestion_id: int, public_id: str, revision: int) -> AcceptedInto:
+        await self._act("accept_into", suggestion_id, public_id, revision)
+        action = make_action(public_id=public_id, title="Send the deck", revision=revision + 1)
+        return AcceptedInto(
+            action,
+            source_added=self.source_added,
+            changed=self.add_changed,
+            previous=DecisionSnapshot(
+                SuggestionState.DISMISSED, None, datetime(2026, 9, 1, tzinfo=UTC)
+            ),
+        )
+
+    async def undo_accept_into(
+        self,
+        suggestion_id: int,
+        public_id: str,
+        revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
+    ) -> Action:
+        self.undo_previous = previous
+        await self._act("undo_accept_into", suggestion_id, public_id, revision, remove_source)
+        return make_action(public_id=public_id, revision=revision + 1)
+
+    async def mark_thread_seen(self, public_id: str, revision: int) -> Action:
+        await self._act("mark_thread_seen", public_id, revision)
+        return make_action(public_id=public_id, revision=revision + 1)
 
     async def dismiss_suggestion(self, suggestion_id: int) -> None:
         await self._act("dismiss_suggestion", suggestion_id)
@@ -147,6 +265,29 @@ class FakeBackend(FakeDrafts):
     async def save_preferences(self, preferences: DesktopPreferences) -> None:
         self.preferences = preferences
 
+    async def get_owner_preferences(self) -> OwnerPreferences:
+        if self.owner_fail is not None:
+            raise self.owner_fail
+        return self.owner_preferences
+
+    async def save_owner_preferences(
+        self, edit: PreferencesEdit, revision: int
+    ) -> OwnerPreferences:
+        self.owner_saves.append((edit, revision))
+        if revision != self.owner_preferences.revision:
+            raise PreferencesConflictError()
+        self.owner_preferences = OwnerPreferences(
+            **edit.model_dump(), revision=revision + 1, updated_at_utc=datetime.now(UTC)
+        )
+        return self.owner_preferences
+
+    async def reset_owner_preferences(self) -> OwnerPreferences:
+        self.owner_fail = None
+        self.owner_preferences = OwnerPreferences(
+            revision=self.owner_preferences.revision + 1, updated_at_utc=datetime.now(UTC)
+        )
+        return self.owner_preferences
+
     async def save_key(self, key: SecretStr) -> None:
         self.key_value = key
 
@@ -174,8 +315,10 @@ class FakeBackend(FakeDrafts):
         review: ShortlistGate,
         cancel: asyncio.Event,
         progress: Callable[[SyncProgress], None],
+        local_date: date | None = None,
     ) -> BriefRunResult:
         self.calls += 1
+        self.generated_days.append(local_date)
         self.started.set()
         try:
             if self.fail:
@@ -187,7 +330,11 @@ class FakeBackend(FakeDrafts):
                     )
                     for key in self.candidates
                 ),
-                self.candidates,
+                tuple(key for key in self.candidates if key not in self.blocked),
+                blocked_ids=self.blocked,
+                outside_ids=self.outside,
+                declined_ids=self.declined,
+                limit=self.limit,
             )
             self.approved = await gate.confirm(
                 TransmissionPreview(
@@ -201,14 +348,76 @@ class FakeBackend(FakeDrafts):
                     privacy_notice="Enable Zero Data Retention.",
                 )
             )
+            digest = self.saved
+            if local_date is not None:
+                digest = self.saved.model_copy(update={"local_date": local_date})
+                self.briefs[(digest.account_id, local_date)] = digest
             return BriefRunResult(
                 status=BriefStatus.SAVED if self.approved else BriefStatus.CONSENT_DECLINED,
                 sync=self.sync,
-                digest=self.saved if self.approved else None,
+                digest=digest if self.approved else None,
+                proposals_created=self.proposals_created,
             )
         finally:
             await asyncio.sleep(0)
             self.cleaned = True
+
+    async def generate_automatic(
+        self, cancel: asyncio.Event, progress: Callable[[SyncProgress], None]
+    ) -> BriefRunResult:
+        self.automatic_calls += 1
+        window = self.window
+        if window is not None:  # Whether a review or consent panel is ever showing.
+            self.automatic_panels.append(
+                (window.review_panel.isVisible(), window.consent_panel.isVisible())
+            )
+        if self.automatic_hold is not None:
+            await self.automatic_hold.wait()
+        result = self.automatic_result
+        if isinstance(result, Exception):
+            raise result
+        return result or BriefRunResult(
+            status=BriefStatus.READY_FOR_REVIEW, sync=self.sync, ready=2
+        )
+
+    async def auto_send_status(self, account_email: str | None) -> AutoSendStatus | None:
+        self.permission_accounts.append(account_email)
+        if self.permission_fail is not None:
+            raise self.permission_fail
+        return self.permission
+
+    async def set_auto_send(self, limit: int, account_email: str | None) -> AutoSendStatus | None:
+        self.permission_accounts.append(account_email)
+        self.permission_saves.append(limit)
+        if self.permission is None:
+            raise ConfigurationError(NO_CONSENT)
+        stamp = datetime(2026, 9, 30, 14, tzinfo=UTC) if limit else None
+        self.permission = self.permission.model_copy(
+            update={"limit": limit, "granted_at_utc": stamp}
+        )
+        return self.permission
+
+    async def list_briefs(self) -> tuple[SavedBriefSummary, ...]:
+        everything = {(self.saved.account_id, self.saved.local_date): self.saved, **self.briefs}
+        return tuple(
+            SavedBriefSummary(
+                account_email=digest.account_id,
+                local_date=digest.local_date,
+                timezone_name=digest.timezone_name,
+                status=digest.status,
+                generated_at_utc=digest.generated_at_utc,
+                item_count=len(digest.items),
+            )
+            for _, digest in sorted(everything.items(), key=lambda item: item[0][1], reverse=True)
+        )
+
+    async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None:
+        if (account_email, local_date) == (self.saved.account_id, self.saved.local_date):
+            return self.saved
+        return self.briefs.get((account_email, local_date))
+
+    async def missed_days(self, account_email: str) -> tuple[date, ...]:
+        return self.missed
 
     async def close(self) -> None:
         self.closed = True
@@ -417,6 +626,36 @@ async def test_failure_guidance(
     window.start(window._generate)
     await finish(window)
     assert window.status.text().count(expected) == 1
+
+
+_REFRESH_FAILED = "Refresh failed. The displayed saved brief is unchanged."
+# What Sync and review says for each way a run can end without saving a brief.
+_UNSAVED = {
+    BriefStatus.CANCELLED: "Cancelled. The displayed saved brief is unchanged.",
+    BriefStatus.CONSENT_DECLINED: "Transmission declined. No messages sent to AI in this run.",
+    BriefStatus.SYNC_FAILED: _REFRESH_FAILED,
+    BriefStatus.ANALYSIS_FAILED: _REFRESH_FAILED,
+    # Only an automatic run ends this way; from Sync and review it would read as a failure.
+    BriefStatus.READY_FOR_REVIEW: _REFRESH_FAILED,
+}
+
+
+@pytest.mark.parametrize("status", list(_UNSAVED), ids=[status.value for status in _UNSAVED])
+async def test_a_run_from_sync_and_review_that_saves_no_brief_says_how_it_ended(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, status: BriefStatus
+) -> None:
+    assert isinstance(window.backend, FakeBackend)
+    result = BriefRunResult(status=status, sync=window.backend.sync)
+    monkeypatch.setattr(window.backend, "generate", AsyncMock(return_value=result))
+
+    window.start(window._generate)
+    await finish(window)
+
+    assert window.status.text() == _UNSAVED[status]
+
+
+def test_every_status_but_saved_has_its_text_above() -> None:
+    assert {*_UNSAVED, BriefStatus.SAVED} == set(BriefStatus)
 
 
 async def test_startup_storage_failure_can_retry(

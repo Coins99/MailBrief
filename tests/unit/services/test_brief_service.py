@@ -4,24 +4,41 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.domain.analysis import AIUsage, AnalysisRequest, AnalysisResponse
 from mailbrief.domain.bodies import MAX_ANALYSIS_CHARS, BodySource, MessageBody
 from mailbrief.domain.briefs import SENT_FIELDS, BriefStatus, TransmissionPreview
-from mailbrief.domain.digests import DigestStatus, SyncProgress, SyncStage
-from mailbrief.domain.messages import NormalizedMessage, RankedMessage
-from mailbrief.ports.errors import AIAuthenticationError, ProviderPermissionError
+from mailbrief.domain.digests import DigestSection, DigestStatus, SyncProgress, SyncStage
+from mailbrief.domain.messages import (
+    AccountIdentity,
+    EmailContact,
+    MessagePage,
+    NormalizedMessage,
+    ProviderKind,
+    RankedMessage,
+)
+from mailbrief.ports.errors import (
+    AIAuthenticationError,
+    MessageUnavailableError,
+    ProviderPermissionError,
+)
 from mailbrief.services.analysis import AnalysisPlan, AnalysisRun, AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
 from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION, BriefService, disclosure_lines
 from mailbrief.services.digest import DigestService
+from mailbrief.services.history import BriefDateError, coverage_line
+from mailbrief.services.proposals import ProposalService
+from mailbrief.services.ranking import ExcludedSenderError, ShortlistReviewError
+from mailbrief.services.threads import ThreadCheck, ThreadService
+from mailbrief.storage.actions import ActionRepository
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import (
     AccountRepository,
@@ -31,8 +48,10 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     SyncRunRepository,
 )
+from mailbrief.storage.tables import AccountTable, ActionSourceTable, ActionTable, SyncRunTable
 from tests.factories import make_message
 from tests.unit.services.ai_fakes import FakeAIProvider, ScriptItem, answer_all
+from tests.unit.services.test_application import RecordingThreads
 from tests.unit.services.test_sync import FakeEmailProvider
 
 NOW = datetime(2026, 9, 4, 16, 0, tzinfo=UTC)  # Noon in Toronto.
@@ -113,6 +132,8 @@ def build(
     email: FakeEmailProvider | None = None,
     batch_size: int = 5,
     body_limit: int = MAX_ANALYSIS_CHARS,
+    proposals: ProposalService | None = None,
+    threads: ThreadService | None = None,
 ) -> BriefService:
     mailbox = list(inbox() if messages is None else messages)
     email = email or FakeEmailProvider(pages=[mailbox])
@@ -121,6 +142,7 @@ def build(
         message_repo=MessageRepository(session),
         sync_run_repo=SyncRunRepository(session),
         account_repo=AccountRepository(session),
+        threads=threads,
     )
     gate.provider = provider
     return BriefService(
@@ -133,6 +155,7 @@ def build(
         digests=DigestService(session),
         consent_gate=gate,
         clock=lambda: NOW,
+        proposals=proposals,
     )
 
 
@@ -618,7 +641,14 @@ class ReviewGate:
     selected: tuple[str, ...] | None
 
     async def review(
-        self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+        self,
+        candidates: tuple[RankedMessage, ...],
+        selected_ids: tuple[str, ...],
+        *,
+        blocked_ids: frozenset[str],
+        outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
+        limit: int,
     ) -> tuple[str, ...] | None:
         return self.selected
 
@@ -632,7 +662,14 @@ async def test_review_can_replace_suggestion_with_other_inbox_message(
 
     class IncludeOther:
         async def review(
-            self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+            self,
+            candidates: tuple[RankedMessage, ...],
+            selected_ids: tuple[str, ...],
+            *,
+            blocked_ids: frozenset[str],
+            outside_ids: frozenset[str],
+            declined_ids: frozenset[str],
+            limit: int,
         ) -> tuple[str, ...]:
             assert len(candidates) == 12
             assert len(selected_ids) == 10
@@ -679,6 +716,24 @@ async def test_review_filters_before_body_retrieval(session: AsyncSession) -> No
     assert provider.calls == 1
 
 
+async def test_a_body_gmail_has_in_trash_or_spam_causes_no_ai_request(
+    session: AsyncSession,
+) -> None:
+    provider = FakeAIProvider()
+    service = build(session, provider, RecordingGate(True))
+
+    class Discarded:
+        async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+            # What the Gmail adapter raises for a message labelled TRASH or SPAM.
+            raise MessageUnavailableError("The Gmail message is in Trash or Spam.")
+
+    service._bodies = BodyService(Discarded())
+    result = await service.generate(tz_key=ZONE, shortlist_gate=ReviewGate(("m1",)))
+    assert provider.calls == 0
+    assert result.coverage is not None
+    assert (result.coverage.analyzed, result.coverage.skipped) == (0, 1)
+
+
 @pytest.mark.parametrize("selection", [None, (), ("foreign",), ("m0", "m0")])
 async def test_review_cancel_empty_and_invalid_never_fetch_bodies(
     session: AsyncSession,
@@ -699,3 +754,480 @@ async def test_review_cancel_empty_and_invalid_never_fetch_bodies(
         result = await service.generate(tz_key=ZONE, shortlist_gate=ReviewGate(selection))
         assert result.status is (BriefStatus.CANCELLED if selection is None else BriefStatus.SAVED)
     assert provider.calls == 0
+
+
+BLOCKED_SENDER = "news@lists.example.org"
+RULES = ("@example.org",)
+
+
+def mixed_inbox() -> list[NormalizedMessage]:
+    """m0 and m2 come from a sender the rules exclude; m1 and m3 don't."""
+    return [
+        make_message(
+            provider_message_id=f"m{index}",
+            subject=f"Budget {index}",
+            sender=EmailContact(address=BLOCKED_SENDER if index % 2 == 0 else "boss@example.com"),
+            received_at_utc=datetime(2026, 9, 4, 13, index, tzinfo=UTC),
+            web_link=f"https://mail.example.com/m{index}",
+        )
+        for index in range(4)
+    ]
+
+
+class RecordingReader(FakeBodyReader):
+    def __init__(self, texts: dict[str, str]) -> None:
+        super().__init__(texts)
+        self.fetched: list[str] = []
+
+    async def fetch_message_body(self, provider_message_id: str) -> MessageBody:
+        self.fetched.append(provider_message_id)
+        return await super().fetch_message_body(provider_message_id)
+
+
+def with_reader(service: BriefService, mailbox: Sequence[NormalizedMessage]) -> RecordingReader:
+    reader = RecordingReader(texts_for(mailbox))
+    service._bodies = BodyService(reader)
+    return reader
+
+
+async def test_excluded_senders_are_never_selected_read_or_sent(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    mailbox = mixed_inbox()
+    provider = FakeAIProvider([answer_all()])
+    service = build(session, provider, RecordingGate(True), messages=mailbox)
+    reader = with_reader(service, mailbox)
+
+    with caplog.at_level(logging.DEBUG, logger="mailbrief"):
+        result = await service.generate(tz_key=ZONE, excluded_senders=RULES)
+
+    assert result.sync.shortlisted_message_keys == ("m3", "m1")
+    assert sorted(reader.fetched) == ["m1", "m3"]
+    (batch,) = provider.batches
+    assert {request.sender.address for request in batch} == {"boss@example.com"}
+    assert {request.subject for request in batch} == {"Budget 1", "Budget 3"}
+    assert "2 messages" in caplog.text and "example.org" not in caplog.text
+
+
+class OfferedGate:
+    """Records what review offered, then answers with a fixed selection."""
+
+    def __init__(self, selected: tuple[str, ...]) -> None:
+        self.selected = selected
+        self.offered: tuple[tuple[str, ...], frozenset[str], int] | None = None
+
+    async def review(
+        self,
+        candidates: tuple[RankedMessage, ...],
+        selected_ids: tuple[str, ...],
+        *,
+        blocked_ids: frozenset[str],
+        outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
+        limit: int,
+    ) -> tuple[str, ...] | None:
+        self.offered = (
+            tuple(item.message.provider_message_id for item in candidates),
+            blocked_ids,
+            limit,
+        )
+        assert not blocked_ids & set(selected_ids)
+        return self.selected
+
+
+async def test_review_sees_blocked_messages_but_can_t_select_them(
+    session: AsyncSession,
+) -> None:
+    mailbox = mixed_inbox()
+    provider = FakeAIProvider()
+    service = build(session, provider, RecordingGate(True), messages=mailbox)
+    reader = with_reader(service, mailbox)
+    gate = OfferedGate(("m1", "m2"))
+
+    with pytest.raises(ExcludedSenderError):
+        await service.generate(
+            tz_key=ZONE, shortlist_gate=gate, excluded_senders=RULES, shortlist_limit=4
+        )
+
+    assert gate.offered is not None
+    assert sorted(gate.offered[0]) == ["m0", "m1", "m2", "m3"]
+    assert gate.offered[1:] == (frozenset({"m0", "m2"}), 4)
+    assert reader.fetched == []
+    assert provider.calls == 0
+
+
+async def test_an_excluded_include_fails_before_bodies_and_ai(session: AsyncSession) -> None:
+    mailbox = mixed_inbox()
+    provider = FakeAIProvider()
+    gate = RecordingGate(True)
+    service = build(session, provider, gate, messages=mailbox)
+    reader = with_reader(service, mailbox)
+
+    with pytest.raises(ExcludedSenderError):
+        await service.generate(tz_key=ZONE, include_ids=("m0",), excluded_senders=RULES)
+
+    assert reader.fetched == []
+    assert provider.calls == 0
+    assert gate.previews == []
+
+
+async def test_the_limit_caps_automatic_and_reviewed_selection(session: AsyncSession) -> None:
+    mailbox = inbox(5)
+    provider = FakeAIProvider([answer_all()])
+    service = build(session, provider, RecordingGate(True), messages=mailbox)
+    reader = with_reader(service, mailbox)
+
+    result = await service.generate(tz_key=ZONE, shortlist_limit=2)
+
+    assert len(result.sync.shortlisted_message_keys) == 2
+    assert len(reader.fetched) == 2
+
+    oversized = OfferedGate(("m0", "m1", "m2"))
+    with pytest.raises(ShortlistReviewError, match="up to two"):
+        await service.generate(tz_key=ZONE, shortlist_gate=oversized, shortlist_limit=2)
+    assert oversized.offered is not None and oversized.offered[2] == 2
+    assert len(reader.fetched) == 2
+
+
+YESTERDAY = date(2026, 9, 3)
+
+
+class RangeProvider(FakeEmailProvider):
+    """Serves only the messages in the requested range and records every range and connect."""
+
+    def __init__(self, messages: Sequence[NormalizedMessage]) -> None:
+        super().__init__(pages=[list(messages)])
+        self.messages = list(messages)
+        self.ranges: list[tuple[datetime, datetime]] = []
+        self.connects = 0
+
+    async def connect(self) -> AccountIdentity:
+        self.connects += 1
+        return await super().connect()
+
+    async def iter_message_pages(
+        self,
+        *,
+        range_start_utc: datetime,
+        range_end_utc: datetime,
+        continuation: str | None = None,
+    ) -> AsyncIterator[MessagePage]:
+        self.ranges.append((range_start_utc, range_end_utc))
+        chosen = tuple(
+            message
+            for message in self.messages
+            if range_start_utc <= message.received_at_utc < range_end_utc
+        )
+        yield MessagePage(page_number=1, messages=chosen, continuation=None)
+
+
+def two_days() -> list[NormalizedMessage]:
+    """y0 and y1 arrived yesterday in Toronto, t0 today."""
+    return [
+        make_message(
+            provider_message_id=key,
+            subject=f"Budget {key}",
+            received_at_utc=received,
+            web_link=f"https://mail.example.com/{key}",
+        )
+        for key, received in (
+            ("y0", datetime(2026, 9, 3, 14, tzinfo=UTC)),
+            ("y1", datetime(2026, 9, 4, 3, 30, tzinfo=UTC)),  # 23:30 on the 3rd in Toronto.
+            ("t0", datetime(2026, 9, 4, 13, tzinfo=UTC)),
+        )
+    ]
+
+
+async def last_sync(session: AsyncSession) -> datetime | None:
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    await session.refresh(account)
+    return account.last_sync_at_utc
+
+
+async def test_a_past_day_syncs_exactly_its_window_and_saves_under_its_date(
+    session: AsyncSession,
+) -> None:
+    provider = RangeProvider(two_days())
+    ai = FakeAIProvider([answer_all(), answer_all()])
+    service = build(session, ai, RecordingGate(True), email=provider, texts=texts_for(two_days()))
+
+    today = await service.generate(tz_key=ZONE)
+    synced_today = await last_sync(session)
+    past = await service.generate(tz_key=ZONE, local_date=YESTERDAY)
+
+    assert provider.ranges[1] == (
+        datetime(2026, 9, 3, 4, tzinfo=UTC),  # Midnight in Toronto.
+        datetime(2026, 9, 4, 4, tzinfo=UTC),
+    )
+    assert past.digest is not None and past.digest.local_date == YESTERDAY
+    assert {item.message_key for item in past.digest.items} == {"y0", "y1"}
+    assert today.digest is not None and today.digest.local_date == TODAY
+    assert synced_today is not None
+    assert await last_sync(session) == synced_today  # Only today's window moves it.
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    kept = await DigestRepository(session).get_by_account_and_date(account.id, TODAY)
+    assert kept is not None  # Today's brief is untouched.
+
+
+async def test_a_past_day_reconciles_its_inbox_membership(session: AsyncSession) -> None:
+    """A message archived since it was cached leaves a past day's brief."""
+    provider = RangeProvider(two_days())
+    ai = FakeAIProvider([answer_all()])  # The second run reuses y0's analysis.
+    service = build(session, ai, RecordingGate(True), email=provider, texts=texts_for(two_days()))
+    await service.generate(tz_key=ZONE, local_date=YESTERDAY)
+    provider.messages = [m for m in provider.messages if m.provider_message_id != "y1"]
+
+    again = await service.generate(tz_key=ZONE, local_date=YESTERDAY)
+
+    assert again.digest is not None
+    assert [item.message_key for item in again.digest.items] == ["y0"]
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    rows = await MessageRepository(session).get_messages_in_range(
+        account.id,
+        datetime(2026, 9, 3, 4, tzinfo=UTC),
+        datetime(2026, 9, 4, 4, tzinfo=UTC),
+        inbox_only=False,
+    )
+    assert {row.provider_message_id: row.is_in_inbox for row in rows} == {
+        "y0": True,
+        "y1": False,
+    }
+
+
+@pytest.mark.parametrize("day", [date(2026, 8, 27), date(2026, 9, 5)])
+async def test_an_out_of_range_date_fails_before_gmail_or_the_database(
+    session: AsyncSession, day: date
+) -> None:
+    provider = RangeProvider(two_days())
+    ai = FakeAIProvider()
+    service = build(session, ai, RecordingGate(True), email=provider)
+
+    with pytest.raises(BriefDateError):
+        await service.generate(tz_key=ZONE, local_date=day)
+
+    assert provider.connects == 0 and provider.ranges == []
+    assert await session.scalar(select(func.count()).select_from(SyncRunTable)) == 0
+    assert await session.scalar(select(func.count()).select_from(AccountTable)) == 0
+    assert await DigestRepository(session).get_latest() is None
+
+
+async def test_seven_days_back_is_allowed(session: AsyncSession) -> None:
+    provider = RangeProvider(two_days())
+    service = build(session, FakeAIProvider(), RecordingGate(True), email=provider)
+
+    result = await service.generate(tz_key=ZONE, local_date=date(2026, 8, 28))
+
+    assert result.digest is not None and result.digest.local_date == date(2026, 8, 28)
+    assert result.digest.status is DigestStatus.EMPTY
+
+
+async def link_m0_to_an_action(session: AsyncSession, key: str = "m0") -> str:
+    """An open action whose source is the cached message ``key``; a later message in its
+    thread follows it."""
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    message = await MessageRepository(session).get_by_provider_message_id(account.id, key)
+    assert message is not None
+    repository = ActionRepository(session)
+    row = await repository.add_action(
+        ActionTable(
+            public_id="00000000-0000-4000-8000-000000000001",
+            title="Approve the budget",
+            ownership="mine",
+            status="open",
+            deadline_precision="none",
+            created_at_utc=NOW,
+            updated_at_utc=NOW,
+            revision=1,
+        )
+    )
+    await repository.add_source(row.id, message, account)
+    await session.commit()
+    return row.public_id
+
+
+async def test_a_saved_brief_turns_follow_up_signals_into_proposals(
+    session: AsyncSession,
+) -> None:
+    signal = answer_all(follow_up="cancelled", follow_up_evidence="waiting on it")
+    first = await build(session, FakeAIProvider([signal]), RecordingGate(answer=True)).generate(
+        tz_key=ZONE
+    )
+    public_id = await link_m0_to_an_action(session)
+
+    # Again, from the cached analyses: m1 continues the action's thread; m0 is its source.
+    second = await build(session, FakeAIProvider(), RecordingGate(answer=True)).generate(
+        tz_key=ZONE
+    )
+
+    assert (first.proposals_created, second.proposals_created) == (0, 1)
+    assert second.status is BriefStatus.SAVED
+    (proposal,) = await ProposalService(session).pending()
+    assert (proposal.action_public_id, proposal.provider_message_id) == (public_id, "m1")
+
+
+async def test_a_past_day_s_brief_makes_proposals_too(session: AsyncSession) -> None:
+    provider = RangeProvider(two_days())
+    signal = answer_all(follow_up="cancelled", follow_up_evidence="waiting on it")
+    texts = texts_for(two_days())
+    first = await build(
+        session, FakeAIProvider([signal]), RecordingGate(True), email=provider, texts=texts
+    ).generate(tz_key=ZONE, local_date=YESTERDAY)
+    public_id = await link_m0_to_an_action(session, "y0")
+
+    # Again, from the cached analyses: y1 follows y0, the action's source, in its thread.
+    second = await build(
+        session, FakeAIProvider(), RecordingGate(True), email=provider, texts=texts
+    ).generate(tz_key=ZONE, local_date=YESTERDAY)
+
+    assert (first.proposals_created, second.proposals_created) == (0, 1)
+    (proposal,) = await ProposalService(session).pending()
+    assert (proposal.action_public_id, proposal.provider_message_id) == (public_id, "y1")
+
+
+async def seed_outside_reply(session: AsyncSession) -> None:
+    """An open action tracking thread "deck", and its archived reply from two hours ago."""
+    account = await AccountRepository(session).upsert(
+        AccountIdentity(
+            provider=ProviderKind.MICROSOFT,
+            provider_account_id="acc-1",
+            email_address="user@example.com",
+        )
+    )
+    since = NOW - timedelta(days=3)
+    row = await ActionRepository(session).add_action(
+        ActionTable(
+            public_id="00000000-0000-4000-8000-000000000002",
+            title="Send the deck",
+            ownership="mine",
+            status="open",
+            deadline_precision="none",
+            created_at_utc=since,
+            updated_at_utc=since,
+            revision=1,
+        )
+    )
+    session.add(
+        ActionSourceTable(
+            action_id=row.id,
+            provider_message_id="source-deck",
+            subject="Deck",
+            sender_address="alex@example.com",
+            web_link="https://mail.google.com/mail/u/#all/x",
+            received_at_utc=since,
+            provider=account.provider,
+            provider_account_id=account.provider_account_id,
+            provider_thread_id="deck",
+        )
+    )
+    archived = make_message(
+        provider_message_id="archived",
+        conversation_id="deck",
+        subject="Re: Deck",
+        received_at_utc=NOW - timedelta(hours=2),
+        is_in_inbox=False,
+        web_link="https://mail.example.com/archived",
+    )
+    await MessageRepository(session).upsert_messages(account.id, [archived])
+    await session.commit()
+
+
+async def test_an_outside_reply_becomes_a_follow_up_item_and_the_coverage_line_says_so(
+    session: AsyncSession,
+) -> None:
+    await seed_outside_reply(session)
+    mailbox = inbox()
+    texts = {**texts_for(mailbox), "archived": f"{BODY} Reference archived."}
+    service = build(
+        session,
+        FakeAIProvider([answer_all()]),
+        RecordingGate(True),
+        messages=mailbox,
+        texts=texts,
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
+    )
+
+    result = await service.generate(tz_key=ZONE)
+
+    assert result.status is BriefStatus.SAVED
+    assert result.sync.outside_ids == {"archived"}
+    assert result.coverage is not None and result.coverage.shortlisted == 3
+    digest = result.digest
+    assert digest is not None
+    # Whatever its category, it is in its own section, last.
+    assert [(item.message_key, item.section) for item in digest.items][-1] == (
+        "archived",
+        DigestSection.FOLLOW_UPS,
+    )
+    assert DigestSection.FOLLOW_UPS not in {item.section for item in digest.items[:-1]}
+    assert coverage_line(digest).endswith(
+        " Also includes 1 reply from a thread you track that wasn't in today's Inbox."
+    )
+    # Saved that way.
+    account = await AccountRepository(session).get_by_email("user@example.com")
+    assert account is not None
+    repository = DigestRepository(session)
+    row = await repository.get_by_account_and_date(account.id, TODAY)
+    assert row is not None
+    stored = await repository.get_digest_items(row.id)
+    assert [item.section for item, _, _ in stored][-1] == DigestSection.FOLLOW_UPS.value
+
+
+async def test_an_outside_reply_goes_through_the_same_consent_and_limit(
+    session: AsyncSession,
+) -> None:
+    await seed_outside_reply(session)
+    mailbox = inbox(2)
+    gate = RecordingGate(False)
+    service = build(
+        session,
+        FakeAIProvider(),
+        gate,
+        messages=mailbox,
+        texts={**texts_for(mailbox), "archived": f"{BODY} Reference archived."},
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
+    )
+
+    declined = await service.generate(tz_key=ZONE)
+
+    # Declining sends nothing, the outside reply included, and saves no brief.
+    assert declined.status is BriefStatus.CONSENT_DECLINED
+    (preview,) = gate.previews
+    assert preview.message_count == 3  # The two Inbox messages and the outside reply.
+    assert await DigestRepository(session).get_latest() is None
+
+    limited = build(
+        session,
+        FakeAIProvider([answer_all()]),
+        RecordingGate(True),
+        messages=mailbox,
+        texts={**texts_for(mailbox), "archived": f"{BODY} Reference archived."},
+        threads=RecordingThreads(session, ThreadCheck(read_ids=frozenset({"deck"}))),
+    )
+    result = await limited.generate(tz_key=ZONE, shortlist_limit=1)
+    assert result.coverage is not None and result.coverage.shortlisted == 1
+    assert result.sync.outside_ids == {"archived"}  # The tracked bonus wins the one place.
+
+
+class FailingProposals(ProposalService):
+    async def derive(self, *_args: object, **_kwargs: object) -> int:
+        raise RuntimeError("PRIVATE-DETAIL")
+
+
+async def test_a_failure_to_propose_never_fails_the_saved_brief(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = FakeAIProvider([answer_all()])
+    caplog.set_level(logging.WARNING)
+
+    result = await build(
+        session, provider, RecordingGate(answer=True), proposals=FailingProposals(session)
+    ).generate(tz_key=ZONE)
+
+    assert result.status is BriefStatus.SAVED
+    assert result.proposals_created == 0
+    assert "Follow-up proposals failed: RuntimeError" in caplog.text
+    assert "PRIVATE-DETAIL" not in caplog.text

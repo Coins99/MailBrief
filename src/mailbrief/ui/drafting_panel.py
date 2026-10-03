@@ -24,13 +24,13 @@ from mailbrief.domain.drafting import (
 )
 from mailbrief.domain.drafts import DraftKind, DraftLength, DraftTone
 
-_TONES = (
+TONE_CHOICES = (
     (DraftTone.NEUTRAL, "Neutral"),
     (DraftTone.WARM, "Warm"),
     (DraftTone.FORMAL, "Formal"),
     (DraftTone.DIRECT, "Direct"),
 )
-_LENGTHS = (
+LENGTH_CHOICES = (
     (DraftLength.SHORT, "Short (up to about 80 words)"),
     (DraftLength.MEDIUM, "Medium (about 80–200 words)"),
     (DraftLength.LONG, "Long (about 200–400 words)"),
@@ -61,6 +61,7 @@ class DraftingPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._first_use = False
+        self._defaults = (DraftTone.NEUTRAL, DraftLength.MEDIUM)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(
@@ -82,13 +83,12 @@ class DraftingPanel(QWidget):
         parts.addWidget(self.no_parts)
         form.addRow("Send", parts)
         self.tone = QComboBox()
-        for _value, name in _TONES:
+        for _value, name in TONE_CHOICES:
             self.tone.addItem(name)
         form.addRow("T&one", self.tone)
         self.length = QComboBox()
-        for _length, name in _LENGTHS:
+        for _length, name in LENGTH_CHOICES:
             self.length.addItem(name)
-        self.length.setCurrentIndex(1)
         form.addRow("Len&gth", self.length)
         self.instructions = QPlainTextEdit()
         self.instructions.setAccessibleName("Instructions for Groq")
@@ -124,15 +124,31 @@ class DraftingPanel(QWidget):
             lambda: self.send_requested.emit(self.agree_box.isChecked())
         )
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
+        self._apply_defaults()
         self.reset()
 
+    def set_defaults(self, tone: DraftTone, length: DraftLength) -> None:
+        """The owner's saved tone and length, chosen each time the panel is offered."""
+        self._defaults = (tone, length)
+
+    def _apply_defaults(self) -> None:
+        tone, length = self._defaults
+        self.tone.setCurrentIndex([value for value, _ in TONE_CHOICES].index(tone))
+        self.length.setCurrentIndex([value for value, _ in LENGTH_CHOICES].index(length))
+
     def offer(self, parts: frozenset[DraftContextPart], kind: DraftKind) -> None:
-        """Show the parts this draft can send, all ticked, and go back to choosing."""
+        """Show the parts this draft can send, all ticked, with the saved tone and length,
+        and go back to choosing.
+
+        The defaults apply here rather than in reset(): reset() also runs after a cancel or
+        a failure, when the owner's own choice of tone and length must stay.
+        """
         self.email_box.setText(REPLY_EMAIL_LABEL if kind is DraftKind.REPLY else SOURCE_EMAIL_LABEL)
         for part, box in self._boxes():
             box.setVisible(part in parts)
             box.setChecked(part in parts)
         self.no_parts.setVisible(not parts)
+        self._apply_defaults()
         self.reset()
 
     def _boxes(self) -> tuple[tuple[DraftContextPart, QCheckBox], ...]:
@@ -163,8 +179,8 @@ class DraftingPanel(QWidget):
             parts=frozenset(
                 part for part, box in self._boxes() if not box.isHidden() and box.isChecked()
             ),
-            tone=_TONES[self.tone.currentIndex()][0],
-            length=_LENGTHS[self.length.currentIndex()][0],
+            tone=TONE_CHOICES[self.tone.currentIndex()][0],
+            length=LENGTH_CHOICES[self.length.currentIndex()][0],
             instructions=instructions.strip(),
         )
 

@@ -3,15 +3,19 @@
 import random
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from mailbrief.domain.messages import (
     EmailContact,
     MessageImportance,
     NormalizedMessage,
     RankedMessage,
     RankReason,
+    own_addresses,
 )
 from mailbrief.services.ranking import (
     rank_messages,
+    reason_text,
     score_message,
     select_shortlist,
 )
@@ -277,3 +281,128 @@ def test_is_automated_sender_edge_cases() -> None:
     # Test with invalid / empty address formats
     score, reasons = score_message(msg_empty_addr, user_email=USER_EMAIL, now_utc=NOW)
     assert RankReason.AUTOMATED_SENDER not in reasons
+
+
+SINCE = NOW - timedelta(days=1)
+
+
+def test_a_later_reply_in_a_tracked_thread_ranks_higher() -> None:
+    reply = make_baseline_message(conversation_id="deck")
+
+    score, reasons = score_message(
+        reply, user_email=USER_EMAIL, now_utc=NOW, tracked={"deck": SINCE}
+    )
+
+    assert (score, reasons) == (20, (RankReason.TRACKED_THREAD_REPLY,))
+    assert reason_text(RankReason.TRACKED_THREAD_REPLY) == "reply in a thread you track"
+    assert reason_text(RankReason.VERY_RECENT) == "very recent"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"conversation_id": "other"},  # Another thread.
+        {"conversation_id": None},  # No thread.
+        {"conversation_id": "deck", "received_at_utc": SINCE},  # Not after the sources.
+        {"conversation_id": "deck", "received_at_utc": SINCE - timedelta(hours=1)},
+        {"conversation_id": "deck", "is_sent": True},  # The owner's own message.
+    ],
+    ids=["other-thread", "no-thread", "at-the-source", "before", "sent-by-the-owner"],
+)
+def test_only_later_replies_from_others_in_tracked_threads_get_the_bonus(
+    overrides: dict[str, object],
+) -> None:
+    message = make_baseline_message(**overrides)
+
+    assert score_message(message, user_email=USER_EMAIL, now_utc=NOW, tracked={"deck": SINCE}) == (
+        0,
+        (),
+    )
+
+
+@pytest.mark.parametrize(
+    ("sender", "addresses", "bonus"),
+    [
+        # Sent from an alias, which Gmail doesn't always label SENT: still the owner's.
+        ("Alias@Example.org", own_addresses(USER_EMAIL, ["alias@example.org"]), False),
+        ("taylor@example.com", USER_EMAIL, False),
+        (" TAYLOR@example.com", own_addresses(USER_EMAIL, None), False),
+        ("alias@example.org", USER_EMAIL, True),  # Not one of this account's addresses.
+    ],
+)
+def test_a_reply_from_one_of_the_account_s_addresses_gets_no_tracked_bonus(
+    sender: str, addresses: str | frozenset[str], bonus: bool
+) -> None:
+    reply = make_baseline_message(
+        conversation_id="deck", sender=EmailContact(name="Taylor", address=sender)
+    )
+
+    _, reasons = score_message(reply, user_email=addresses, now_utc=NOW, tracked={"deck": SINCE})
+
+    assert (RankReason.TRACKED_THREAD_REPLY in reasons) is bonus
+
+
+def test_tracking_leaves_every_other_score_unchanged() -> None:
+    messages = [
+        make_baseline_message(provider_message_id="high", importance=MessageImportance.HIGH),
+        make_baseline_message(provider_message_id="unread", is_read=False, conversation_id="x"),
+        make_baseline_message(provider_message_id="reply", conversation_id="deck"),
+    ]
+
+    plain = rank_messages(messages, user_email=USER_EMAIL, now_utc=NOW)
+    tracked = rank_messages(messages, user_email=USER_EMAIL, now_utc=NOW, tracked={"deck": SINCE})
+
+    assert [item.score for item in plain] == [20, 8, 0]
+    assert [item.score for item in tracked] == [20, 8, 20]
+    assert tracked[:2] == plain[:2]
+
+
+def test_the_primary_address_counts_when_the_alias_list_lacks_it() -> None:
+    addresses = own_addresses("Taylor@Example.com", ["alias@example.org"])
+    assert addresses == {"taylor@example.com", "alias@example.org"}
+    from_primary = make_baseline_message(
+        conversation_id="deck", sender=EmailContact(name="Taylor", address="taylor@example.com")
+    )
+    to_primary = make_baseline_message(
+        to_recipients=(EmailContact(name="Taylor", address="TAYLOR@example.com"),)
+    )
+    to_alias = make_baseline_message(
+        to_recipients=(EmailContact(name="Taylor", address="alias@example.org"),)
+    )
+
+    tracked = {"deck": SINCE}
+    assert score_message(from_primary, user_email=addresses, now_utc=NOW, tracked=tracked) == (
+        0,
+        (),
+    )
+    assert score_message(to_primary, user_email=addresses, now_utc=NOW) == (
+        8,
+        (RankReason.DIRECT_RECIPIENT,),
+    )
+    assert score_message(to_alias, user_email=addresses, now_utc=NOW) == (
+        8,
+        (RankReason.DIRECT_RECIPIENT,),
+    )
+
+
+@pytest.mark.parametrize(
+    ("primary", "aliases", "expected"),
+    [
+        ("me@example.com", None, {"me@example.com"}),
+        ("me@example.com", [], {"me@example.com"}),
+        (
+            " Me@Example.com ",
+            ["ME@example.com", "Alias@Example.org"],
+            {"me@example.com", "alias@example.org"},
+        ),
+        (
+            "me@example.com",
+            ["", "  ", "alias@example.org"],
+            {"me@example.com", "alias@example.org"},
+        ),
+    ],
+)
+def test_own_addresses_are_the_primary_plus_the_aliases_casefolded(
+    primary: str, aliases: list[str] | None, expected: set[str]
+) -> None:
+    assert own_addresses(primary, aliases) == expected

@@ -21,6 +21,7 @@ from mailbrief.domain.analysis import (
     AIUsage,
     AnalysisProblem,
     AnalysisRequest,
+    FollowUpKind,
 )
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ports.errors import (
@@ -66,8 +67,8 @@ BODY = "Please approve the quarterly budget by Friday 5 PM."
 MARKER = "GROQ-ERROR-MARKER-5d2e"
 REQUEST_KEYS = {"model", "messages", "response_format", "max_completion_tokens"}
 PINNED_PROMPT = (
-    "groq-2026-09-28.1",
-    "9912995de884fe8bd2d094eff1eef74ee1763725c52242fcd023e46173134366",
+    "groq-2026-09-30.1",
+    "0c0075aa4a25fc79f0433d8605b138cbf2e7565446a395bf73c9de3889f3f8fd",
 )
 STEP_5_3_KEYS = {
     "message_key",
@@ -260,6 +261,78 @@ async def test_suggested_actions_become_action_candidates(
 
 def without(values: dict[str, Any], key: str) -> dict[str, Any]:
     return {name: value for name, value in values.items() if name != key}
+
+
+async def test_the_follow_up_signal_becomes_part_of_the_candidate(
+    respx_mock: respx.MockRouter, provider: GroqProvider
+) -> None:
+    result = wire_result(
+        "0000abcd", BODY[:40], follow_up="new_deadline", follow_up_evidence="by Friday 5 PM"
+    )
+    respx_mock.post(CHAT_URL).respond(json=results_body([result]))
+
+    (candidate,) = (await provider.analyze([make_request()])).candidates
+
+    assert (candidate.follow_up, candidate.follow_up_evidence) == (
+        FollowUpKind.NEW_DEADLINE,
+        "by Friday 5 PM",
+    )
+
+
+def test_the_wire_schema_requires_the_follow_up_fields() -> None:
+    result = AnalysisWireBatch.model_json_schema()["$defs"]["AnalysisWireResult"]
+
+    assert {"follow_up", "follow_up_evidence"} <= set(result["required"])
+    assert result["properties"]["follow_up"]["enum"] == [
+        "none",
+        "new_deadline",
+        "cancelled",
+        "delivered",
+    ]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        without(wire_result("0000abcd", BODY[:40]), "follow_up"),
+        without(wire_result("0000abcd", BODY[:40]), "follow_up_evidence"),
+        wire_result("0000abcd", BODY[:40], follow_up="postponed"),
+    ],
+    ids=["no-follow-up", "no-follow-up-evidence", "unknown-kind"],
+)
+async def test_a_result_that_breaks_the_follow_up_schema_is_invalid_output(
+    respx_mock: respx.MockRouter, provider: GroqProvider, result: dict[str, Any]
+) -> None:
+    respx_mock.post(CHAT_URL).respond(json=results_body([result]))
+
+    response = await provider.analyze([make_request()])
+
+    assert response.problem is AnalysisProblem.INVALID_OUTPUT
+
+
+async def test_nothing_about_actions_is_sent_only_the_seven_email_fields(
+    respx_mock: respx.MockRouter, provider: GroqProvider
+) -> None:
+    """Follow-up signals come from the email alone (ADR 0016): the request is unchanged."""
+    # Each request field and the key it is sent under.
+    sent_as = {
+        "message_key": "message_key",
+        "subject": "subject",
+        "sender": "sender",
+        "received_at_utc": "received_local",
+        "timezone_name": "time_zone",
+        "body_text": "body",
+        "body_truncated": "body_truncated",
+    }
+    route = respx_mock.post(CHAT_URL).mock(side_effect=answer_every_message)
+
+    await provider.analyze([make_request()])
+
+    assert set(AnalysisRequest.model_fields) == set(sent_as)
+    (message,) = sent_messages(route.calls.last.request)
+    assert set(message) == set(sent_as.values()) == STEP_5_3_KEYS
+    body = json.loads(route.calls.last.request.content)
+    assert [item["role"] for item in body["messages"]] == ["system", "user"]
 
 
 @pytest.mark.parametrize(

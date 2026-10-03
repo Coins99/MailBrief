@@ -14,7 +14,7 @@ from typing import cast
 import httpx
 import pytest
 import respx
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.config import Settings
@@ -26,6 +26,7 @@ from mailbrief.domain.analysis import (
     AnalysisRequest,
     AnalysisResponse,
     DeadlinePrecision,
+    FollowUpKind,
     TargetReason,
 )
 from mailbrief.domain.bodies import BodySource, BodyStatus, PreparedBody
@@ -50,6 +51,7 @@ from mailbrief.ports.errors import (
 from mailbrief.providers.groq.credentials import ENTRY, SERVICE, GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
 from mailbrief.services.analysis import (
+    AnalysisPlan,
     AnalysisRun,
     AnalysisService,
     PlannedMessage,
@@ -1488,3 +1490,223 @@ async def test_an_incomplete_answer_from_any_provider_counts(session: AsyncSessi
 
     assert run.error_code == "AI_OUTPUT_INCOMPLETE"
     assert provider.calls == 2
+
+
+FOLLOW_BODY = (
+    "Thanks for the update. Can we move the review to next Monday? The finance team is "
+    "still collecting the figures, so Friday is too early. No longer needed: the old draft."
+)
+MOVE = "Can we move the review to next Monday?"
+
+
+@pytest.mark.parametrize(
+    ("kind", "overrides"),
+    [
+        (
+            FollowUpKind.NEW_DEADLINE,
+            {"deadline_text": "next Monday", "deadline_date": "2026-09-07"},
+        ),
+        (FollowUpKind.CANCELLED, {}),
+        (FollowUpKind.DELIVERED, {}),
+    ],
+)
+def test_validate_candidate_keeps_a_follow_up_that_quotes_the_email(
+    kind: FollowUpKind, overrides: dict[str, object]
+) -> None:
+    request = make_request(body_text=FOLLOW_BODY)
+    candidate = good_candidate(
+        request, follow_up=kind.value, follow_up_evidence=f"“{MOVE}”", **overrides
+    )
+
+    analysis = validate_candidate(candidate, request)
+
+    assert (analysis.follow_up, analysis.follow_up_evidence) == (kind, MOVE)
+
+
+LONG_QUOTE_BODY = "Moved. " + "x" * 161 + " Thanks, Sam and the finance team for the figures."
+
+
+@pytest.mark.parametrize(
+    ("body", "overrides"),
+    [
+        (FOLLOW_BODY, {"follow_up_evidence": "We cancelled everything yesterday."}),
+        (LONG_QUOTE_BODY, {"follow_up_evidence": "x" * 161}),
+        (FOLLOW_BODY, {"follow_up_evidence": "C"}),
+        (FOLLOW_BODY, {"follow_up_evidence": None}),
+        (FOLLOW_BODY, {"follow_up": "new_deadline"}),  # The email states no deadline.
+        (BODY, {"follow_up_evidence": "Please approve the quarterly"}),  # Over the budget.
+    ],
+    ids=["not-in-the-email", "over-160", "too-short", "missing", "no-deadline", "over-budget"],
+)
+def test_validate_candidate_drops_a_follow_up_it_cannot_check_and_keeps_the_message(
+    body: str, overrides: dict[str, object]
+) -> None:
+    request = make_request(body_text=body)
+    values: dict[str, object] = {"follow_up": "cancelled", "follow_up_evidence": MOVE}
+    values.update(overrides)
+    candidate = good_candidate(request, actions=[good_action(request)], **values)
+
+    analysis = validate_candidate(candidate, request)
+
+    assert (analysis.follow_up, analysis.follow_up_evidence) == (FollowUpKind.NONE, None)
+    assert analysis.summary == "A short summary."
+    assert len(analysis.suggestions) == 1
+
+
+@pytest.mark.parametrize(("follow_up", "kept"), [(False, True), (True, False)])
+def test_suggestions_get_what_the_follow_up_leaves_of_the_evidence_budget(
+    follow_up: bool, kept: bool
+) -> None:
+    request = make_request(body_text=FOLLOW_BODY)
+    # 134 characters in all (strictly under 80% of 168), less the message's own 40.
+    budget = math.ceil(len(FOLLOW_BODY) * 0.8) - 1 - 40
+    quote = FOLLOW_BODY[40 : 40 + budget - len(MOVE) + 1]  # One more than the follow-up leaves.
+    signal: dict[str, object] = (
+        {"follow_up": "cancelled", "follow_up_evidence": MOVE} if follow_up else {}
+    )
+    candidate = good_candidate(request, actions=[good_action(request, evidence=quote)], **signal)
+
+    analysis = validate_candidate(candidate, request)
+
+    (suggestion,) = analysis.suggestions
+    assert len(quote) <= budget
+    assert (suggestion.evidence == quote) is kept
+
+
+DEFERRED = AnalysisOutcome.DEFERRED
+
+
+async def planned(
+    session: AsyncSession, provider: AIProvider, shortlist: Sequence[RankedMessage], account_id: int
+) -> tuple[AnalysisService, AnalysisPlan]:
+    service = AnalysisService(session, provider, key_factory=counting_keys())
+    plan = await service.plan(
+        account_id=account_id, shortlist=shortlist, bodies=ready(shortlist), timezone_name=ZONE
+    )
+    return service, plan
+
+
+async def cached_rows(session: AsyncSession) -> int:
+    return await session.scalar(select(func.count()).select_from(AnalysisTable)) or 0
+
+
+async def test_deferring_keeps_the_top_messages_and_never_sends_or_caches_the_rest(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 5)  # In rank order: msg-0 ranks highest.
+    provider = FakeAIProvider([answer_all()])
+    service, plan = await planned(session, provider, shortlist, account_id)
+
+    assert plan.defer_after(2) == 3
+    assert [item.request.subject for item in plan.to_send if item.request] == [
+        "Budget item 0",
+        "Budget item 1",
+    ]
+    run = await service.execute(plan)
+
+    assert outcomes(run) == [ANALYZED, ANALYZED, DEFERRED, DEFERRED, DEFERRED]
+    (batch,) = provider.batches
+    assert [request.subject for request in batch] == ["Budget item 0", "Budget item 1"]
+    assert await cached_rows(session) == 2  # Nothing is cached for a deferred message.
+    for item in run.messages[2:]:
+        assert item.analysis is None and item.analysis_row_id is None
+
+
+async def test_messages_already_analyzed_are_not_counted_or_deferred(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 4)
+    await analyze(session, FakeAIProvider([answer_all()]), shortlist[:1], account_id=account_id)
+    provider = FakeAIProvider([answer_all()])
+    service, plan = await planned(session, provider, shortlist, account_id)
+    assert [item.outcome for item in plan.messages] == [AnalysisOutcome.REUSED, None, None, None]
+
+    assert plan.defer_after(1) == 2  # msg-0 is cached; msg-1 is the one new message sent.
+    run = await service.execute(plan)
+
+    assert outcomes(run) == [AnalysisOutcome.REUSED, ANALYZED, DEFERRED, DEFERRED]
+    assert sum(len(batch) for batch in provider.batches) == 1
+
+
+async def test_the_first_messages_take_the_places_ahead_of_higher_ranked_ones(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 5)  # In rank order: msg-0 ranks highest.
+    provider = FakeAIProvider([answer_all()])
+    service, plan = await planned(session, provider, shortlist, account_id)
+
+    assert plan.defer_after(3, first=("msg-4", "msg-2")) == 2
+    run = await service.execute(plan)
+
+    # msg-2 and msg-4 go first, then msg-0, the highest-ranked of the others.
+    assert outcomes(run) == [ANALYZED, DEFERRED, ANALYZED, DEFERRED, ANALYZED]
+    (batch,) = provider.batches  # What is sent still goes in rank order.
+    assert [request.subject for request in batch] == [
+        "Budget item 0",
+        "Budget item 2",
+        "Budget item 4",
+    ]
+
+
+async def test_more_first_messages_than_places_defers_the_lowest_ranked_of_them(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 4)
+    _, plan = await planned(session, FakeAIProvider(), shortlist, account_id)
+
+    assert plan.defer_after(1, first={"msg-1", "msg-3", "not-in-the-plan"}) == 3
+
+    # msg-1 outranks msg-3; msg-0 ranks highest of all but is not among the first.
+    assert [item.outcome for item in plan.messages] == [DEFERRED, None, DEFERRED, DEFERRED]
+
+
+async def test_a_first_message_that_is_already_analyzed_takes_no_place(
+    session: AsyncSession,
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+    await analyze(session, FakeAIProvider([answer_all()]), shortlist[:1], account_id=account_id)
+    _, plan = await planned(session, FakeAIProvider(), shortlist, account_id)
+
+    assert plan.defer_after(1, first=("msg-0",)) == 1
+
+    assert [item.outcome for item in plan.messages] == [AnalysisOutcome.REUSED, None, DEFERRED]
+
+
+@pytest.mark.parametrize(("limit", "deferred"), [(0, 3), (1, 2), (3, 0), (4, 0), (50, 0)])
+async def test_the_number_deferred_is_what_is_over_the_limit(
+    session: AsyncSession, limit: int, deferred: int
+) -> None:
+    account_id, shortlist = await seed(session, 3)
+    kept = min(limit, 3)
+    provider = FakeAIProvider([answer_all()] if kept else [])
+    service, plan = await planned(session, provider, shortlist, account_id)
+
+    assert plan.defer_after(limit) == deferred
+    run = await service.execute(plan)
+
+    assert outcomes(run).count(DEFERRED) == deferred
+    assert sum(len(batch) for batch in provider.batches) == kept
+    assert plan.defer_after(limit) == 0  # Again: nothing more is over it.
+
+
+async def test_a_negative_limit_is_a_mistake_and_changes_nothing(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 2)
+    _, plan = await planned(session, FakeAIProvider(), shortlist, account_id)
+
+    with pytest.raises(ValueError, match="negative"):
+        plan.defer_after(-1)
+
+    assert [item.outcome for item in plan.messages] == [None, None]
+
+
+async def test_a_failed_run_keeps_deferred_messages_deferred(session: AsyncSession) -> None:
+    account_id, shortlist = await seed(session, 4)
+    provider = FakeAIProvider([ProviderRateLimitError("limited")])
+    service, plan = await planned(session, provider, shortlist, account_id)
+    plan.defer_after(2)
+
+    run = await service.execute(plan)
+
+    # The provider stopped the run: what was to be sent failed, what was deferred stays so.
+    assert outcomes(run) == [FAILED, FAILED, DEFERRED, DEFERRED]
+    assert run.error_code == "AI_RATE_LIMITED"

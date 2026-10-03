@@ -4,6 +4,11 @@
 memory, asks for your consent, sends minimized messages to Groq, validates every answer
 in Python and saves the day's brief to SQLite. Bodies are never stored.
 
+Since M8 the shortlist can also include up to 3 replies in the threads of your open actions
+that aren't in today's Inbox (archived, or from an earlier day). They are reviewed,
+consented to and limited like any other message
+([M8 Part 7](m8-daily-operation.md#proposals-in-the-desktop-and-replies-outside-the-inbox-part-7)).
+
 ## Setup
 
 Create a key in [Groq Console](https://console.groq.com/keys). Keep the organization on
@@ -21,7 +26,9 @@ exceptions. Usage metadata is retained even with ZDR. See
    models for low reasoning effort, because their reasoning shares the output limit with
    the answer; other models get no reasoning setting, since Groq rejects values a model
    does not support.
-3. Optional settings:
+3. Optional settings. When a variable is unset, your saved preference applies, else the
+   default; set them in Settings > Preferences and check them with
+   `mailbrief-gmail-diagnostic preferences show` ([M8 preferences](m8-daily-operation.md#preferences-parts-12)).
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
@@ -32,8 +39,9 @@ exceptions. Usage metadata is retained even with ZDR. See
 | `MAILBRIEF_AI_BATCH_SIZE` | 1 | 1-10 | Messages per call |
 
 Then run `uv run mailbrief-gmail-diagnostic brief`. It accepts the same `--timezone`,
-`--include`, `--exclude`, `--database` and `--silent-only` options as `sync`, plus `--yes`
-and `--show` (below).
+`--include`, `--exclude`, `--database` and `--silent-only` options as `sync`, plus `--yes`,
+`--show` (below) and `--date YYYY-MM-DD`, which briefs one of the previous 7 days instead
+of today ([brief history](m8-daily-operation.md#brief-history-and-catch-up-part-3)).
 
 PowerShell example (replace the model and Gmail client path with your own):
 
@@ -109,7 +117,8 @@ short email that snippet can be the whole text. Derived content is bounded: a su
 at most 240 characters, an action at most 1,000, and evidence at most 300 and strictly
 under 80% of the body. A summary of a very short email may restate it. Since M6 an email
 may also carry up to five action suggestions; their evidence quotes are at most 160
-characters, and all stored quotes for one email total at most 600 characters and under
+characters. Since M8 it may also carry a follow-up signal with a quote of at most 160
+characters (below). All stored quotes for one email total at most 600 characters and under
 80% of its body. Text the model writes itself, and deadline phrases, are stored without
 control or format characters. See [M6 actions](m6-actions.md).
 
@@ -122,11 +131,21 @@ control or format characters. See [M6 actions](m6-actions.md).
 - `ai-consent status` shows each account's consent; `ai-consent revoke` withdraws it, and
   the next brief asks again. Both work without a Gmail connection.
 
+### Automatic analysis (M8 Part 8)
+
+- By default nothing is sent without asking. `brief --automatic` (and the desktop's timed
+  refresh) syncs and ranks, and reports how many messages are ready to review.
+- `ai-consent auto-send N` (1–10) lets automatic runs send up to N messages without asking;
+  it needs a consent, shows the disclosure, and asks for a typed `yes` (`--yes` skips only the
+  question). `auto-send 0` turns it off, with or without a consent. Revoking consent clears it.
+- Messages over the cap are deferred, not sent. Messages you left out are never selected.
+  See [M8 daily operation](m8-daily-operation.md#daily-operation-part-8).
+
 ## AI drafting (M7)
 
 Drafts can be written with Groq from context you choose; see [M7 drafts](m7-drafts.md) and
 [ADR 0013](adr/0013-ai-drafting.md). Drafting uses its own prompt,
-`groq-draft-2026-09-28.1` (the brief's is `groq-2026-09-28.1`), a strict schema with no
+`groq-draft-2026-09-28.1` (the brief's is `groq-2026-09-30.1`), a strict schema with no
 field for recipients, and the same model, `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` limit and
 request cap. Its consent is separate from the brief's: it belongs to you rather than an
 account, is asked for the first time you draft with AI, and `ai-consent revoke` withdraws
@@ -145,9 +164,33 @@ Each validated result is saved with its message, input hash, provider, model, pr
 and schema version. The hash covers everything sent except the random key, including your
 time zone. An unchanged message is reused and never sent again; a new model, prompt or time
 zone analyzes it once more. The cache holds the summary, action, deadline, the action
-suggestions and short evidence quotes from the email, never the body. Schema version 6
-(M6) made every earlier result a miss once, so the first brief after upgrading re-sends
-today's shortlist.
+suggestions, the follow-up signal and short evidence quotes from the email, never the
+body. Schema version 6 (M6), and schema version 7 with prompt `groq-2026-09-30.1` (M8),
+each made every earlier result a miss once, so the first brief after upgrading re-sends
+today's shortlist, under the consent you already gave.
+
+## Follow-up signal (M8)
+
+Schema version 7 adds two fields to each result
+([ADR 0016](adr/0016-follow-up-proposals.md)):
+
+- `follow_up`: `none`, `new_deadline` (the email changes or newly sets a deadline for work
+  already under way, and states it), `cancelled` (it withdraws or cancels a request, order
+  or meeting) or `delivered` (it provides what was asked for, or says the work is done).
+  The model judges the email on its own: nothing about your actions is sent, and the
+  request carries the same fields as before, so the consent disclosure is unchanged
+  (version 2).
+- `follow_up_evidence`: for any signal other than `none`, a passage copied from the subject
+  or body, at most 160 characters; `null` otherwise.
+
+MailBrief checks the signal like evidence. The email's own quote is fitted first (at most
+300 characters), then the follow-up quote, then the suggestions' quotes, all within the
+email's 600-character total and under 80% of its body. A follow-up quote that is shorter
+than 2 or longer than 160 characters, doesn't appear in the email or doesn't fit what is
+left becomes `none`, and so does `new_deadline` when the email states no deadline. The
+message itself never fails because of its signal. A kept signal can propose an update to
+one of your open actions whose thread the email continues; see
+[follow-up proposals](m8-daily-operation.md#follow-up-proposals-part-6).
 
 ## Deadlines
 
@@ -198,7 +241,9 @@ If nothing could be analyzed, no brief is written and today's last saved brief s
 By default the command prints counts only. `--show` also prints each item's sender, subject,
 summary, action, deadline and Gmail link, never the evidence or the body. Since M6 it also
 prints each pending suggestion as `[pending #N]` with its target and steps, and accepted
-ones as `[accepted]`; `actions accept N` and `actions dismiss N` decide them.
+ones as `[accepted]`; `actions accept N` and `actions dismiss N` decide them. Since M8 it
+also names the open actions an email continues ("Continues: …") and its pending follow-up
+proposals ("Proposes: … (P3)"), and `brief` says how many proposals it made.
 
 ## Exit codes
 

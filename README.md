@@ -28,6 +28,12 @@ later use after Microsoft Entra access is resolved.
 - M7 implemented, awaiting live acceptance: local drafts and notes, and AI drafting with
   Groq from context you choose.
   See [M7 drafts, notes and messages](docs/m7-drafts.md).
+- M8 implemented, awaiting live acceptance (PR #17): your time zone, messages per brief,
+  excluded senders, drafting defaults and AI limits; brief history and catch-up for missed
+  days; tracking the threads of open actions, with proposed updates to your actions and
+  replies outside today's Inbox offered in review; and refreshing while MailBrief is open,
+  with automatic analysis only by your explicit permission.
+  See [M8 daily operation](docs/m8-daily-operation.md).
 
 ## Start here
 
@@ -41,6 +47,7 @@ later use after Microsoft Entra access is resolved.
 - [AI analysis, consent and the daily brief (M4)](docs/ai-analysis.md)
 - [Actions, target dates and plans (M6)](docs/m6-actions.md)
 - [Drafts, notes and messages (M7)](docs/m7-drafts.md)
+- [Preferences and daily operation (M8)](docs/m8-daily-operation.md)
 - [File change map](docs/change-map.md)
 - [Microsoft work retained for later](docs/microsoft-setup.md)
 

@@ -20,6 +20,18 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from mailbrief.domain.analysis import MAX_ANALYSIS_BATCH
+from mailbrief.domain.briefs import AUTO_SEND_LIMIT_MAX
+from mailbrief.domain.preferences import (
+    AI_BODY_CHARS_MAX,
+    AI_OUTPUT_TOKENS_MAX,
+    AI_OUTPUT_TOKENS_MIN,
+    AI_REQUESTS_MAX,
+    AI_TIMEOUT_MAX,
+    AI_TIMEOUT_MIN,
+    REFRESH_INTERVALS,
+    SHORTLIST_LIMIT_MAX,
+)
 from mailbrief.storage.types import UTCDateTime
 
 
@@ -42,6 +54,15 @@ _DRAFT_KIND_CHECK = "kind IN ('reply','email','note','message')"
 _DRAFT_ORIGIN_CHECK = "origin IN ('created','edited','restored','generated')"
 _DRAFT_TONE_CHECK = "tone IN ('neutral','warm','formal','direct')"
 _DRAFT_LENGTH_CHECK = "length IN ('short','medium','long')"
+_DEFAULT_TONE_CHECK = "draft_tone IN ('neutral','warm','formal','direct')"
+_DEFAULT_LENGTH_CHECK = "draft_length IN ('short','medium','long')"
+_FOLLOW_UP_CHECK = "follow_up_kind IN ('none','new_deadline','cancelled','delivered')"
+_PROPOSAL_KIND_CHECK = "kind IN ('new_deadline','cancelled','delivered')"
+_PROPOSAL_STATE_CHECK = "state IN ('pending','applied','dismissed')"
+_REFRESH_INTERVAL_CHECK = (
+    "refresh_interval_minutes IS NULL OR refresh_interval_minutes IN "
+    f"({', '.join(str(minutes) for minutes in REFRESH_INTERVALS)})"
+)
 
 
 class Base(DeclarativeBase):
@@ -86,6 +107,7 @@ class MessageTable(Base):
         ),
         Index("ix_messages_account_received", "account_id", "received_at_utc"),
         Index("ix_messages_account_rank", "account_id", "rank_score"),
+        Index("ix_messages_account_conversation", "account_id", "conversation_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -115,6 +137,12 @@ class MessageTable(Base):
     is_in_inbox: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("1")
     )
+    # Sent from this account; cached only inside tracked threads (ADR 0015).
+    is_sent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    # When the owner unchecked this message in a review that had picked it (ADR 0017).
+    review_declined_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
     has_attachments: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -150,6 +178,7 @@ class AnalysisTable(Base):
             "deadline_precision IN ('none','unresolved','date','datetime')",
             name="deadline_precision_known",
         ),
+        CheckConstraint(_FOLLOW_UP_CHECK, name="follow_up_kind_known"),
         Index("ix_analyses_message_id", "message_id"),
     )
 
@@ -185,6 +214,11 @@ class AnalysisTable(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False)
     analyzed_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    # The follow-up signal (ADR 0016); rows from before schema 7 read "none".
+    follow_up_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="none", server_default="none"
+    )
+    follow_up_evidence: Mapped[str | None] = mapped_column(String(160))
 
 
 class DigestTable(Base):
@@ -211,6 +245,10 @@ class DigestTable(Base):
     reused_count: Mapped[int | None] = mapped_column(Integer)
     failed_count: Mapped[int | None] = mapped_column(Integer)
     skipped_count: Mapped[int | None] = mapped_column(Integer)
+    # Messages an automatic run left for the next review (ADR 0017); 0 for older briefs.
+    deferred_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     ai_provider: Mapped[str | None] = mapped_column(String(64))
@@ -228,6 +266,9 @@ class AIConsentTable(Base):
             "disclosure_version",
             name="uq_ai_consents_scope",
         ),
+        CheckConstraint(
+            f"auto_send_limit BETWEEN 0 AND {AUTO_SEND_LIMIT_MAX}", name="auto_send_limit_range"
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -239,6 +280,12 @@ class AIConsentTable(Base):
     disclosure_version: Mapped[str] = mapped_column(String(32), nullable=False)
     granted_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     revoked_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    # How many messages an automatic run may send without asking, and since when (ADR 0017).
+    # It belongs to this consent: revoking the consent, or a new disclosure version, ends it.
+    auto_send_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    auto_send_granted_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class DigestItemTable(Base):
@@ -347,6 +394,8 @@ class ActionTable(Base):
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
+    # The owner's "seen" watermark for later messages in the action's threads (ADR 0015).
+    thread_seen_until_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class ActionSuggestionTable(Base):
@@ -434,6 +483,11 @@ class ActionSourceTable(Base):
     sender_address: Mapped[str] = mapped_column(String(320), nullable=False)
     web_link: Mapped[str] = mapped_column(Text, nullable=False)
     received_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    # The message's provider, account and thread, so its thread can be tracked (ADR 0015).
+    # NULL for sources whose email had left local mail before revision 0010.
+    provider: Mapped[str | None] = mapped_column(String(32))
+    provider_account_id: Mapped[str | None] = mapped_column(String(255))
+    provider_thread_id: Mapped[str | None] = mapped_column(String(512))
 
 
 class SuggestionDecisionTable(Base):
@@ -464,6 +518,66 @@ class SuggestionDecisionTable(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"))
     decided_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ActionProposalTable(Base):
+    """A later email's proposed update to an action, applied only by the owner (ADR 0016).
+
+    It keeps a snapshot of the email, so it outlives the cached message. ``previous_json``,
+    ``source_added`` and ``applied_revision`` record what applying changed, for Undo.
+    """
+
+    __tablename__ = "action_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "action_id", "provider_message_id", "kind", name="uq_action_proposals_identity"
+        ),
+        CheckConstraint(_PROPOSAL_KIND_CHECK, name="kind_known"),
+        CheckConstraint(_PROPOSAL_STATE_CHECK, name="state_known"),
+        CheckConstraint(_PRECISION_CHECK, name="deadline_precision_known"),
+        Index("ix_action_proposals_action_id", "action_id"),
+        # A deleted proposal's ID is never given to another, so a stale ID fails.
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    action_id: Mapped[int] = mapped_column(
+        ForeignKey("actions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    deadline_text: Mapped[str | None] = mapped_column(Text)
+    deadline_precision: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="none",
+        server_default="none",
+    )
+    deadline_date: Mapped[date | None] = mapped_column(Date)
+    deadline_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    deadline_timezone: Mapped[str | None] = mapped_column(String(128))
+    suggested_target_date: Mapped[date | None] = mapped_column(Date)
+    target_reason: Mapped[str | None] = mapped_column(String(32))
+    evidence: Mapped[str] = mapped_column(String(160), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_account_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_message_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    provider_thread_id: Mapped[str | None] = mapped_column(String(512))
+    subject: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sender_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    web_link: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    previous_json: Mapped[dict[str, str | None] | None] = mapped_column(JSON)
+    source_added: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    applied_revision: Mapped[int | None] = mapped_column(Integer)
+    created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    decided_at_utc: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class DraftTable(Base):
@@ -589,3 +703,60 @@ class DraftGenerationTable(Base):
     instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     missing_context_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+def _range_check(column: str, low: int, high: int) -> CheckConstraint:
+    return CheckConstraint(
+        f"{column} IS NULL OR {column} BETWEEN {low} AND {high}", name=f"{column}_range"
+    )
+
+
+class OwnerPreferencesTable(Base):
+    """The owner's preferences: one revisioned row, shared by the desktop and CLI (ADR 0014).
+
+    No row means the defaults. A NULL AI limit means "use the default".
+    """
+
+    __tablename__ = "owner_preferences"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_row"),
+        CheckConstraint(
+            f"shortlist_limit BETWEEN 1 AND {SHORTLIST_LIMIT_MAX}", name="shortlist_limit_range"
+        ),
+        CheckConstraint(_DEFAULT_TONE_CHECK, name="draft_tone_known"),
+        CheckConstraint(_DEFAULT_LENGTH_CHECK, name="draft_length_known"),
+        CheckConstraint(_REFRESH_INTERVAL_CHECK, name="refresh_interval_known"),
+        _range_check("ai_batch_size", 1, MAX_ANALYSIS_BATCH),
+        _range_check("ai_body_character_limit", 1, AI_BODY_CHARS_MAX),
+        _range_check("ai_max_output_tokens", AI_OUTPUT_TOKENS_MIN, AI_OUTPUT_TOKENS_MAX),
+        _range_check("ai_max_requests_per_run", 1, AI_REQUESTS_MAX),
+        _range_check("ai_timeout_seconds", AI_TIMEOUT_MIN, AI_TIMEOUT_MAX),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    time_zone: Mapped[str | None] = mapped_column(String(64))
+    shortlist_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=SHORTLIST_LIMIT_MAX, server_default=text("10")
+    )
+    excluded_senders_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    draft_tone: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="neutral", server_default="neutral"
+    )
+    draft_length: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="medium", server_default="medium"
+    )
+    ai_batch_size: Mapped[int | None] = mapped_column(Integer)
+    ai_body_character_limit: Mapped[int | None] = mapped_column(Integer)
+    ai_max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    ai_max_requests_per_run: Mapped[int | None] = mapped_column(Integer)
+    ai_timeout_seconds: Mapped[float | None] = mapped_column(Float)
+    # Automatic refresh while the desktop is open (ADR 0017): on launch, and every N minutes.
+    refresh_on_launch: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    refresh_interval_minutes: Mapped[int | None] = mapped_column(Integer)
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    updated_at_utc: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

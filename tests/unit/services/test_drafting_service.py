@@ -56,7 +56,12 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     OwnerConsentRepository,
 )
-from mailbrief.storage.tables import ActionTable, DraftGenerationTable, OwnerConsentTable
+from mailbrief.storage.tables import (
+    ActionTable,
+    DraftGenerationTable,
+    MessageTable,
+    OwnerConsentTable,
+)
 from tests.factories import make_message
 from tests.unit.services.drafting_fakes import FakeBodies, FakeDraftingProvider, Gate, answer
 
@@ -341,6 +346,51 @@ async def test_prepare_refuses_parts_that_are_not_available(
         )
     with pytest.raises(DraftingContextError):
         await service(session, FakeDraftingProvider(), None).prepare(public_id, OPTIONS)
+
+
+def excluding(session: AsyncSession, bodies: FakeBodies, rules: tuple[str, ...]) -> DraftingService:
+    return DraftingService(
+        session,
+        FakeDraftingProvider(),
+        BodyService(bodies),
+        clock=Clock(),
+        zone=TORONTO,
+        excluded_senders=rules,
+    )
+
+
+@pytest.mark.parametrize("rules", [("alex@example.com",), ("@example.com",)])
+async def test_an_excluded_sender_s_email_is_never_offered_or_downloaded(
+    session: AsyncSession, bodies: FakeBodies, rules: tuple[str, ...]
+) -> None:
+    public_id = await seed_reply(session)
+    drafting = excluding(session, bodies, rules)
+
+    assert await drafting.available_parts(public_id) == {DraftContextPart.CURRENT_TEXT}
+    with pytest.raises(DraftingContextError, match="no longer available"):
+        await drafting.prepare(public_id, OPTIONS)
+    assert bodies.fetched == []
+
+    other = excluding(session, bodies, ("@elsewhere.example",))
+    assert DraftContextPart.SOURCE_EMAIL in await other.available_parts(public_id)
+
+
+async def test_the_cached_sender_is_checked_again_before_downloading(
+    session: AsyncSession, bodies: FakeBodies
+) -> None:
+    """The draft's snapshot is allowed, but the cached message now names an excluded
+    sender: nothing is downloaded."""
+    public_id = await seed_reply(session)
+    message = await session.scalar(
+        select(MessageTable).where(MessageTable.provider_message_id == "msg-1")
+    )
+    assert message is not None
+    message.sender_address = "blocked@example.org"
+    await session.commit()
+
+    with pytest.raises(DraftingContextError, match="no longer available"):
+        await excluding(session, bodies, ("@example.org",)).prepare(public_id, OPTIONS)
+    assert bodies.fetched == []
 
 
 @pytest.mark.parametrize(("text", "missing"), [("", False), ("text", True)])

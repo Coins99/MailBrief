@@ -8,26 +8,39 @@ import getpass
 import logging
 import threading
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import assert_never
 from zoneinfo import ZoneInfo
 
 from alembic.util import CommandError
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from mailbrief.config import Settings
 from mailbrief.domain.actions import (
     TARGET_REASON_TEXT,
+    Action,
     ActionFilter,
+    ActionProposal,
     ActionStatus,
+    ProposalState,
     SuggestionState,
+    ThreadActivity,
+    ThreadLink,
 )
-from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
+from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, FollowUpKind
 from mailbrief.domain.bodies import BodyStatus, MessageBody, PreparedBody
-from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
-from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncStatus
+from mailbrief.domain.briefs import (
+    AUTO_SEND_LIMIT_MAX,
+    BriefRunResult,
+    BriefStatus,
+    TransmissionPreview,
+)
+from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SyncResult, SyncStatus
 from mailbrief.domain.drafting import (
     DraftContextPart,
     DraftingOptions,
@@ -44,6 +57,8 @@ from mailbrief.domain.drafts import (
     placeholders,
     still_to_fill,
 )
+from mailbrief.domain.messages import ProviderKind, RankReason
+from mailbrief.domain.preferences import OwnerPreferences, sender_excluded
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.paths import AppPaths
@@ -53,7 +68,7 @@ from mailbrief.providers.gmail.errors import GmailSetupError
 from mailbrief.providers.gmail.factory import gmail_auth, gmail_provider
 from mailbrief.providers.groq.credentials import GroqKeyStore, parse_api_key
 from mailbrief.providers.groq.factory import groq_provider
-from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PROVIDER_NAME
+from mailbrief.providers.groq.provider import KEY_MISSING_MESSAGE, PRIVACY_NOTICE, PROVIDER_NAME
 from mailbrief.services.actions import (
     COMPLETED_LIST_LIMIT,
     ActionConflictError,
@@ -68,9 +83,18 @@ from mailbrief.services.brief import (
     CONSENT_DISCLOSURE_VERSION,
     BriefService,
     disclosure_lines,
+    needs_review_sentence,
+    permission_preview,
+    permission_sentence,
     provider_display_name,
 )
-from mailbrief.services.calendar import InvalidTimezoneError, local_day_window, resolve_timezone
+from mailbrief.services.calendar import (
+    InvalidTimezoneError,
+    day_window,
+    local_day_window,
+    resolve_timezone,
+)
+from mailbrief.services.consent import NO_CONSENT, auto_send_permission, set_auto_send
 from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
@@ -80,7 +104,29 @@ from mailbrief.services.drafting import (
 )
 from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftNotFoundError, DraftService
-from mailbrief.services.ranking import ShortlistReviewError
+from mailbrief.services.history import (
+    BriefDateError,
+    BriefHistory,
+    check_brief_date,
+    coverage_line,
+    parse_brief_date,
+)
+from mailbrief.services.preferences import (
+    PreferencesService,
+    PreferencesUnavailableError,
+    ai_limits,
+    effective_settings,
+    owner_zone,
+)
+from mailbrief.services.proposals import ProposalNotFoundError, ProposalService
+from mailbrief.services.ranking import (
+    DECLINED_TEXT,
+    OUTSIDE_REPLY_TEXT,
+    ExcludedSenderError,
+    ShortlistReviewError,
+    reason_text,
+)
+from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -94,8 +140,23 @@ from mailbrief.text.prepare import clean_generated_text
 
 _AI_COMMANDS = frozenset({"brief", "ai-key", "ai-consent"})
 # Commands whose setup errors are shown as they are: static, actionable messages.
-_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts"}
+_OWN_MESSAGE_COMMANDS = _AI_COMMANDS | {"actions", "drafts", "preferences", "briefs"}
+_CONNECT_FIRST = "Connect Gmail first."
+_NO_BRIEF = "No saved brief for that date."
+_SEVERAL_BRIEFS = "Several accounts have a brief for that date; pass --account."
+_TIMEZONE_HELP = "IANA time zone; defaults to your saved preference, else the system time zone."
+_LIMIT_LABELS = {
+    "ai_batch_size": "Messages per AI request",
+    "ai_body_character_limit": "Body characters sent",
+    "ai_max_output_tokens": "Output tokens",
+    "ai_max_requests_per_run": "Requests per run",
+    "ai_timeout_seconds": "Timeout (seconds)",
+}
 _ACTION_REFUSED = "That suggestion or action was not found or cannot change now."
+_PROPOSAL_DECIDED = "That proposal was already applied or dismissed."
+_PROPOSAL_ACTIONS = frozenset({"proposals", "apply-proposal", "dismiss-proposal"})
+# Commands that show local times, in --timezone, else the saved zone, else the system's.
+_ZONED_ACTIONS = frozenset({"list", *_PROPOSAL_ACTIONS})
 _DRAFT_NOT_FOUND = "That draft was not found."
 _FILE_EXISTS = "That file already exists; nothing was written. Choose another --out path."
 _SETUP_UNAVAILABLE = (
@@ -132,6 +193,7 @@ _AI_ERROR_MESSAGES = {
     ),
     "DRAFT_CHANGED": "The draft changed before Groq's text could be used; nothing was lost.",
     "ANALYSIS_FAILED": "No message could be analyzed.",
+    "CARRIED_BODY_FAILED": "A message in today's brief couldn't be read.",
 }
 _DRAFTING_PARTS = {
     "use_email": DraftContextPart.SOURCE_EMAIL,
@@ -154,6 +216,49 @@ def _load_settings() -> Settings:
         )
         listed = ", ".join(names) or "MAILBRIEF_* settings"
         raise SettingsError(f"Invalid setting: {listed}. See docs/ai-analysis.md.") from None
+
+
+async def _preferences(path: Path) -> OwnerPreferences:
+    """The owner's saved preferences; a missing database gives the defaults without
+    creating it. Raises PreferencesUnavailableError when they can't be read."""
+    if not await asyncio.to_thread(path.exists):
+        return OwnerPreferences.defaults()
+    await asyncio.to_thread(upgrade_database, path)
+    database = Database.from_path(path)
+    try:
+        async with database.session() as session:
+            return await PreferencesService(session).get()
+    finally:
+        await database.dispose()
+
+
+@dataclass(frozen=True, slots=True)
+class _Owner:
+    """What a command needs before it builds any provider."""
+
+    path: Path
+    preferences: OwnerPreferences
+    settings: Settings
+    zone: ZoneInfo
+
+
+async def _owner(database_path: Path | None, timezone: str | None) -> _Owner:
+    """Settings, then the owner's preferences and zone, before any provider is built.
+
+    Invalid settings or an unknown --timezone fail before the database is touched. Saved
+    AI limits apply where no MAILBRIEF_* variable is set, and --timezone wins over the
+    saved zone, which wins over the system time zone.
+    """
+    settings = _load_settings()
+    explicit = resolve_timezone(timezone) if timezone and timezone.strip() else None
+    path = database_path or AppPaths.from_qt().database_path
+    preferences = await _preferences(path)
+    return _Owner(
+        path=path,
+        preferences=preferences,
+        settings=effective_settings(settings, preferences),
+        zone=explicit or owner_zone(preferences),
+    )
 
 
 async def run(command: str, *, silent_only: bool) -> int:
@@ -179,11 +284,12 @@ async def sync(
     show_metadata: bool,
 ) -> int:
     """Persist daily metadata and report coverage without printing mail by default."""
-    tz = resolve_timezone(timezone)
+    owner = await _owner(database_path, timezone)
+    rules = owner.preferences.excluded_senders
     now = datetime.now(UTC)
-    window = local_day_window(now, tz)
-    path = database_path or AppPaths.from_qt().database_path
-    async with gmail_provider(_load_settings(), silent_only=silent_only) as provider:
+    window = local_day_window(now, owner.zone)
+    path = owner.path
+    async with gmail_provider(owner.settings, silent_only=silent_only) as provider:
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
         database = Database.from_path(path)
@@ -191,11 +297,21 @@ async def sync(
             async with database.session() as session:
                 accounts = AccountRepository(session)
                 messages = MessageRepository(session)
+                threads = ThreadService(session, provider)
                 application = ApplicationService(
-                    provider, messages, SyncRunRepository(session), accounts
+                    provider,
+                    messages,
+                    SyncRunRepository(session),
+                    accounts,
+                    threads=threads,
                 )
                 result, shortlist = await application.prepare_daily_shortlist(
-                    tz_key=tz.key, now_utc=now, include_ids=include_ids, exclude_ids=exclude_ids
+                    tz_key=owner.zone.key,
+                    now_utc=now,
+                    include_ids=include_ids,
+                    exclude_ids=exclude_ids,
+                    shortlist_limit=owner.preferences.shortlist_limit,
+                    excluded_senders=rules,
                 )
                 identity = await provider.current_account()
                 assert identity is not None
@@ -213,6 +329,7 @@ async def sync(
                     f"selected: {len(shortlist)}"
                 )
                 print(f"Last complete sync (UTC): {account.last_sync_at_utc or 'never'}")
+                _print_threads(result)
                 print("Metadata only: no full bodies, attachments, AI calls, or mailbox changes.")
                 if result.error_code:
                     print(
@@ -224,12 +341,43 @@ async def sync(
                         account.id, window.start_utc, window.end_utc, inbox_only=True
                     )
                     for row in rows:
-                        marker = "selected" if row.provider_message_id in selected else "omitted"
+                        marker = (
+                            "excluded"
+                            if sender_excluded(row.sender_address, rules)
+                            else "selected"
+                            if row.provider_message_id in selected
+                            else "omitted"
+                        )
                         print(
                             f"{row.provider_message_id} [{marker}] score={row.rank_score} "
                             f"{row.sender_address}: {row.subject}"
                         )
+                        reasons = ", ".join(_reason_words(value) for value in row.rank_reasons_json)
+                        if reasons:
+                            print(f"  reasons: {reasons}")
+                        if row.review_declined_at_utc is not None:
+                            print(f"  {DECLINED_TEXT}")
                         print(f"  {row.web_link}")
+                    # Replies in tracked threads that today's Inbox sync can't see (ADR 0016).
+                    # Excluded senders never appear, like in the review.
+                    for reply in await threads.outside_replies(
+                        account,
+                        window,
+                        excluded_senders=rules,
+                        read_threads=result.threads_read,
+                    ):
+                        key = reply.provider_message_id
+                        stored = await messages.get_by_provider_message_id(account.id, key)
+                        score = None if stored is None else stored.rank_score
+                        marker = "selected" if key in selected else "omitted"
+                        print(
+                            f"{key} [{marker}] score={score} {reply.sender.address}: "
+                            f"{reply.subject}"
+                        )
+                        print(f"  {OUTSIDE_REPLY_TEXT}")
+                        if stored is not None and stored.review_declined_at_utc is not None:
+                            print(f"  {DECLINED_TEXT}")
+                        print(f"  {reply.web_link}")
                 return 0 if result.status is SyncStatus.COMPLETE else 4
         finally:
             await database.dispose()
@@ -262,10 +410,9 @@ async def bodies(
     show_text: bool,
 ) -> int:
     """Sync today's metadata, then read and prepare the shortlist in memory only."""
-    settings = _load_settings()
-    tz = resolve_timezone(timezone)
+    owner = await _owner(database_path, timezone)
+    settings, tz, path = owner.settings, owner.zone, owner.path
     now = datetime.now(UTC)
-    path = database_path or AppPaths.from_qt().database_path
     async with gmail_provider(settings, silent_only=silent_only) as provider:
         await provider.connect()
         await asyncio.to_thread(upgrade_database, path)
@@ -279,7 +426,12 @@ async def bodies(
                     AccountRepository(session),
                 )
                 result, shortlist = await application.prepare_daily_shortlist(
-                    tz_key=tz.key, now_utc=now, include_ids=include_ids, exclude_ids=exclude_ids
+                    tz_key=tz.key,
+                    now_utc=now,
+                    include_ids=include_ids,
+                    exclude_ids=exclude_ids,
+                    shortlist_limit=owner.preferences.shortlist_limit,
+                    excluded_senders=owner.preferences.excluded_senders,
                 )
         finally:
             await database.dispose()
@@ -321,14 +473,100 @@ def _granted(when: datetime | None) -> str:
     return f"granted {when:%Y-%m-%d %H:%M} UTC" if when is not None else "not granted"
 
 
-async def ai_consent(action: str, *, database_path: Path | None) -> int:
-    """Show or revoke recorded Groq consent: each account's for briefs, and the owner's for
-    AI drafting. Needs no Gmail connection."""
+async def _stored_account_email(*, required: bool) -> str | None:
+    """The connected Gmail account's address, read from the stored credential without
+    connecting; None when nothing is stored.
+
+    A vault that can't be read raises when the address is ``required``, and otherwise counts
+    as no account.
+    """
+    try:
+        credential = await asyncio.to_thread(lambda: GmailCredentialStore().load())
+    except ConfigurationError:
+        if required:
+            raise
+        return None
+    return None if credential is None else credential.email_address
+
+
+def _permission_text(limit: int, granted: datetime | None) -> str:
+    """The automatic-analysis permission in a few words, for ai-consent status."""
+    if limit == 0 or granted is None:
+        return "automatic analysis off"
+    noun = "message" if limit == 1 else "messages"
+    return f"automatic analysis up to {limit} {noun} per run since {granted:%Y-%m-%d %H:%M} UTC"
+
+
+async def _auto_send(session: AsyncSession, limit: int, *, assume_yes: bool) -> int:
+    """Give, change or withdraw the permission for automatic runs to send up to ``limit``
+    messages without asking (ADR 0017).
+
+    The permission belongs to the connected Gmail account, read from the stored credential
+    without connecting. Turning it off (0) always works, for every account, without asking
+    and even with no connection or consent. Otherwise it needs a stored credential and that
+    account's active consent (ConfigurationError, exit 3); the disclosure and the permission
+    sentence are shown, then a typed "yes" is asked for unless ``--yes``; declining changes
+    nothing (exit 6).
+    """
+    if limit == 0:
+        await set_auto_send(
+            session,
+            0,
+            await _stored_account_email(required=False),
+            provider=PROVIDER_NAME,
+            version=CONSENT_DISCLOSURE_VERSION,
+        )
+        print("Automatic analysis is off. Every run asks you first.")
+        return 0
+    email = await _stored_account_email(required=True)
+    if email is None:
+        raise ConfigurationError(_CONNECT_FIRST)
+    permission = await auto_send_permission(
+        session, email, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+    )
+    if permission is None:
+        raise ConfigurationError(NO_CONSENT)
+    settings = effective_settings(_load_settings(), await PreferencesService(session).get())
+    preview = permission_preview(
+        limit,
+        provider_name=PROVIDER_NAME,
+        model_name=(settings.groq_model or "").strip() or "the model you choose",
+        body_character_limit=settings.ai_body_character_limit,
+        privacy_notice=PRIVACY_NOTICE,
+    )
+    for line in disclosure_lines(preview):
+        print(line)
+    print(permission_sentence(limit, permission.account_email, PROVIDER_NAME))
+    if not assume_yes and await _ask('Type "yes" to allow this: ') != "yes":
+        print("Nothing was changed.")
+        return 6
+    await set_auto_send(
+        session, limit, email, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+    )
+    noun = "message" if limit == 1 else "messages"
+    print(f"Saved. Automatic runs may now send up to {limit} {noun} without asking.")
+    print("Turn it off with: mailbrief-gmail-diagnostic ai-consent auto-send 0")
+    return 0
+
+
+async def ai_consent(
+    action: str,
+    *,
+    database_path: Path | None,
+    limit: int | None = None,
+    assume_yes: bool = False,
+) -> int:
+    """Show or revoke recorded Groq consent, each account's for briefs and the owner's for AI
+    drafting, or set how many messages automatic runs may send without asking (auto-send).
+    Needs no Gmail connection."""
     path = database_path or AppPaths.from_qt().database_path
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
     try:
         async with database.session() as session:
+            if action == "auto-send":
+                assert limit is not None
+                return await _auto_send(session, limit, assume_yes=assume_yes)
             accounts = await AccountRepository(session).list_all()
             consents = ConsentRepository(session)
             owner = OwnerConsentRepository(session)
@@ -340,12 +578,18 @@ async def ai_consent(action: str, *, database_path: Path | None) -> int:
                         account.id, PROVIDER_NAME, CONSENT_DISCLOSURE_VERSION
                     )
                     when = None if active is None else active.granted_at_utc
-                    print(f"Account {account.id}: Groq consent {_granted(when)}")
+                    line = f"Account {account.id}: Groq consent {_granted(when)}"
+                    if active is not None:
+                        line += "; " + _permission_text(
+                            active.auto_send_limit, active.auto_send_granted_at_utc
+                        )
+                    print(line)
                 drafting = await owner.get_active(
                     PROVIDER_NAME, DRAFTING_SCOPE, DRAFTING_DISCLOSURE_VERSION
                 )
                 when = None if drafting is None else drafting.granted_at_utc
                 print(f"AI drafting: Groq consent {_granted(when)}")
+                print(f"Automatic analysis: {await _connected_permission_text(session)}")
                 return 0
             now = datetime.now(UTC)
             briefs = 0
@@ -459,15 +703,19 @@ async def drafts_generate(
     *,
     database_path: Path | None,
     parts: frozenset[DraftContextPart],
-    tone: str,
-    length: str,
+    tone: str | None,
+    length: str | None,
     instructions: str,
     assume_yes: bool,
     silent_only: bool,
 ) -> int:
-    """Write a new version of a draft with Groq after the owner approves what is sent."""
-    settings = _load_settings()
-    path = database_path or AppPaths.from_qt().database_path
+    """Write a new version of a draft with Groq after the owner approves what is sent.
+
+    Tone and length default to the saved preferences, and an excluded sender's email is
+    never offered.
+    """
+    owner = await _owner(database_path, None)
+    settings, path, preferences = owner.settings, owner.path, owner.preferences
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
     bodies = (
@@ -480,11 +728,17 @@ async def drafts_generate(
     )
     try:
         async with groq_provider(settings) as ai, database.session() as session:
-            service = DraftingService(session, ai, bodies, zone=resolve_timezone(None))
+            service = DraftingService(
+                session,
+                ai,
+                bodies,
+                zone=owner.zone,
+                excluded_senders=preferences.excluded_senders,
+            )
             options = DraftingOptions(
                 parts=parts,
-                tone=DraftTone(tone),
-                length=DraftLength(length),
+                tone=preferences.draft_tone if tone is None else DraftTone(tone),
+                length=preferences.draft_length if length is None else DraftLength(length),
                 instructions=instructions,
             )
             plan = await service.prepare(public_id, options)
@@ -530,18 +784,56 @@ def _count(value: int | None) -> str:
     return "?" if value is None else str(value)
 
 
+class _NeverAsks:
+    """The consent gate of an automatic run, which has nobody to ask: it is never called, and
+    if it were, nothing would be sent."""
+
+    async def confirm(self, preview: TransmissionPreview) -> bool:
+        return False
+
+
+def _ready_line(ready: int) -> str:
+    """What an automatic run without permission found, in the CLI's own words."""
+    if ready == 0:
+        return "Nothing new to review."
+    if ready == 1:
+        return "1 new message is ready to review; automatic analysis is off."
+    return f"{ready} new messages are ready to review; automatic analysis is off."
+
+
+def _review_line(result: BriefRunResult) -> str:
+    """What an automatic run that saved nothing found: the window's sentence when it couldn't
+    refresh a carried message, otherwise how many new messages are ready."""
+    if result.needs_review:
+        return needs_review_sentence(result.unrefreshed, result.ready)
+    return _ready_line(result.ready)
+
+
+def _refresh_failed(result: BriefRunResult) -> bool:
+    """Whether an automatic run that saved nothing failed to read or analyze a carried
+    message, rather than only checking or stopping over its cap."""
+    coverage = result.coverage
+    return result.error_code is not None or (coverage is not None and coverage.failed > 0)
+
+
 def _outcome(result: BriefRunResult) -> str:
-    if result.status is BriefStatus.SAVED:
-        return "Saved. Bodies were not stored."
-    if result.status is BriefStatus.CONSENT_DECLINED:
-        return "Nothing was sent. No brief saved."
-    if result.status is BriefStatus.ANALYSIS_FAILED:
-        return _AI_ERROR_MESSAGES.get(
-            result.error_code or "", _AI_ERROR_MESSAGES["ANALYSIS_FAILED"]
-        )
-    if result.status is BriefStatus.SYNC_FAILED:
-        return f"Sync failed ({result.error_code or 'unknown'}). Nothing was sent."
-    return "Cancelled. No brief saved."
+    match result.status:
+        case BriefStatus.SAVED:
+            return "Saved. Bodies were not stored."
+        case BriefStatus.READY_FOR_REVIEW:
+            return _review_line(result)
+        case BriefStatus.CONSENT_DECLINED:
+            return "Nothing was sent. No brief saved."
+        case BriefStatus.ANALYSIS_FAILED:
+            return _AI_ERROR_MESSAGES.get(
+                result.error_code or "", _AI_ERROR_MESSAGES["ANALYSIS_FAILED"]
+            )
+        case BriefStatus.SYNC_FAILED:
+            return f"Sync failed ({result.error_code or 'unknown'}). Nothing was sent."
+        case BriefStatus.CANCELLED:
+            return "Cancelled. No brief saved."
+        case _:
+            assert_never(result.status)
 
 
 def _ai_line(result: BriefRunResult, *, model: str) -> str:
@@ -568,19 +860,22 @@ def _print_result(result: BriefRunResult, *, model: str) -> None:
     if coverage is not None:
         print(
             f"Coverage: shortlisted {coverage.shortlisted}, analyzed {coverage.analyzed}, "
-            f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}; "
-            f"sync complete: {'yes' if coverage.sync_complete else 'no'}"
+            f"reused {coverage.reused}, failed {coverage.failed}, skipped {coverage.skipped}"
+            + (f", deferred {coverage.deferred}" if coverage.deferred else "")
+            + f"; sync complete: {'yes' if coverage.sync_complete else 'no'}"
         )
     if coverage is not None or result.ai_calls > 0:
         print(_ai_line(result, model=model))
     print(_outcome(result))
-    # A partial brief still explains why the new messages failed (e.g. a wrong API key).
+    # A partial brief still explains why the new messages failed (e.g. a wrong API key), and
+    # so does an automatic run that wrote no brief because a carried message failed.
     partial_reason = _AI_ERROR_MESSAGES.get(result.error_code or "")
-    if result.status is BriefStatus.SAVED and partial_reason is not None:
+    explained = (BriefStatus.SAVED, BriefStatus.READY_FOR_REVIEW)
+    if result.status in explained and partial_reason is not None:
         print(partial_reason)
     if result.provider_detail:
         print(f"{provider_display_name(PROVIDER_NAME)} detail: {result.provider_detail}")
-    if result.status is BriefStatus.ANALYSIS_FAILED:
+    if result.status in (BriefStatus.ANALYSIS_FAILED, BriefStatus.READY_FOR_REVIEW):
         # Its own line: some messages end in a command, which must not run into this note.
         print("Your last saved brief for today is unchanged.")
     if _sync_incomplete(result):
@@ -650,12 +945,27 @@ def _print_suggestions(item: DigestItem, zone: ZoneInfo) -> None:
             print(f"     - {step}")
 
 
-def _print_items(digest: DailyDigest) -> None:
-    """Derived brief content, shown only on request; never evidence or bodies."""
+def _print_items(
+    digest: DailyDigest,
+    links: Mapping[str, tuple[ThreadLink, ...]] | None = None,
+    proposals: Mapping[str, tuple[ActionProposal, ...]] | None = None,
+) -> None:
+    """Derived brief content, shown only on request; never evidence or bodies.
+
+    ``links`` names the open actions that continue each item's thread; an action the email
+    is already a source of isn't repeated. ``proposals`` names each item's pending follow-up
+    proposals, without their quotes.
+    """
     zone = ZoneInfo(digest.timezone_name)
     for item in digest.items:
         print(f"{item.position + 1}. [{item.section.value}] {item.sender.address}: {item.subject}")
         print(f"   {item.summary}")
+        for link in (links or {}).get(item.message_key, ()):
+            if not link.is_source:
+                print(f"   Continues: {_terminal_safe(link.title)} ({link.public_id})")
+        for proposal in (proposals or {}).get(item.message_key, ()):
+            title = _terminal_safe(proposal.action_title)
+            print(f"   Proposes: {_proposal_kind(proposal, zone)} for {title} (P{proposal.id})")
         if item.action_text:
             print(f"   Action: {item.action_text}")
         deadline = _deadline(item, zone)
@@ -666,16 +976,25 @@ def _print_items(digest: DailyDigest) -> None:
 
 
 def _brief_exit_code(result: BriefRunResult) -> int:
-    """0 only for a complete brief, or an empty one after a complete sync."""
-    if result.status is BriefStatus.SAVED:
-        complete = (DigestStatus.COMPLETE, DigestStatus.EMPTY)
-        finished = result.digest is not None and result.digest.status in complete
-        return 0 if finished and not _sync_incomplete(result) else 4
-    if result.status is BriefStatus.CONSENT_DECLINED:
-        return 6
-    if result.status is BriefStatus.CANCELLED:
-        return 130
-    return 4
+    """0 only for a complete brief, an empty one after a complete sync, or an automatic run
+    that only checked or stopped over its cap."""
+    match result.status:
+        case BriefStatus.SAVED:
+            complete = (DigestStatus.COMPLETE, DigestStatus.EMPTY)
+            finished = result.digest is not None and result.digest.status in complete
+            return 0 if finished and not _sync_incomplete(result) else 4
+        case BriefStatus.READY_FOR_REVIEW:
+            return 4 if _refresh_failed(result) else 0
+        case BriefStatus.CONSENT_DECLINED:
+            return 6
+        case BriefStatus.CANCELLED:
+            return 130
+        case BriefStatus.SYNC_FAILED:
+            return 4
+        case BriefStatus.ANALYSIS_FAILED:
+            return 4
+        case _:
+            assert_never(result.status)
 
 
 async def brief(
@@ -687,13 +1006,30 @@ async def brief(
     exclude_ids: tuple[str, ...],
     assume_yes: bool,
     show: bool,
+    date_text: str | None = None,
+    automatic: bool = False,
 ) -> int:
-    """Sync, ask consent, analyze the shortlist with Groq and save today's brief."""
-    settings = _load_settings()
-    tz = resolve_timezone(timezone)
+    """Sync, ask consent, analyze the shortlist with Groq and save the day's brief.
+
+    The day is today, or ``date_text``: today or one of the previous seven days, checked
+    before Gmail is contacted.
+
+    ``automatic`` is exactly what the desktop's automatic refresh does (ADR 0017), with no
+    prompt: it brings the day's Inbox up to date and follows tracked threads, then sends
+    only what the permission on the active consent allows (see ai-consent auto-send), and
+    with none only counts the messages ready to review. When it can't refresh a carried
+    message (over the permission, unreadable, or failed in analysis), it saves no brief and
+    says the day's brief needs a review. It takes no date, choices or --yes, and it never
+    opens a browser: an automatic run signs in silently or fails with the sign-in message.
+    """
+    silent_only = silent_only or automatic
+    day = None if date_text is None else parse_brief_date(date_text)
+    owner = await _owner(database_path, timezone)
+    settings, tz, path = owner.settings, owner.zone, owner.path
     now = datetime.now(UTC)
-    window = local_day_window(now, tz)
-    path = database_path or AppPaths.from_qt().database_path
+    today = local_day_window(now, tz).local_date
+    check_brief_date(day or today, today)
+    window = day_window(day or today, tz)
     async with (
         gmail_provider(settings, silent_only=silent_only) as provider,
         groq_provider(settings) as ai,
@@ -710,24 +1046,184 @@ async def brief(
                         MessageRepository(session),
                         SyncRunRepository(session),
                         AccountRepository(session),
+                        threads=ThreadService(session, provider),
                     ),
                     bodies=BodyService(provider, limit=settings.ai_body_character_limit),
                     analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),
                     digests=DigestService(session),
-                    consent_gate=CliConsentGate(assume_yes=assume_yes),
+                    consent_gate=(
+                        _NeverAsks() if automatic else CliConsentGate(assume_yes=assume_yes)
+                    ),
                     clock=lambda: now,
                 )
                 result = await service.generate(
-                    tz_key=tz.key, include_ids=include_ids, exclude_ids=exclude_ids
+                    tz_key=tz.key,
+                    include_ids=include_ids,
+                    exclude_ids=exclude_ids,
+                    shortlist_limit=owner.preferences.shortlist_limit,
+                    excluded_senders=owner.preferences.excluded_senders,
+                    local_date=window.local_date,
+                    automatic=automatic,
+                )
+                links, proposals = (
+                    await _brief_extras(session, result.digest)
+                    if show and result.digest is not None
+                    else ({}, {})
                 )
         finally:
             await database.dispose()
         model = ai.model_name
     print(f"Inbox date: {window.local_date} ({window.timezone_name})")
+    if result.status is BriefStatus.READY_FOR_REVIEW and not _refresh_failed(result):
+        # It only checked, or stopped over its cap: one line says what it found. A run that
+        # couldn't read or analyze a carried message is printed like any other result below.
+        _print_threads(result.sync)
+        print(_review_line(result))
+        return _brief_exit_code(result)
     _print_result(result, model=model)
+    _print_threads(result.sync)
+    created = result.proposals_created
+    if created:
+        print(f"Proposed {created} {'update' if created == 1 else 'updates'} to your actions.")
+    if result.deferred:
+        print(f"{result.deferred} deferred to your next review.")
     if show and result.digest is not None:
-        _print_items(result.digest)
+        print(coverage_line(result.digest))
+        _print_items(result.digest, links, proposals)
     return _brief_exit_code(result)
+
+
+async def _brief_extras(
+    session: AsyncSession, digest: DailyDigest
+) -> tuple[dict[str, tuple[ThreadLink, ...]], dict[str, tuple[ActionProposal, ...]]]:
+    """The open actions that continue each item's thread, and each item's pending
+    proposals, read from local data."""
+    keys = [item.message_key for item in digest.items]
+    links = await ActionService(session).thread_links(digest.account_id, keys)
+    proposals = await ProposalService(session).pending_for_messages(digest.account_id, keys)
+    return links, proposals
+
+
+async def _open_existing(path: Path) -> Database | None:
+    """The migrated database, or None when it doesn't exist; it is never created here."""
+    if not await asyncio.to_thread(path.exists):
+        return None
+    await asyncio.to_thread(upgrade_database, path)
+    return Database.from_path(path)
+
+
+async def briefs_list(
+    *, database_path: Path | None, limit: int, timezone: str | None = None
+) -> int:
+    """Saved briefs, newest day first, then each Gmail account's missed days; offline.
+
+    Missed days are the previous seven days without a brief, in --timezone, else the saved
+    time zone, else the system's.
+    """
+    explicit = resolve_timezone(timezone) if timezone and timezone.strip() else None
+    path = database_path or AppPaths.from_qt().database_path
+    database = await _open_existing(path)
+    if database is None:
+        print("No saved briefs.")
+        return 0
+    try:
+        async with database.session() as session:
+            if explicit is not None:
+                zone = explicit
+            else:
+                try:
+                    zone = owner_zone(await PreferencesService(session).get())
+                except PreferencesUnavailableError:
+                    await session.rollback()
+                    print("Saved preferences could not be read; using the system time zone.")
+                    zone = resolve_timezone(None)
+            today = datetime.now(UTC).astimezone(zone).date()
+            history = BriefHistory(session)
+            summaries = await history.list_saved(limit)
+            accounts = [
+                account.email_address
+                for account in await AccountRepository(session).list_all()
+                if account.provider == ProviderKind.GMAIL.value
+            ]
+            missed = {email: await history.missed_days(email, today) for email in accounts}
+    finally:
+        await database.dispose()
+    if not summaries:
+        print("No saved briefs.")
+    for summary in summaries:
+        noun = "item" if summary.item_count == 1 else "items"
+        print(
+            f"{summary.local_date} {summary.account_email}: {summary.status.value}; "
+            f"{summary.item_count} {noun}"
+        )
+        print(f"  {coverage_line(summary)}")
+    for email, days in missed.items():
+        listed = ", ".join(day.isoformat() for day in days) or "none"
+        print(f"Missed days for {email} (last 7 days): {listed}")
+    return 0
+
+
+async def briefs_show(date_text: str, *, account: str | None, database_path: Path | None) -> int:
+    """Print one saved brief as brief --show does, with its coverage line; offline."""
+    day = parse_brief_date(date_text)
+    path = database_path or AppPaths.from_qt().database_path
+    database = await _open_existing(path)
+    if database is None:
+        print(_NO_BRIEF)
+        return 3
+    try:
+        async with database.session() as session:
+            history = BriefHistory(session)
+            if account is None:
+                accounts = await history.accounts_for(day)
+                if len(accounts) > 1:
+                    print(_SEVERAL_BRIEFS)
+                    return 3
+                account = accounts[0] if accounts else None
+            digest = None if account is None else await history.get(account, day)
+            links, proposals = ({}, {}) if digest is None else await _brief_extras(session, digest)
+    finally:
+        await database.dispose()
+    if digest is None:
+        print(_NO_BRIEF)
+        return 3
+    print(
+        f"Brief for {digest.local_date} ({digest.account_id}): {digest.status.value}; "
+        f"items: {len(digest.items)}"
+    )
+    print(coverage_line(digest))
+    _print_items(digest, links, proposals)
+    return 0
+
+
+def _print_threads(result: SyncResult) -> None:
+    """The thread check's counts, when any threads were tracked or the check stopped."""
+    if not (result.threads_tracked or result.threads_stopped_code):
+        return
+    saved = result.thread_messages
+    line = (
+        f"Tracked threads: {result.threads_checked} checked, {result.threads_failed} failed, "
+        f"{saved} {'message' if saved == 1 else 'messages'} saved"
+    )
+    if result.threads_stopped_code:
+        line += f"; stopped: {result.threads_stopped_code}"
+    print(line)
+
+
+def _thread_text(thread: ThreadActivity | None, zone: ZoneInfo) -> str:
+    """Later messages in an action's threads, in the owner's zone; empty when none."""
+    if thread is None:
+        return ""
+    text = ""
+    if thread.latest_at_utc is not None and thread.latest_sender is not None:
+        latest = thread.latest_at_utc.astimezone(zone)
+        text += (
+            f"; thread: {thread.new_messages} new, latest {latest:%Y-%m-%d %H:%M} from "
+            f"{_terminal_safe(thread.latest_sender)}"
+        )
+    if thread.owner_replied_at_utc is not None:
+        text += f"; you replied {thread.owner_replied_at_utc.astimezone(zone).date().isoformat()}"
+    return text
 
 
 async def actions(
@@ -737,15 +1233,48 @@ async def actions(
     view: str,
     timezone: str | None,
     suggestion_id: int | None,
+    public_id: str | None = None,
+    into: str | None = None,
+    proposal_id: int | None = None,
 ) -> int:
-    """List actions, or accept or dismiss a stored suggestion; needs no Gmail or AI access."""
-    zone = resolve_timezone(timezone)
+    """List actions, accept or dismiss a stored suggestion, mark an action's threads seen,
+    or list, apply or dismiss follow-up proposals; needs no Gmail or AI access.
+
+    ``into`` accepts the suggestion into that existing action instead of creating one. Lists
+    show dates in --timezone, else the saved time zone. They only display local data, so
+    unreadable preferences fall back to the system time zone.
+    """
+    zone = resolve_timezone(timezone) if timezone and timezone.strip() else None
     path = database_path or AppPaths.from_qt().database_path
     await asyncio.to_thread(upgrade_database, path)
     database = Database.from_path(path)
     try:
         async with database.session() as session:
+            if zone is None and action in _ZONED_ACTIONS:
+                try:
+                    zone = owner_zone(await PreferencesService(session).get())
+                except PreferencesUnavailableError:
+                    await session.rollback()
+                    print("Saved preferences could not be read; showing the system time zone.")
+            if action in _PROPOSAL_ACTIONS:
+                return await _proposals_command(
+                    session, action, proposal_id, zone or resolve_timezone(None)
+                )
             service = ActionService(session)
+            if action == "accept" and into is not None:
+                assert suggestion_id is not None
+                current = await service.get(into)
+                try:
+                    added = await service.accept_into(suggestion_id, into, current.revision)
+                except ActionConflictError as exc:
+                    print(str(exc))  # Static, such as a suggestion owned by another action.
+                    return 3
+                title = _terminal_safe(added.action.title)
+                if not added.changed:
+                    print(f"Already added to: {title}.")
+                    return 0
+                print(f"Added to: {title} ({added.action.public_id})")
+                return 0
             if action == "accept":
                 assert suggestion_id is not None
                 accepted = await service.accept(suggestion_id)
@@ -755,6 +1284,13 @@ async def actions(
                 assert suggestion_id is not None
                 await service.dismiss(suggestion_id)
                 print("Dismissed.")
+                return 0
+            if action == "seen":
+                assert public_id is not None
+                current = await service.get(public_id)
+                marked = await service.mark_thread_seen(public_id, current.revision)
+                unchanged = marked.revision == current.revision
+                print("Nothing new in its threads." if unchanged else "Marked seen.")
                 return 0
             listed = await service.list_actions(ActionFilter(view))
             total = (
@@ -767,6 +1303,7 @@ async def actions(
     if not listed:
         print("No actions.")
         return 0
+    zone = zone or resolve_timezone(None)
     now = datetime.now(UTC)
     today = now.astimezone(zone).date()
     for item in listed:
@@ -787,9 +1324,109 @@ async def actions(
             line += "; carried over"
         if item.status is ActionStatus.OPEN and item.is_overdue(now):
             line += "; overdue"
+        line += _thread_text(item.thread, zone)
+        if item.proposals:
+            count = len(item.proposals)
+            line += f"; {count} {'proposal' if count == 1 else 'proposals'}"
         print(line)
     if total > len(listed):
         print(f"Showing the newest {len(listed)} of {total} completed actions.")
+    return 0
+
+
+def _reason_words(value: str) -> str:
+    """A stored rank reason in words; one this version doesn't know is shown as stored."""
+    try:
+        return reason_text(RankReason(value))
+    except ValueError:
+        return value.replace("_", " ")
+
+
+def _proposal_id(text: str) -> int:
+    """A proposal ID as actions proposals shows it (P3), or its number alone."""
+    value = text.strip().removeprefix("P").removeprefix("p")
+    if not value.isdigit():
+        raise argparse.ArgumentTypeError("use the ID shown by actions proposals, such as P3")
+    return int(value)
+
+
+def _proposal_kind(proposal: ActionProposal, zone: ZoneInfo) -> str:
+    """What a proposal would do, in words; a new deadline is shown in ``zone``."""
+    if proposal.kind is not FollowUpKind.NEW_DEADLINE:
+        return proposal.kind.value
+    deadline = _format_deadline(
+        proposal.deadline_precision,
+        proposal.deadline_date,
+        proposal.deadline_at_utc,
+        proposal.deadline_text,
+        zone,
+    )
+    return _terminal_safe(f"new deadline {deadline}")
+
+
+def _proposal_line(proposal: ActionProposal, zone: ZoneInfo) -> str:
+    """One pending proposal on one line: its ID, action, kind, quote and email."""
+    received = proposal.received_at_utc.astimezone(zone).date().isoformat()
+    parts = (
+        f"P{proposal.id}",
+        f"{proposal.action_public_id} {proposal.action_title}",
+        _proposal_kind(proposal, zone),
+        f'"{" ".join(proposal.evidence.split())}"',
+        f"{proposal.sender_address}, {received}, {' '.join(proposal.subject.split())}",
+    )
+    return _terminal_safe(" · ".join(parts))
+
+
+def _applied_line(proposal: ActionProposal, before: Action, after: Action, zone: ZoneInfo) -> str:
+    """What applying a proposal changed."""
+    name = f"{after.title} ({after.public_id})"
+    if proposal.kind is not FollowUpKind.NEW_DEADLINE:
+        line = f"Applied P{proposal.id}: completed {name}; the email says it was {proposal.kind}."
+        return _terminal_safe(line)
+    deadline = _format_deadline(
+        after.deadline_precision,
+        after.deadline_date,
+        after.deadline_at_utc,
+        after.deadline_text,
+        zone,
+    )
+    line = f"Applied P{proposal.id}: {name} now has deadline {deadline}"
+    if before.target_date == before.suggested_target_date:
+        target = "none" if after.target_date is None else after.target_date.isoformat()
+        line += f"; target date {target}."
+    else:
+        line += "; the target date you set is unchanged."
+    return _terminal_safe(line)
+
+
+async def _proposals_command(
+    session: AsyncSession, action: str, proposal_id: int | None, zone: ZoneInfo
+) -> int:
+    """actions proposals, apply-proposal and dismiss-proposal; local data only."""
+    service = ProposalService(session)
+    if action == "proposals":
+        pending = await service.pending()
+        if not pending:
+            print("No pending proposals.")
+        for proposal in pending:
+            print(_proposal_line(proposal, zone))
+        return 0
+    assert proposal_id is not None
+    proposal = await service.get(proposal_id)
+    if proposal.state is not ProposalState.PENDING:
+        print(_PROPOSAL_DECIDED)
+        return 3
+    if action == "dismiss-proposal":
+        await service.dismiss(proposal_id)
+        print(f"Dismissed P{proposal_id}; it won't be proposed again.")
+        return 0
+    before = await ActionService(session).get(proposal.action_public_id)
+    try:
+        after = await service.apply(proposal_id, before.revision)
+    except ActionConflictError as exc:
+        print(str(exc))  # Static, such as an action that is no longer open.
+        return 3
+    print(_applied_line(proposal, before, after, zone))
     return 0
 
 
@@ -843,15 +1480,126 @@ async def drafts(
     return 0
 
 
+def _number(value: float) -> str:
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def _refresh_text(minutes: int | None) -> str:
+    """How often an open desktop refreshes on its own, as the desktop's choices read."""
+    if minutes is None:
+        return "off"
+    hours = minutes // 60
+    return "every hour" if hours == 1 else f"every {hours} hours"
+
+
+async def _automatic_analysis_text(path: Path, *, exists: bool) -> str:
+    """The connected account's automatic-analysis permission, read locally; nothing is
+    created when there is no database."""
+    database = await _open_existing(path) if exists else None
+    if database is None:
+        return await _connected_permission_text(None)
+    try:
+        async with database.session() as session:
+            return await _connected_permission_text(session)
+    finally:
+        await database.dispose()
+
+
+async def _connected_permission_text(session: AsyncSession | None) -> str:
+    """The connected account's automatic-analysis permission, the one a brief reads; the
+    account comes from the stored Gmail credential, without connecting."""
+    email = await _stored_account_email(required=False)
+    if email is None:
+        return "unavailable until you connect Gmail"
+    permission = None
+    if session is not None:
+        permission = await auto_send_permission(
+            session, email, provider=PROVIDER_NAME, version=CONSENT_DISCLOSURE_VERSION
+        )
+    if permission is None:
+        return "unavailable until you give consent (analyze once with Sync and review)"
+    if permission.limit == 0 or permission.granted_at_utc is None:
+        return "off, every run asks you first"
+    noun = "message" if permission.limit == 1 else "messages"
+    return (
+        f"up to {permission.limit} {noun} per run, since "
+        f"{permission.granted_at_utc:%Y-%m-%d %H:%M} UTC"
+    )
+
+
+async def preferences_show(*, database_path: Path | None) -> int:
+    """Print the owner's preferences and where each AI limit comes from; no network.
+
+    Sender rules are the owner's own text and are shown here, to the owner only.
+    """
+    settings = _load_settings()
+    path = database_path or AppPaths.from_qt().database_path
+    exists = await asyncio.to_thread(path.exists)
+    preferences = await _preferences(path)
+    if not exists:
+        print("No database yet: these are the defaults.")
+    elif preferences.updated_at_utc is None:
+        print("Never saved: these are the defaults.")
+    else:
+        print(f"Saved {preferences.updated_at_utc:%Y-%m-%d %H:%M} UTC.")
+    zone = preferences.time_zone or f"system ({owner_zone(preferences).key})"
+    print(f"Time zone: {zone}")
+    print(f"Messages per brief: {preferences.shortlist_limit}")
+    rules = preferences.excluded_senders
+    print(f"Excluded senders: {len(rules) or 'none'}")
+    for rule in rules:
+        print(f"  {rule}")
+    print(
+        f"Drafting defaults: tone {preferences.draft_tone.value}, "
+        f"length {preferences.draft_length.value}"
+    )
+    print(f"Refresh when MailBrief starts: {'yes' if preferences.refresh_on_launch else 'no'}")
+    print(f"Refresh while running: {_refresh_text(preferences.refresh_interval_minutes)}")
+    print(f"Automatic analysis: {await _automatic_analysis_text(path, exists=exists)}")
+    print("AI limits (a MAILBRIEF_AI_* variable wins over a saved value):")
+    for limit in ai_limits(settings, preferences):
+        print(f"  {_LIMIT_LABELS[limit.name]}: {_number(limit.value)} ({limit.source})")
+    return 0
+
+
+def _auto_send_limit(text: str) -> int:
+    """A LIMIT of 0 to 10 messages."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a whole number from 0 to 10") from None
+    if not 0 <= value <= AUTO_SEND_LIMIT_MAX:
+        raise argparse.ArgumentTypeError("use a whole number from 0 to 10")
+    return value
+
+
+def _brief_count(text: str) -> int:
+    """A --limit of 1 to 365 briefs."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a whole number from 1 to 365") from None
+    if not 1 <= value <= 365:
+        raise argparse.ArgumentTypeError("use a whole number from 1 to 365")
+    return value
+
+
 def _add_day_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--silent-only", action="store_true", help="Never open a browser.")
     parser.add_argument("--database", type=Path, help="Optional SQLite path; defaults to app data.")
-    parser.add_argument("--timezone", help="IANA timezone; defaults to the system timezone.")
+    parser.add_argument("--timezone", help=_TIMEZONE_HELP)
     parser.add_argument(
         "--include", action="append", default=[], help="Include a message ID in this shortlist."
     )
     parser.add_argument(
-        "--exclude", action="append", default=[], help="Exclude a message ID from this shortlist."
+        "--exclude",
+        action="append",
+        default=[],
+        help=(
+            "Exclude a message ID from this shortlist. If the automatic selection would have "
+            "picked it, it is remembered as declined and skipped from now on; --include "
+            "selects it again."
+        ),
     )
 
 
@@ -891,11 +1639,28 @@ def main(arguments: Sequence[str] | None = None) -> int:
         help="Send without asking when consent is already recorded; first use still asks.",
     )
     brief_parser.add_argument(
+        "--date",
+        dest="date_text",
+        metavar="YYYY-MM-DD",
+        help="Brief this day instead of today: one of the previous 7 days, never automatic.",
+    )
+    brief_parser.add_argument(
         "--show",
         action="store_true",
         help=(
             "Print the saved items (sender, subject, summary, action, deadline, link) "
             "and their pending or accepted suggestions."
+        ),
+    )
+    brief_parser.add_argument(
+        "--automatic",
+        action="store_true",
+        help=(
+            "Run as the desktop's automatic refresh does, with no prompt: sync today's Inbox "
+            "and follow tracked threads, then analyze only as many messages as your "
+            "permission (ai-consent auto-send) allows, or just count those ready to review. "
+            "Implies --silent-only: it never opens a browser to sign in. "
+            "Not with --date, --include, --exclude or --yes."
         ),
     )
     key_parser = commands.add_parser(
@@ -907,16 +1672,43 @@ def main(arguments: Sequence[str] | None = None) -> int:
         help="set prompts without echoing; status never shows the key; clear is safe to repeat.",
     )
     consent_parser = commands.add_parser(
-        "ai-consent", help="Show or revoke your recorded consent to send email to Groq."
+        "ai-consent",
+        help=(
+            "Show or revoke your recorded consent to send email to Groq, or allow automatic "
+            "runs to send a few messages without asking."
+        ),
     )
     consent_parser.add_argument(
-        "action", choices=("status", "revoke"), help="Show or revoke consent for every account."
+        "action",
+        choices=("status", "revoke", "auto-send"),
+        help=(
+            "status shows consent and the automatic-analysis permission, revoke withdraws "
+            "both for every account, and auto-send LIMIT sets the permission for the "
+            "connected Gmail account."
+        ),
+    )
+    consent_parser.add_argument(
+        "limit",
+        nargs="?",
+        type=_auto_send_limit,
+        help=(
+            "With auto-send: how many messages an automatic run may send without asking, "
+            "0 to 10; 0 turns it off for every account."
+        ),
+    )
+    consent_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="With auto-send: skip the typed yes; the disclosure is still printed.",
     )
     consent_parser.add_argument(
         "--database", type=Path, help="Optional SQLite path; defaults to app data."
     )
     actions_parser = commands.add_parser(
-        "actions", help="List accepted actions, or accept or dismiss a suggestion."
+        "actions",
+        help=(
+            "List accepted actions, accept or dismiss a suggestion, or decide follow-up proposals."
+        ),
     )
     action_commands = actions_parser.add_subparsers(dest="action", required=True)
     list_parser = action_commands.add_parser(
@@ -928,7 +1720,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         default=ActionFilter.OPEN.value,
         help="open (yours), waiting (on others) or completed; default open.",
     )
-    list_parser.add_argument("--timezone", help="IANA timezone; defaults to the system timezone.")
+    list_parser.add_argument("--timezone", help=_TIMEZONE_HELP)
     accept_parser = action_commands.add_parser(
         "accept", help="Accept a pending suggestion shown by brief --show."
     )
@@ -939,7 +1731,42 @@ def main(arguments: Sequence[str] | None = None) -> int:
         decide.add_argument(
             "suggestion_id", type=int, help="The number after # in brief --show output."
         )
-    for subcommand in (list_parser, accept_parser, dismiss_parser):
+    accept_parser.add_argument(
+        "--into",
+        metavar="PUBLIC_ID",
+        help="Add the suggestion's email to this existing action instead of creating one.",
+    )
+    seen_parser = action_commands.add_parser(
+        "seen", help="Mark the later messages in an action's threads as seen."
+    )
+    seen_parser.add_argument("public_id", help="The action ID shown by actions list.")
+    proposals_parser = action_commands.add_parser(
+        "proposals", help="List pending proposals to update your actions from later emails."
+    )
+    apply_proposal_parser = action_commands.add_parser(
+        "apply-proposal", help="Apply a proposal shown by actions proposals."
+    )
+    dismiss_proposal_parser = action_commands.add_parser(
+        "dismiss-proposal", help="Dismiss a proposal; it won't be proposed again."
+    )
+    for decide in (apply_proposal_parser, dismiss_proposal_parser):
+        decide.add_argument(
+            "proposal_id",
+            type=_proposal_id,
+            metavar="ID",
+            help="The ID shown by actions proposals, such as P3.",
+        )
+    for shown in (proposals_parser, apply_proposal_parser):
+        shown.add_argument("--timezone", help=_TIMEZONE_HELP)
+    for subcommand in (
+        list_parser,
+        accept_parser,
+        dismiss_parser,
+        seen_parser,
+        proposals_parser,
+        apply_proposal_parser,
+        dismiss_proposal_parser,
+    ):
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
@@ -976,12 +1803,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--use-text", action="store_true", help="Send the draft's current title and body."
     )
     drafts_generate_parser.add_argument(
-        "--tone", choices=[tone.value for tone in DraftTone], default=DraftTone.NEUTRAL.value
+        "--tone",
+        choices=[tone.value for tone in DraftTone],
+        help="Defaults to your saved drafting tone, else neutral.",
     )
     drafts_generate_parser.add_argument(
         "--length",
         choices=[length.value for length in DraftLength],
-        default=DraftLength.MEDIUM.value,
+        help="Defaults to your saved drafting length, else medium.",
     )
     drafts_generate_parser.add_argument(
         "--instructions", default="", help="What you want written (at most 1,000 characters)."
@@ -1000,7 +1829,57 @@ def main(arguments: Sequence[str] | None = None) -> int:
         subcommand.add_argument(
             "--database", type=Path, help="Optional SQLite path; defaults to app data."
         )
+    briefs_parser = commands.add_parser(
+        "briefs", help="List saved briefs and missed days, or show one saved brief; offline."
+    )
+    brief_commands = briefs_parser.add_subparsers(dest="action", required=True)
+    briefs_list_parser = brief_commands.add_parser(
+        "list", help="Saved briefs, newest first, then each account's missed days."
+    )
+    briefs_list_parser.add_argument(
+        "--limit", type=_brief_count, default=30, help="How many briefs to list; default 30."
+    )
+    briefs_list_parser.add_argument("--timezone", help=_TIMEZONE_HELP)
+    briefs_show_parser = brief_commands.add_parser(
+        "show", help="Print one saved brief and what it covers."
+    )
+    briefs_show_parser.add_argument("date_text", metavar="DATE", help="The day, YYYY-MM-DD.")
+    briefs_show_parser.add_argument(
+        "--account", help="The Gmail address, when several accounts have a brief that day."
+    )
+    for subcommand in (briefs_list_parser, briefs_show_parser):
+        subcommand.add_argument(
+            "--database", type=Path, help="Optional SQLite path; defaults to app data."
+        )
+    preferences_parser = commands.add_parser(
+        "preferences", help="Show your saved preferences; set them in the desktop's Settings."
+    )
+    preference_commands = preferences_parser.add_subparsers(dest="action", required=True)
+    preferences_show_parser = preference_commands.add_parser(
+        "show", help="Time zone, messages per brief, sender rules, drafting and AI limits."
+    )
+    preferences_show_parser.add_argument(
+        "--database", type=Path, help="Optional SQLite path; defaults to app data."
+    )
     args = parser.parse_args(arguments)
+    if args.command == "brief" and args.automatic:
+        conflicts = [
+            flag
+            for flag, given in (
+                ("--date", args.date_text is not None),
+                ("--include", bool(args.include)),
+                ("--exclude", bool(args.exclude)),
+                ("--yes", args.yes),
+            )
+            if given
+        ]
+        if conflicts:
+            brief_parser.error(f"--automatic can't be used with {', '.join(conflicts)}")
+    if args.command == "ai-consent":
+        if args.action == "auto-send" and args.limit is None:
+            consent_parser.error("auto-send needs a number of messages, 0 to 10")
+        if args.action != "auto-send" and (args.limit is not None or args.yes):
+            consent_parser.error(f"{args.action} takes no number and no --yes")
     # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
     for name in ("httpx", "httpcore", "groq"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
@@ -1015,6 +1894,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     exclude_ids=tuple(args.exclude),
                     assume_yes=args.yes,
                     show=args.show,
+                    date_text=args.date_text,
+                    automatic=args.automatic,
                 )
             )
         if args.command == "ai-key":
@@ -1027,6 +1908,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     view=getattr(args, "view", ActionFilter.OPEN.value),
                     timezone=getattr(args, "timezone", None),
                     suggestion_id=getattr(args, "suggestion_id", None),
+                    public_id=getattr(args, "public_id", None),
+                    into=getattr(args, "into", None),
+                    proposal_id=getattr(args, "proposal_id", None),
                 )
             )
         if args.command == "drafts" and args.action == "generate":
@@ -1055,7 +1939,24 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 )
             )
         if args.command == "ai-consent":
-            return asyncio.run(ai_consent(args.action, database_path=args.database))
+            return asyncio.run(
+                ai_consent(
+                    args.action,
+                    database_path=args.database,
+                    limit=args.limit,
+                    assume_yes=args.yes,
+                )
+            )
+        if args.command == "preferences":
+            return asyncio.run(preferences_show(database_path=args.database))
+        if args.command == "briefs" and args.action == "list":
+            return asyncio.run(
+                briefs_list(database_path=args.database, limit=args.limit, timezone=args.timezone)
+            )
+        if args.command == "briefs":
+            return asyncio.run(
+                briefs_show(args.date_text, account=args.account, database_path=args.database)
+            )
         if args.command == "sync":
             return asyncio.run(
                 sync(
@@ -1088,6 +1989,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except SettingsError as exc:
         print(str(exc))
         return 3
+    except PreferencesUnavailableError as exc:
+        print(str(exc))  # Static and actionable; nothing is sent while it lasts.
+        return 3
     except ConfigurationError as exc:
         # AI setup errors (model, key, vault) carry static, actionable messages.
         print(str(exc) if args.command in _OWN_MESSAGE_COMMANDS else _SETUP_UNAVAILABLE)
@@ -1111,9 +2015,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except FileExistsError:
         print(_FILE_EXISTS)
         return 3
+    except ProposalNotFoundError as exc:
+        print(str(exc))  # Static.
+        return 3
     except (ActionConflictError, ActionNotFoundError, SuggestionNotFoundError):
         # Before ValueError: ActionConflictError is one. Messages stay static.
         print(_ACTION_REFUSED)
+        return 3
+    except ExcludedSenderError as exc:
+        print(str(exc))  # Static: names no sender, rule or message.
+        return 3
+    except BriefDateError as exc:
+        print(str(exc))  # Static: the allowed dates, never the text given.
         return 3
     except (InvalidTimezoneError, ShortlistReviewError):
         if args.command == "actions":

@@ -49,7 +49,7 @@ from mailbrief.ports.errors import (
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "groq-2026-09-28.1"
+PROMPT_VERSION = "groq-2026-09-30.1"
 CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 PROVIDER_NAME = "groq"
 MAX_RETRIES = 3
@@ -93,6 +93,14 @@ INSTRUCTIONS = (
     "- confidence: 0 to 1.\n"
     "- evidence: one short passage copied exactly from the subject or body that supports the "
     "result, at most 300 characters, without ellipses.\n"
+    '- follow_up: judge this email on its own. "new_deadline" if it changes or newly sets a '
+    "deadline for work already under way (for example, moving it to Monday); then also fill "
+    'deadline_text and the deadline fields above. "cancelled" if it withdraws or cancels a '
+    'request, order or meeting. "delivered" if it provides what was asked for or says the '
+    'work is done. Otherwise "none".\n'
+    '- follow_up_evidence: for any follow_up other than "none", one short passage copied '
+    "exactly from the subject or body that supports it, at most 160 characters, without "
+    'ellipses; null for "none".\n'
     "- actions: every separate thing the email asks the recipient to do, and anything the "
     "recipient is waiting for someone else to deliver; at most 5; an empty list when there are "
     "none. For each action: title, a short imperative phrase of at most 120 characters in the "
@@ -182,6 +190,8 @@ class AnalysisWireResult(BaseModel):
     confidence: float
     evidence: str
     actions: list[ActionWireResult]  # Python enforces the limits, not the schema.
+    follow_up: Literal["none", "new_deadline", "cancelled", "delivered"]
+    follow_up_evidence: str | None
 
 
 class AnalysisWireBatch(BaseModel):

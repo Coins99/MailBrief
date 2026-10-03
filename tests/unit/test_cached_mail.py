@@ -6,8 +6,10 @@ from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import text
 
 from mailbrief.domain.messages import AccountIdentity, ProviderKind
+from mailbrief.domain.preferences import PreferencesEdit
 from mailbrief.storage.database import Database
 from mailbrief.storage.repositories import AccountRepository, MessageRepository
 from mailbrief.ui import runtime
@@ -26,10 +28,12 @@ async def test_offline_pages_include_archived_metadata_and_respect_dst_and_accou
     monkeypatch.setattr(runtime, "groq_provider", forbidden)
     monkeypatch.setattr(runtime, "GroqKeyStore", forbidden)
     monkeypatch.setattr(runtime, "GmailCredentialStore", forbidden)
-    monkeypatch.setattr(runtime, "resolve_timezone", lambda key: ZoneInfo("America/Toronto"))
+    monkeypatch.setattr("tzlocal.get_localzone", lambda: ZoneInfo("Asia/Tokyo"))
     path = tmp_path / "mailbrief.sqlite3"
     backend = DesktopRuntime(path)
     await backend.load_saved()
+    # The owner's saved zone decides the day, not the system zone.
+    await backend.save_owner_preferences(PreferencesEdit(time_zone="America/Toronto"), 0)
     database = Database.from_path(path)
     start = datetime(2026, 11, 1, 4, tzinfo=UTC)  # A 25-hour local day.
     finish = start + timedelta(hours=25)
@@ -103,3 +107,32 @@ async def test_offline_pages_include_archived_metadata_and_respect_dst_and_accou
         forbidden.assert_not_called()
     finally:
         await reopened.close()
+
+
+async def test_offline_browsing_falls_back_to_the_system_zone_when_preferences_are_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Browsing only displays local data, so it never fails closed."""
+    monkeypatch.setattr("tzlocal.get_localzone", lambda: ZoneInfo("Asia/Tokyo"))
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    await backend.save_owner_preferences(PreferencesEdit(time_zone="America/Toronto"), 0)
+    database = Database.from_path(path)
+    try:
+        async with database.transaction() as session:
+            account = await AccountRepository(session).upsert(
+                AccountIdentity(
+                    provider=ProviderKind.GMAIL,
+                    provider_account_id="account-0",
+                    email_address="owner@example.com",
+                )
+            )
+            await session.execute(
+                text("UPDATE owner_preferences SET excluded_senders_json = 'not json'")
+            )
+        page = await backend.cached_messages(account.id, date(2026, 11, 1))
+        assert page.timezone_name == "Asia/Tokyo"
+    finally:
+        await database.dispose()
+        await backend.close()

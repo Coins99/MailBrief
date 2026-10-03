@@ -28,23 +28,61 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   autosave, versions, copy and export, and AI drafting with Groq from context the owner
   chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
   ADR 0012 and ADR 0013.
+- M8 implemented, awaiting live acceptance, on `feat/m8-continuity` (PR #17), built in nine parts
+  (`docs/m8-daily-operation.md`); preferences (Parts 1–2) implemented, awaiting live
+  acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
+  limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
+  See ADR 0014. Brief history and bounded catch-up (Part 3) implemented, awaiting live
+  acceptance: the desktop Briefs… dialog and `brief --date`, `briefs list` and
+  `briefs show`. Thread tracking backend (Part 4) implemented, awaiting live acceptance:
+  the threads of open actions are checked after today's sync (`actions list`,
+  `actions seen`). See ADR 0015. Thread activity in the desktop and "Add to" an existing
+  action (Part 5) implemented, awaiting live acceptance: continuations and Add to in the
+  brief, Mark seen in the actions pane, and `actions accept N --into`. Follow-up proposals
+  backend (Part 6) implemented, awaiting live acceptance: analysis schema 7's follow-up
+  signal, proposals the owner applies or dismisses (`actions proposals`,
+  `apply-proposal`, `dismiss-proposal`) and a ranking bonus for replies in tracked threads.
+  See ADR 0016. Follow-up proposals in the desktop and replies outside today's Inbox
+  (Part 7) implemented, awaiting live acceptance: proposals in the brief, the actions pane
+  and a Proposals dialog with Undo, and up to 3 tracked replies that aren't in today's
+  Inbox joining the review and the brief. Daily operation (Part 8) implemented, awaiting
+  live acceptance: refresh on launch and every 1, 2 or 4 hours while the desktop is open,
+  automatic analysis only with an explicit permission of 1–10 messages on the consent, and
+  remembered declines. See ADR 0017. Closeout (Part 9): runs through a day are cumulative,
+  with one brief per day. The consolidated live acceptance and known limits are in
+  `docs/m8-daily-operation.md`.
 
 ## Layout (ports and adapters)
 
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
 - `src/mailbrief/ports/`: `EmailProvider` / `AIProvider` / `DraftingProvider` protocols
-  (`drafting.py`) and provider-neutral errors.
+  (`drafting.py`), `ThreadReader` (`threads.py`) and provider-neutral errors.
 - `src/mailbrief/providers/gmail/`: active adapter. `providers/microsoft/`: dormant adapter.
   `providers/groq/`: active AI adapter (Structured Outputs), API key store and factory.
 - `src/mailbrief/services/`: calendar, sync, ranking, bodies, application, and for M4:
   analysis, deadlines, digest and brief; for M6: actions; for M7: drafts and drafting
   (AI drafting: parts, preview, consent, validation).
+- `src/mailbrief/domain/messages.py`: normalized messages, `own_addresses` (the primary
+  address plus the aliases; every owner address set is built with it) and
+  `is_own_message`, the one definition of the owner's own message, shared by ranking,
+  thread activity, outside replies and proposals.
 - `src/mailbrief/domain/drafts.py`: draft kinds, limits, placeholders and exports;
-  `domain/drafting.py`: what AI drafting sends and gets back.
+  `domain/drafting.py`: what AI drafting sends and gets back; `domain/preferences.py`: the
+  owner's preferences, time zone rule and sender rules.
+- `src/mailbrief/services/preferences.py`: read, save and reset preferences, apply the
+  saved AI limits (`effective_settings`) and the owner's zone (`owner_zone`).
+- `src/mailbrief/services/history.py`: saved briefs by day, missed days, the catch-up date
+  rule (`check_brief_date`) and each brief's `coverage_line`.
+- `src/mailbrief/services/threads.py`: checks the threads of open actions and caches their
+  later messages' metadata, forgetting those Gmail has in Trash or Spam (ADR 0015), and
+  finds the cached replies today's Inbox sync can't see (`outside_replies`, ADR 0016).
+- `src/mailbrief/services/proposals.py`: derives follow-up proposals from a saved brief's
+  analyses, and applies, undoes, dismisses and restores them (ADR 0016).
 - `src/mailbrief/storage/`: async SQLAlchemy + aiosqlite, repositories, `migrate.py`,
-  `actions.py` for suggestions, decisions and accepted actions, and `drafts.py` for drafts,
-  their versions and source snapshots.
-  Alembic revisions live in `migrations/versions/`.
+  `actions.py` for suggestions, decisions and accepted actions, `proposals.py` for
+  follow-up proposals, `drafts.py` for drafts, their versions and source snapshots, and
+  `preferences.py` for the preferences row. Alembic revisions live in
+  `migrations/versions/`.
 - `src/mailbrief/text/`: provider-neutral text helpers for untrusted email (HTML to text,
   quote trimming, length limits, and `matching.py` for checking quotes against the email).
 - `src/mailbrief/infra/`: HTTP retry classification, `vault.py`, the explicit OS
@@ -52,7 +90,13 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
-  (`drafting_panel.py`).
+  (`drafting_panel.py`), the Settings Preferences tab (`preferences_view.py`) and the
+  Briefs… dialog for saved briefs and missed days (`history_view.py`), the Proposals dialog
+  for one action and the wording of a proposal's effect (`proposals_view.py`); `lists.py`
+  holds `ActivatingList`, where Return or Enter activates a row once on every platform.
+- `ui/scheduler.py` (`RefreshScheduler`, the minute tick behind timed refresh) and
+  `ui/auto_send_view.py` (the automatic-analysis permission dialog); `services/consent.py`
+  reads and sets that permission.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -64,14 +108,15 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   supplies, which SQLite has kept since M2; for a very short email that snippet can be the
   whole text. The one exception is `mailbrief-gmail-diagnostic bodies --show-text`, which
   prints prepared text to the owner's terminal on explicit request. `brief --show` prints
-  derived brief content (sender, subject, summary, action, deadline, link, and suggestion
-  titles, targets and steps) on explicit request, never evidence or bodies.
+  derived brief content (sender, subject, summary, action, deadline, link, suggestion
+  titles, targets and steps, and the titles and IDs of the actions an email continues) on
+  explicit request, never evidence or bodies.
 - Derived content is bounded: a summary is at most 240 characters, an action at most
   1,000, and evidence at most 300 and strictly under 80% of the body. An email has at most
   five suggestions, each with a title of at most 120 characters, at most five steps of at
-  most 120, and evidence of at most 160. All stored evidence for one email totals at most
-  600 characters and stays under 80% of its body. A summary of a very short email may
-  restate it.
+  most 120, and evidence of at most 160, and one follow-up signal with a quote of at most
+  160. All stored evidence for one email totals at most 600 characters and stays under 80%
+  of its body. A summary of a very short email may restate it.
 - Text the AI writes itself (summary, action text, suggestion titles and steps) and
   deadline phrases are stripped of control and format characters before they are stored.
   Mail and AI text reaches the UI only through plain-text widgets or escaped HTML, and only
@@ -94,6 +139,61 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   mailbox, has no "sent" state and never changes an action. Every change needs the
   revision the caller saw, except restoring a deleted draft; drafts and versions change
   only through ORM objects.
+- Owner preferences are one revisioned SQLite row (ADR 0014); every save needs the revision
+  the caller saw, and the row changes only through ORM objects. Sender exclusions are
+  enforced by services, never only the UI: a message from an excluded sender is never
+  selected, included, downloaded, analyzed or offered to AI drafting. Every accepted sender
+  rule can match a sender (`normalize_exclusion`); anything else is refused. Sender rules
+  are the owner's text: show them to the owner, but log only their count. Unreadable
+  preferences fail closed (`PreferencesUnavailableError`) wherever data could be sent; display-only
+  views fall back to the system time zone.
+- Precedence: for AI limits, an explicit `MAILBRIEF_*` variable, then the saved
+  preference, then the default; only `AI_LIMIT_FIELDS` are read from preferences, and only
+  when absent from `Settings.model_fields_set`. For CLI `--timezone`, `--tone` and
+  `--length`, the flag, then the saved preference, then the default.
+- A brief covers one local day in the owner's zone. Briefing a past day is explicit, one
+  day per run, at most 7 days back, and its coverage line says what it covers; nothing
+  briefs past days automatically. `BriefService` enforces the date bounds before Gmail is
+  contacted or anything is written, and only today's window advances the account's last
+  complete sync.
+- Thread tracking (ADR 0015) reads metadata only (`threads.get`, `format=metadata`), for the
+  live, open actions of the connected account: at most 25 threads and the newest 20
+  messages per thread after the action's latest source, during today's sync or brief only.
+  Drafts, trash and spam are ignored, and no folder or label (the Sent folder included) is
+  ever listed. A cached message a thread check sees in Trash or Spam is deleted from that
+  account's cache, and a body labelled TRASH or SPAM is never read. A reply never changes
+  an action: activity is derived, and only the owner's `mark_thread_seen` moves the
+  watermark. A failed or stopped check never fails the sync.
+- Follow-up proposals are the only AI-derived path to change an action, and only the owner
+  applies them; applying never touches title, notes, steps or ownership, and never moves a
+  target date the owner changed. Deriving proposals never changes an action, applying and
+  undoing make one revision each, and a dismissed proposal is never proposed again.
+- An email proposes to at most 3 actions ever: the actions that already have a proposal
+  from it, in any state, use up its slots; a message the owner sent, or that comes from one
+  of the account's addresses, proposes nothing.
+- Replies outside today's Inbox (ADR 0016) join only today's run, only when a thread
+  service is composed: cached messages in tracked threads, newer than the thread's
+  baseline, never the owner's own, never from an excluded sender, not yet analyzed at the
+  current schema, at most 3 a run, found from the cache with no Gmail call. They go
+  through the same review, consent and messages-per-brief limit. They come only from the
+  threads the same run's check read successfully. They are labelled in the review, in
+  their own last brief section and in the coverage line.
+- Only the owner adds an email to an existing action (`accept_into`), and only to a live,
+  open one; the brief offers it only for actions with a source in the email's thread in the
+  same account, it makes one revision, and its undo works only while the action is
+  unchanged and never removes an action's last source.
+- Runs through a day are cumulative: the day's saved brief is carried forward ahead of the
+  automatic selection, within messages per brief. A carried message drops out only when it is
+  uncached, was an Inbox message since archived, is blocked or is declined; one the brief
+  listed as an outside reply keeps that status. "Ready" counts only new messages.
+- Automatic runs (ADR 0017) send nothing unless the active consent carries an explicit
+  permission (`auto_send_limit`, 1–10, cleared by revoking); with none they only sync, check
+  threads, rank and count. The permission belongs to the connected account and at most one
+  account holds one: granting clears every other account's, and 0 clears them all.
+  `brief --automatic` implies `--silent-only`. They brief today only, run only while the
+  desktop is open, coalesce, never open panels, never download bodies without permission,
+  and defer messages over the cap. A message the owner left out (an unchecked pick or
+  `--exclude`) is never auto-selected.
 - Credentials live only in the OS credential store (Gmail: Windows Credential Manager or
   the macOS Keychain, chosen explicitly, with no plaintext or automatic fallback).
 - The Groq API key lives only in that OS vault, under `MailBrief.Groq`.
@@ -120,6 +220,10 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Each result may carry up to five action suggestions (schema version 6). A suggestion
   whose evidence does not quote the email is dropped; a deadline phrase that does not quote
   it drops only that suggestion's deadline. Target dates come from Python, never the model.
+- Each result also carries a follow-up signal (schema version 7, ADR 0016), judged from the
+  email alone: nothing about the owner's actions is ever sent. Its quote is checked before
+  the suggestions and counts toward the evidence total; a signal that doesn't check out
+  becomes none and never fails the message.
 
 ## AI drafting rules (M7, ADR 0013)
 
@@ -165,7 +269,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts and drafting services.
+  drafts, drafting, preferences, history, threads, proposals and consent services.
 
 ## Dormant Microsoft notes
 

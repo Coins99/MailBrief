@@ -3,18 +3,33 @@
 import asyncio
 import json
 import threading
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
+import time_machine
 from pydantic import SecretStr
+from sqlalchemy import text, update
 
+from mailbrief.config import Settings
+from mailbrief.domain.digests import DigestStatus
+from mailbrief.domain.drafting import DraftingOptions
 from mailbrief.domain.messages import AccountIdentity, ProviderKind
+from mailbrief.domain.preferences import AI_LIMIT_FIELDS, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.providers.groq.credentials import GroqKeyStore
+from mailbrief.services.brief import CONSENT_DISCLOSURE_VERSION
+from mailbrief.services.calendar import resolve_timezone
+from mailbrief.services.history import BriefDateError
+from mailbrief.services.preferences import PreferencesConflictError, PreferencesUnavailableError
 from mailbrief.storage.database import Database
-from mailbrief.storage.repositories import AccountRepository, ConsentRepository
+from mailbrief.storage.repositories import AccountRepository, ConsentRepository, DigestRepository
+from mailbrief.storage.tables import DigestTable
 from mailbrief.ui import runtime
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.runtime import DesktopRuntime
@@ -138,3 +153,423 @@ async def test_revoke_only_groq_for_gmail_accounts(tmp_path: Path) -> None:
     finally:
         await database.dispose()
         await backend.close()
+
+
+class Recorder:
+    """Stands in for a service or provider factory and records how it was built and used."""
+
+    def __init__(self) -> None:
+        self.built: list[dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> "Recorder":
+        self.built.append({"args": args, **kwargs})
+        return self
+
+    async def generate(self, *args: Any, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return "result"
+
+    async def available_parts(self, public_id: str) -> frozenset[str]:
+        return frozenset()
+
+    async def prepare(self, public_id: str, options: object) -> str:
+        return "plan"
+
+
+def provider_factory(settings_seen: list[Settings]) -> Any:
+    @asynccontextmanager
+    async def factory(settings: Settings, **kwargs: Any) -> AsyncIterator[object]:
+        settings_seen.append(settings)
+        yield object()
+
+    return factory
+
+
+@pytest.fixture
+def ai_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in AI_LIMIT_FIELDS:
+        monkeypatch.delenv(f"MAILBRIEF_{name.upper()}", raising=False)
+    monkeypatch.setenv("MAILBRIEF_AI_TIMEOUT_SECONDS", "30")
+
+
+PLAN: Any = "plan"  # The drafting service is a Recorder, so any plan will do.
+ME = "me@example.com"
+SAVED = PreferencesEdit(
+    time_zone="Asia/Tokyo",
+    shortlist_limit=3,
+    excluded_senders=("@example.org",),
+    ai_batch_size=4,
+    ai_body_character_limit=2_000,
+    ai_timeout_seconds=90,
+)
+
+
+async def test_a_brief_uses_the_owner_s_zone_limit_rules_and_ai_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ai_environment: None
+) -> None:
+    seen: list[Settings] = []
+    monkeypatch.setattr(runtime, "gmail_provider", provider_factory(seen))
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory(seen))
+    brief, bodies, analysis = Recorder(), Recorder(), Recorder()
+    monkeypatch.setattr(runtime, "BriefService", brief)
+    monkeypatch.setattr(runtime, "BodyService", bodies)
+    monkeypatch.setattr(runtime, "AnalysisService", analysis)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        review = AsyncMock()
+
+        result: object = await backend.generate(
+            AsyncMock(), review, asyncio.Event(), lambda _: None
+        )
+
+        assert result == "result"
+        (call,) = brief.calls
+        assert call["tz_key"] == "Asia/Tokyo"
+        assert call["shortlist_limit"] == 3
+        assert call["excluded_senders"] == ("@example.org",)
+        assert call["shortlist_gate"] is review
+        assert bodies.built[0]["limit"] == 2_000  # Saved.
+        assert analysis.built[0]["batch_size"] == 4  # Saved.
+        assert {settings.ai_timeout_seconds for settings in seen} == {30}  # Environment.
+    finally:
+        await backend.close()
+
+
+async def test_drafting_uses_the_owner_s_zone_and_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ai_environment: None
+) -> None:
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
+    drafting = Recorder()
+    monkeypatch.setattr(runtime, "DraftingService", drafting)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+
+        await backend.available_drafting_parts("draft")
+        await backend.prepare_drafting("draft", DraftingOptions())
+        await backend.generate_draft(PLAN, AsyncMock(), asyncio.Event())
+
+        assert len(drafting.built) == 3
+        for built in drafting.built:
+            assert built["zone"] == ZoneInfo("Asia/Tokyo")
+            assert built["excluded_senders"] == ("@example.org",)
+    finally:
+        await backend.close()
+
+
+async def test_unreadable_preferences_stop_everything_that_could_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbidden = AsyncMock(side_effect=AssertionError("no provider may be built"))
+    monkeypatch.setattr(runtime, "gmail_provider", forbidden)
+    monkeypatch.setattr(runtime, "groq_provider", forbidden)
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        database = Database.from_path(path)
+        try:
+            async with database.transaction() as session:
+                await session.execute(
+                    text("UPDATE owner_preferences SET excluded_senders_json = 'not json'")
+                )
+        finally:
+            await database.dispose()
+
+        operations = (
+            backend.generate(AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None),
+            backend.available_drafting_parts("draft"),
+            backend.prepare_drafting("draft", DraftingOptions()),
+            backend.generate_draft(PLAN, AsyncMock(), asyncio.Event()),
+        )
+        for operation in operations:
+            with pytest.raises(PreferencesUnavailableError):
+                await operation
+
+        assert (await backend.reset_owner_preferences()).excluded_senders == ()
+        assert (await backend.get_owner_preferences()).revision == 2
+    finally:
+        await backend.close()
+
+
+async def test_a_stale_save_is_a_conflict(tmp_path: Path) -> None:
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        assert (await backend.get_owner_preferences()).revision == 0
+        await backend.save_owner_preferences(PreferencesEdit(shortlist_limit=5), 0)
+        with pytest.raises(PreferencesConflictError):
+            await backend.save_owner_preferences(PreferencesEdit(shortlist_limit=6), 0)
+        assert (await backend.get_owner_preferences()).shortlist_limit == 5
+    finally:
+        await backend.close()
+
+
+async def seed_briefs(path: Path) -> None:
+    """Today's brief, then a brief for yesterday saved later, as after catching up."""
+    database = Database.from_path(path)
+    try:
+        async with database.transaction() as session:
+            account = await AccountRepository(session).upsert(
+                AccountIdentity(
+                    provider=ProviderKind.GMAIL,
+                    provider_account_id="gmail-1",
+                    email_address="owner@example.com",
+                )
+            )
+            for day, hour in ((date(2026, 9, 29), 13), (date(2026, 9, 28), 16)):
+                digest = await DigestRepository(session).save_digest(
+                    account_id=account.id,
+                    local_date=day,
+                    timezone_name="UTC",
+                    status=DigestStatus.EMPTY,
+                )
+                await session.execute(
+                    update(DigestTable)
+                    .where(DigestTable.id == digest.id)
+                    .values(generated_at_utc=datetime(2026, 9, 29, hour, tzinfo=UTC))
+                )
+    finally:
+        await database.dispose()
+
+
+@time_machine.travel(datetime(2026, 9, 29, 18, tzinfo=UTC), tick=False)
+async def test_startup_shows_today_s_brief_after_catching_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("tzlocal.get_localzone", lambda: ZoneInfo("UTC"))
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await seed_briefs(path)
+
+        latest = await backend.load_saved()
+        listed = await backend.list_briefs()
+        past = await backend.load_brief("owner@example.com", date(2026, 9, 28))
+        missed = await backend.missed_days("owner@example.com")
+
+        assert latest is not None and latest.local_date == date(2026, 9, 29)
+        assert [summary.local_date for summary in listed] == [
+            date(2026, 9, 29),
+            date(2026, 9, 28),
+        ]
+        assert past is not None and past.local_date == date(2026, 9, 28)
+        assert missed == tuple(date(2026, 9, day) for day in (27, 26, 25, 24, 23, 22))
+    finally:
+        await backend.close()
+
+
+async def test_an_out_of_range_day_stops_before_any_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbidden = AsyncMock(side_effect=AssertionError("no provider may be built"))
+    monkeypatch.setattr(runtime, "gmail_provider", forbidden)
+    monkeypatch.setattr(runtime, "groq_provider", forbidden)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        with pytest.raises(BriefDateError):
+            await backend.generate(
+                AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None, local_date=date.min
+            )
+    finally:
+        await backend.close()
+
+
+async def test_a_past_day_reaches_the_brief_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime, "gmail_provider", provider_factory([]))
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
+    brief = Recorder()
+    monkeypatch.setattr(runtime, "BriefService", brief)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        yesterday = datetime.now(UTC).astimezone(resolve_timezone(None)).date() - timedelta(1)
+        await backend.generate(
+            AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None, local_date=yesterday
+        )
+        assert brief.calls[0]["local_date"] == yesterday
+    finally:
+        await backend.close()
+
+
+async def test_an_automatic_run_takes_no_review_asks_nothing_and_is_marked_automatic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ai_environment: None
+) -> None:
+    monkeypatch.setattr(runtime, "gmail_provider", provider_factory([]))
+    monkeypatch.setattr(runtime, "groq_provider", provider_factory([]))
+    brief, bodies, analysis = Recorder(), Recorder(), Recorder()
+    monkeypatch.setattr(runtime, "BriefService", brief)
+    monkeypatch.setattr(runtime, "BodyService", bodies)
+    monkeypatch.setattr(runtime, "AnalysisService", analysis)
+    backend = DesktopRuntime(tmp_path / "mailbrief.sqlite3")
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        cancel = asyncio.Event()
+
+        result: object = await backend.generate_automatic(cancel, lambda _: None)
+
+        assert result == "result"
+        (call,) = brief.calls
+        assert call["automatic"] is True
+        assert call["local_date"] is None  # Today only.
+        assert call.get("shortlist_gate") is None  # No review.
+        assert call["cancel"] is cancel
+        # The owner's zone, limit and rules apply to an automatic run like any other.
+        assert call["tz_key"] == "Asia/Tokyo" and call["shortlist_limit"] == 3
+        assert call["excluded_senders"] == ("@example.org",)
+        assert bodies.built[0]["limit"] == 2_000 and analysis.built[0]["batch_size"] == 4
+        # Its consent gate can never say yes, so nothing could be sent through it.
+        gate = brief.built[0]["consent_gate"]
+        assert await gate.confirm(object()) is False
+
+        await backend.generate(AsyncMock(), AsyncMock(), asyncio.Event(), lambda _: None)
+        assert brief.calls[1]["automatic"] is False  # A manual run is unchanged.
+    finally:
+        await backend.close()
+
+
+async def test_unreadable_preferences_stop_an_automatic_run_before_any_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbidden = AsyncMock(side_effect=AssertionError("no provider may be built"))
+    monkeypatch.setattr(runtime, "gmail_provider", forbidden)
+    monkeypatch.setattr(runtime, "groq_provider", forbidden)
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await backend.save_owner_preferences(SAVED, 0)
+        database = Database.from_path(path)
+        try:
+            async with database.transaction() as session:
+                await session.execute(
+                    text("UPDATE owner_preferences SET excluded_senders_json = 'not json'")
+                )
+        finally:
+            await database.dispose()
+
+        with pytest.raises(PreferencesUnavailableError):
+            await backend.generate_automatic(asyncio.Event(), lambda _: None)
+    finally:
+        await backend.close()
+
+
+async def seed_consent(path: Path, *, kind: ProviderKind = ProviderKind.GMAIL) -> int:
+    database = Database.from_path(path)
+    try:
+        async with database.transaction() as session:
+            account = await AccountRepository(session).upsert(
+                AccountIdentity(
+                    provider=kind,
+                    provider_account_id="me",
+                    email_address="me@example.com",
+                )
+            )
+            await ConsentRepository(session).grant(
+                account.id, "groq", CONSENT_DISCLOSURE_VERSION, datetime(2026, 9, 29, tzinfo=UTC)
+            )
+            return account.id
+    finally:
+        await database.dispose()
+
+
+async def test_the_permission_is_read_and_changed_on_the_active_consent(tmp_path: Path) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()  # Migrates the new database.
+    try:
+        await backend.save_preferences(DesktopPreferences(groq_model="test-model"))
+        await backend.save_owner_preferences(PreferencesEdit(ai_body_character_limit=2_000), 0)
+        assert await backend.auto_send_status(ME) is None  # No consent: nothing to allow.
+        with pytest.raises(ConfigurationError) as caught:
+            await backend.set_auto_send(3, ME)
+        assert str(caught.value) == "Analyze once with Sync and review to give consent first."
+
+        await seed_consent(path)
+        off = await backend.auto_send_status(ME)
+        assert off is not None and (off.account_email, off.limit) == ("me@example.com", 0)
+        assert off.granted_at_utc is None and off.disclosure.message_count == 1
+        assert (off.disclosure.provider_name, off.disclosure.model_name) == ("groq", "test-model")
+        assert off.disclosure.body_character_limit == 2_000  # A saved AI limit applies.
+        assert "Zero Data Retention" in off.disclosure.privacy_notice
+
+        given = await backend.set_auto_send(3, ME)
+        assert given is not None
+        assert (given.limit, given.disclosure.message_count) == (3, 3)
+        assert given.granted_at_utc is not None
+        again = await backend.auto_send_status(ME)
+        assert again is not None and (again.limit, again.granted_at_utc) == (
+            3,
+            given.granted_at_utc,
+        )
+        with pytest.raises(ValueError, match="0 to 10"):
+            await backend.set_auto_send(11, ME)
+        off = await backend.set_auto_send(0, ME)
+        assert off is not None and off.granted_at_utc is None
+        # Another account, or none connected, has no permission here; off still works.
+        assert await backend.auto_send_status("other@example.com") is None
+        assert await backend.auto_send_status(None) is None
+        assert await backend.set_auto_send(0, None) is None
+        with pytest.raises(ConfigurationError):
+            await backend.set_auto_send(2, None)
+
+        await backend.set_auto_send(2, ME)
+        assert await backend.revoke_consent() == 1  # Revoking ends it, at once.
+        assert await backend.auto_send_status(ME) is None
+    finally:
+        await backend.close()
+
+
+async def test_the_permission_reads_when_the_saved_preferences_do_not(tmp_path: Path) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await seed_consent(path)
+        await backend.save_owner_preferences(SAVED, 0)
+        database = Database.from_path(path)
+        try:
+            async with database.transaction() as session:
+                await session.execute(
+                    text("UPDATE owner_preferences SET excluded_senders_json = 'not json'")
+                )
+        finally:
+            await database.dispose()
+
+        status = await backend.auto_send_status(ME)  # Only displays, so it still answers.
+
+        assert status is not None
+        assert status.disclosure.model_name == "the model chosen in Settings"  # None chosen.
+    finally:
+        await backend.close()
+
+
+async def test_only_a_gmail_consent_can_hold_the_permission(tmp_path: Path) -> None:
+    path = tmp_path / "mailbrief.sqlite3"
+    backend = DesktopRuntime(path)
+    await backend.load_saved()
+    try:
+        await seed_consent(path, kind=ProviderKind.MICROSOFT)
+
+        assert await backend.auto_send_status(ME) is None
+    finally:
+        await backend.close()
+
+
+async def test_permission_calls_need_initialized_storage(tmp_path: Path) -> None:
+    backend = DesktopRuntime(tmp_path / "unopened.sqlite3")
+
+    with pytest.raises(RuntimeError):
+        await backend.auto_send_status(ME)
+    with pytest.raises(RuntimeError):
+        await backend.set_auto_send(1, ME)

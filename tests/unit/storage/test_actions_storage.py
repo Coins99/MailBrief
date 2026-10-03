@@ -426,13 +426,15 @@ async def test_resaving_an_analysis_never_reuses_a_suggestion_id(database: Datab
     assert remaining == 0
 
 
-async def test_loading_many_actions_takes_one_query_for_steps_and_one_for_sources(
+async def test_loading_many_actions_takes_a_fixed_number_of_queries(
     database: Database, selects: list[str]
 ) -> None:
     async with database.session() as session:
         (message_id,) = await messages(session, 1)
         message = await session.get(MessageTable, message_id)
         assert message is not None
+        owner = await session.get(AccountTable, message.account_id)
+        assert owner is not None
         public_ids = (LIVE_ID, SOFT_DELETED_ID, HARD_DELETED_ID)
         rows = [await session.get(ActionTable, await action(session, key)) for key in public_ids]
         repository = ActionRepository(session)
@@ -444,14 +446,16 @@ async def test_loading_many_actions_takes_one_query_for_steps_and_one_for_source
                         action_id=row.id, position=position, text=f"Step {position}", done=False
                     )
                 )
-            assert await repository.add_source(row.id, message)
-            assert not await repository.add_source(row.id, message)  # Already linked.
+            assert await repository.add_source(row.id, message, owner)
+            assert not await repository.add_source(row.id, message, owner)  # Already linked.
         await session.commit()
         selects.clear()
 
         loaded = await repository.load([row for row in rows if row is not None])
 
-    assert len(selects) == 2
+    # Steps, sources, the accounts their snapshots name, those accounts' thread messages and
+    # pending proposals: one query each, however many actions load.
+    assert len(selects) == 5
     assert [len(item.steps) for item in loaded] == [3, 3, 3]
     assert [[source.available for source in item.sources] for item in loaded] == [[True]] * 3
 
@@ -514,7 +518,7 @@ async def test_a_source_copies_the_message_row_exactly(database: Database) -> No
             ],
         )
         action_id = await action(session, LIVE_ID)
-        assert await ActionRepository(session).add_source(action_id, message)
+        assert await ActionRepository(session).add_source(action_id, message, account)
         await session.commit()
         session.expunge_all()  # Compare what was written, not the objects in memory.
 
@@ -539,3 +543,34 @@ async def test_a_source_copies_the_message_row_exactly(database: Database) -> No
         stored.received_at_utc,
     )
     assert source.received_at_utc == received
+    assert (source.provider, source.provider_account_id, source.provider_thread_id) == (
+        "gmail",
+        "gmail-1",
+        stored.conversation_id,
+    )
+    assert stored.conversation_id == "conversation-1"
+
+
+async def test_sent_messages_are_stored_and_read_back(database: Database) -> None:
+    async with database.session() as session:
+        account = await AccountRepository(session).upsert(
+            AccountIdentity(
+                provider=ProviderKind.GMAIL, provider_account_id="gmail-1", email_address="me@x.com"
+            )
+        )
+        repository = MessageRepository(session)
+        (sent,) = await repository.upsert_messages(
+            account.id, [make_message(provider_message_id="mine", is_sent=True, is_in_inbox=False)]
+        )
+        (received,) = await repository.upsert_messages(
+            account.id, [make_message(provider_message_id="theirs")]
+        )
+        await session.commit()
+
+        assert (sent.is_sent, received.is_sent) == (True, False)
+        restored = MessageRepository.to_domain(sent, "gmail-1", ProviderKind.GMAIL)
+        assert restored.is_sent and not restored.is_in_inbox
+        (updated,) = await repository.upsert_messages(
+            account.id, [make_message(provider_message_id="mine", is_sent=False)]
+        )
+        assert not updated.is_sent

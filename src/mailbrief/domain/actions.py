@@ -9,11 +9,13 @@ from pydantic import ConfigDict, Field, HttpUrl, field_validator, model_validato
 
 from mailbrief.domain.analysis import (
     DEADLINE_TEXT_MAX_CHARS,
+    FOLLOW_UP_EVIDENCE_CHARS,
     SUGGESTION_EVIDENCE_CHARS,
     ActionEffort,
     ActionOwnership,
     ActionSuggestion,
     DeadlinePrecision,
+    FollowUpKind,
     TargetReason,
     check_deadline_fields,
     deadline_due_at,
@@ -53,6 +55,14 @@ class ActionFilter(StrEnum):
     OPEN = "open"
     WAITING = "waiting"
     COMPLETED = "completed"
+
+
+class ProposalState(StrEnum):
+    """What the owner decided about a follow-up proposal (ADR 0016)."""
+
+    PENDING = "pending"
+    APPLIED = "applied"
+    DISMISSED = "dismissed"
 
 
 class ActionStep(DomainModel):
@@ -97,6 +107,98 @@ class ActionSource(DomainModel):
         return normalize_utc(value)
 
 
+class ThreadActivity(DomainModel):
+    """Later messages in an action's threads, derived from cached metadata (ADR 0015).
+
+    ``new_messages``, ``latest_at_utc`` and ``latest_sender`` (a display name, else the
+    address) cover other people's messages after the owner's "seen" watermark; the owner's
+    own latest reply is reported separately. None of it ever changes the action.
+    """
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    new_messages: int = Field(default=0, ge=0)
+    latest_at_utc: datetime | None = None
+    latest_sender: str | None = Field(default=None, min_length=1, max_length=320, repr=False)
+    owner_replied_at_utc: datetime | None = None
+
+    @field_validator("latest_at_utc", "owner_replied_at_utc")
+    @classmethod
+    def normalize_timestamps(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else normalize_utc(value)
+
+    @model_validator(mode="after")
+    def validate_latest(self) -> Self:
+        new = self.new_messages > 0
+        if (self.latest_at_utc is not None) != new or (self.latest_sender is not None) != new:
+            raise ValueError("the latest message is set exactly when there are new messages")
+        return self
+
+    @property
+    def unseen(self) -> bool:
+        """Whether anything arrived after the watermark, from others or the owner."""
+        return self.new_messages > 0 or self.owner_replied_at_utc is not None
+
+
+class ActionProposal(DomainModel):
+    """A later email's proposed update to an action, which only the owner applies (ADR 0016).
+
+    A new deadline carries the deadline and suggested target; a cancellation or delivery
+    proposes completing the action and carries none. The email is a snapshot, so the
+    proposal outlives the cached message. ``action_title`` is the action's current title,
+    for display, and ``action_revision`` the action's revision when the proposal was loaded:
+    applying it needs that revision, so a change in between is caught.
+    """
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    id: int = Field(ge=1)
+    action_public_id: str = Field(min_length=PUBLIC_ID_CHARS, max_length=PUBLIC_ID_CHARS)
+    action_title: str = Field(min_length=1, max_length=ACTION_TITLE_MAX_CHARS, repr=False)
+    action_revision: int = Field(ge=1)
+    kind: FollowUpKind
+    state: ProposalState
+    deadline_text: str | None = Field(
+        default=None, min_length=1, max_length=DEADLINE_TEXT_MAX_CHARS, repr=False
+    )
+    deadline_precision: DeadlinePrecision = DeadlinePrecision.NONE
+    deadline_date: date | None = None
+    deadline_at_utc: datetime | None = None
+    deadline_timezone: str | None = None
+    suggested_target_date: date | None = None
+    target_reason: TargetReason | None = None
+    evidence: str = Field(min_length=1, max_length=FOLLOW_UP_EVIDENCE_CHARS, repr=False)
+    provider_message_id: str = Field(min_length=1, max_length=512)
+    subject: str = Field(default="", max_length=998, repr=False)
+    sender_address: str = Field(min_length=3, max_length=320)
+    received_at_utc: datetime
+    web_link: HttpUrl
+    created_at_utc: datetime
+
+    @field_validator("deadline_at_utc", "received_at_utc", "created_at_utc")
+    @classmethod
+    def normalize_timestamps(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else normalize_utc(value)
+
+    @model_validator(mode="after")
+    def validate_kind_and_deadline(self) -> Self:
+        if self.kind is FollowUpKind.NONE:
+            raise ValueError("a proposal needs a follow-up kind")
+        check_deadline_fields(
+            self.deadline_text,
+            self.deadline_precision,
+            self.deadline_date,
+            self.deadline_at_utc,
+            self.deadline_timezone,
+        )
+        dated = self.deadline_precision is not DeadlinePrecision.NONE
+        if dated != (self.kind is FollowUpKind.NEW_DEADLINE):
+            raise ValueError("only a new-deadline proposal carries a deadline, and it must")
+        if (self.suggested_target_date is None) != (self.target_reason is None):
+            raise ValueError("suggested_target_date and target_reason must be set together")
+        return self
+
+
 class Action(DomainModel):
     """An action the owner accepted and now owns, with its plan and source messages."""
 
@@ -127,8 +229,17 @@ class Action(DomainModel):
     revision: int = Field(ge=1)
     steps: tuple[ActionStep, ...] = Field(default=(), max_length=MAX_ACTION_STEPS)
     sources: tuple[ActionSource, ...] = ()
+    thread_seen_until_utc: datetime | None = None  # The owner's "seen" watermark.
+    thread: ThreadActivity | None = None  # None when no source has a thread snapshot.
+    proposals: tuple[ActionProposal, ...] = ()  # Pending follow-up proposals only.
 
-    @field_validator("deadline_at_utc", "created_at_utc", "updated_at_utc", "completed_at_utc")
+    @field_validator(
+        "deadline_at_utc",
+        "created_at_utc",
+        "updated_at_utc",
+        "completed_at_utc",
+        "thread_seen_until_utc",
+    )
     @classmethod
     def normalize_timestamps(cls, value: datetime | None) -> datetime | None:
         return None if value is None else normalize_utc(value)
@@ -163,6 +274,22 @@ class Action(DomainModel):
     def carried_over(self, today: date, zone: ZoneInfo) -> bool:
         """Whether the action was created on an earlier local day than ``today``."""
         return self.created_at_utc.astimezone(zone).date() < today
+
+
+class ThreadLink(DomainModel):
+    """A live, open action with a source in an email's thread, in the same account.
+
+    The brief shows it as a continuation and offers to add the email to it; ``is_source``
+    says the email is already one of the action's sources.
+    """
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    public_id: str = Field(min_length=PUBLIC_ID_CHARS, max_length=PUBLIC_ID_CHARS)
+    title: str = Field(min_length=1, max_length=ACTION_TITLE_MAX_CHARS, repr=False)
+    revision: int = Field(ge=1)
+    ownership: ActionOwnership
+    is_source: bool
 
 
 class ActionEdit(DomainModel):

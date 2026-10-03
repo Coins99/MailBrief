@@ -5,13 +5,14 @@ import contextlib
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, assert_never
 
 from pydantic import SecretStr
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -22,10 +23,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
-from mailbrief.domain.briefs import BriefRunResult, BriefStatus, TransmissionPreview
+from mailbrief.domain.actions import (
+    Action,
+    ActionEdit,
+    ActionFilter,
+    ActionProposal,
+    StepEdit,
+    ThreadLink,
+)
+from mailbrief.domain.briefs import (
+    AutoSendStatus,
+    BriefRunResult,
+    BriefStatus,
+    TransmissionPreview,
+)
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
-from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncProgress, SyncStatus
+from mailbrief.domain.digests import (
+    DailyDigest,
+    DigestStatus,
+    SavedBriefSummary,
+    SyncProgress,
+    SyncResult,
+    SyncStatus,
+)
 from mailbrief.domain.drafting import (
     DraftContextPart,
     DraftingOptions,
@@ -45,17 +65,26 @@ from mailbrief.domain.drafts import (
     still_to_fill,
 )
 from mailbrief.domain.messages import RankedMessage
+from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.errors import ConfigurationError
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
 from mailbrief.services.actions import (
     COMPLETED_LIST_LIMIT,
+    AcceptedInto,
     ActionConflictError,
     ActionNotFoundError,
+    DecisionSnapshot,
     SuggestionNotFoundError,
 )
-from mailbrief.services.brief import ConsentGate, ShortlistGate, disclosure_lines
+from mailbrief.services.brief import (
+    ConsentGate,
+    ShortlistGate,
+    disclosure_lines,
+    needs_review_sentence,
+)
 from mailbrief.services.calendar import resolve_timezone
+from mailbrief.services.consent import NO_CONSENT
 from mailbrief.services.drafting import (
     DraftingContextError,
     DraftingGate,
@@ -63,18 +92,48 @@ from mailbrief.services.drafting import (
 )
 from mailbrief.services.drafting import disclosure_lines as drafting_disclosure_lines
 from mailbrief.services.drafts import DraftConflictError, DraftNotFoundError, SourceNotFoundError
-from mailbrief.services.ranking import MAX_SHORTLIST_SIZE
+from mailbrief.services.history import BriefDateError
+from mailbrief.services.preferences import (
+    PreferencesConflictError,
+    PreferencesUnavailableError,
+    owner_zone,
+)
+from mailbrief.services.proposals import ProposalNotFoundError
+from mailbrief.services.ranking import (
+    DECLINED_TEXT,
+    MAX_SHORTLIST_SIZE,
+    OUTSIDE_REPLY_TEXT,
+    reason_text,
+)
 from mailbrief.ui.action_editor import ActionEditor
-from mailbrief.ui.actions_view import COMPLETE, DELETE, EDIT, REOPEN, ActionsPanel
+from mailbrief.ui.actions_view import (
+    COMPLETE,
+    DELETE,
+    EDIT,
+    PROPOSALS,
+    REOPEN,
+    SEEN,
+    ActionsPanel,
+)
+from mailbrief.ui.auto_send_view import AutoSendDialog
 from mailbrief.ui.cached_view import CachedMailDialog
-from mailbrief.ui.diagnostics import configuration_guidance, error_guidance, log_failure
-from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
+from mailbrief.ui.diagnostics import (
+    configuration_guidance,
+    error_guidance,
+    log_automatic_run,
+    log_failure,
+)
+from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS, DigestView
 from mailbrief.ui.draft_editor import DraftEditor
 from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
 from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
+from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
 from mailbrief.ui.preferences import DesktopPreferences
+from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
+from mailbrief.ui.proposals_view import ProposalsDialog
+from mailbrief.ui.scheduler import RefreshScheduler
 from mailbrief.ui.settings_view import SettingsDialog
 
 
@@ -85,6 +144,11 @@ class DesktopBackend(Protocol):
     ) -> CachedMailPage: ...
     async def get_preferences(self) -> DesktopPreferences: ...
     async def save_preferences(self, preferences: DesktopPreferences) -> None: ...
+    async def get_owner_preferences(self) -> OwnerPreferences: ...
+    async def save_owner_preferences(
+        self, edit: PreferencesEdit, revision: int
+    ) -> OwnerPreferences: ...
+    async def reset_owner_preferences(self) -> OwnerPreferences: ...
     async def save_key(self, key: SecretStr) -> None: ...
     async def remove_key(self) -> None: ...
     async def revoke_consent(self) -> int: ...
@@ -98,10 +162,42 @@ class DesktopBackend(Protocol):
         review: ShortlistGate,
         cancel: asyncio.Event,
         progress: Callable[[SyncProgress], None],
+        local_date: date | None = None,
     ) -> BriefRunResult: ...
+    async def generate_automatic(
+        self, cancel: asyncio.Event, progress: Callable[[SyncProgress], None]
+    ) -> BriefRunResult: ...
+    async def auto_send_status(self, account_email: str | None) -> AutoSendStatus | None: ...
+    async def set_auto_send(
+        self, limit: int, account_email: str | None
+    ) -> AutoSendStatus | None: ...
+    async def list_briefs(self) -> tuple[SavedBriefSummary, ...]: ...
+    async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None: ...
+    async def missed_days(self, account_email: str) -> tuple[date, ...]: ...
     async def close(self) -> None: ...
     async def list_actions(self, view: ActionFilter) -> tuple[Action, ...]: ...
     async def accept_suggestion(self, suggestion_id: int) -> Action: ...
+    async def brief_links(self, digest: DailyDigest) -> dict[str, tuple[ThreadLink, ...]]: ...
+    async def brief_proposals(
+        self, digest: DailyDigest
+    ) -> dict[str, tuple[ActionProposal, ...]]: ...
+    async def apply_proposal(self, proposal_id: int, revision: int) -> Action: ...
+    async def undo_apply_proposal(self, proposal_id: int, revision: int) -> Action: ...
+    async def dismiss_proposal(self, proposal_id: int) -> None: ...
+    async def restore_proposal(self, proposal_id: int) -> None: ...
+    async def accept_into(
+        self, suggestion_id: int, public_id: str, revision: int
+    ) -> AcceptedInto: ...
+    async def undo_accept_into(
+        self,
+        suggestion_id: int,
+        public_id: str,
+        revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
+    ) -> Action: ...
+    async def mark_thread_seen(self, public_id: str, revision: int) -> Action: ...
     async def dismiss_suggestion(self, suggestion_id: int) -> None: ...
     async def restore_suggestion(self, suggestion_id: int) -> None: ...
     async def unaccept_action(self, public_id: str, revision: int) -> None: ...
@@ -143,6 +239,7 @@ _STALE = (
     ActionConflictError,
     ActionNotFoundError,
     SuggestionNotFoundError,
+    ProposalNotFoundError,
     DraftConflictError,
     DraftNotFoundError,
 )
@@ -162,6 +259,55 @@ _DRAFT_EXPORT_FAILED = "Couldn't export. Check the folder and try again."
 _AI_CANCELLED = "Cancelled. Your text is unchanged."
 _AI_DECLINED = "Nothing was sent: AI drafting needs your consent first."
 _AI_FAILED = "Couldn't write with Groq. Your text is unchanged."
+_REFRESH_DISCONNECTED = "Automatic refresh skipped: connect Gmail first."
+_REFRESH_FAILED = "Refresh failed. The displayed saved brief is unchanged."
+_AUTOMATIC = "Automatic refresh: "
+
+
+def _review_hint(limit: int) -> str:
+    noun = "message" if limit == 1 else "messages"
+    return (
+        "Review today's Inbox. Suggested messages are checked; add or remove any message, "
+        f"up to {limit} {noun}. Only checked messages will have their bodies retrieved."
+    )
+
+
+def _too_many(limit: int) -> str:
+    return f"Choose at most {limit} {'message' if limit == 1 else 'messages'} before continuing."
+
+
+_EXCLUDED_TIP = (
+    "This sender is excluded in Settings > Preferences, so this message is never analyzed. "
+    "Change the rule there to include it."
+)
+
+
+def thread_check_text(sync: SyncResult) -> str:
+    """The run's check of tracked threads in one sentence, never with its code; empty when
+    no threads were tracked."""
+    if sync.threads_stopped_code:
+        return "Thread checks stopped early."
+    tracked, checked = sync.threads_tracked, sync.threads_checked
+    if not tracked:
+        return ""
+    noun = "thread" if tracked == 1 else "threads"
+    if checked == tracked:
+        return f"Checked {checked} tracked {noun}."
+    return f"Checked {checked} of {tracked} tracked {noun}; {sync.threads_failed} failed."
+
+
+def _count_messages(count: int, *, new: bool = False) -> str:
+    noun = "new message" if new else "message"
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _ready_text(ready: int) -> str:
+    """How many new messages an automatic run found ready to review (ADR 0017)."""
+    if ready == 0:
+        return "Nothing new to review."
+    if ready == 1:
+        return "1 new message is ready to review."
+    return f"{ready} new messages are ready to review."
 
 
 class _ApprovedGate:
@@ -260,6 +406,9 @@ class MainWindow(QMainWindow):
         self.task: asyncio.Task[None] | None = None
         self._cancel = asyncio.Event()
         self._review: asyncio.Future[tuple[str, ...] | None] | None = None
+        # The review in progress: its message limit and the messages it can't select.
+        self._review_limit = MAX_SHORTLIST_SIZE
+        self._review_blocked: frozenset[str] = frozenset()
         self._consent: asyncio.Future[bool] | None = None
         self._ready = False
         self._closing = False
@@ -267,6 +416,13 @@ class MainWindow(QMainWindow):
         self._cancellable = True
         # The one change that Undo reverses: its button label and the operation that undoes it.
         self._undo: tuple[str, Callable[[], Awaitable[None]]] | None = None
+        # The connected Gmail account, known once a connection succeeds.
+        self._account_email: str | None = None
+        # The brief shown: None for the latest, else a past brief's account and date.
+        self._shown: tuple[str, date] | None = None
+        # Whether the running operation is an automatic refresh (ADR 0017): its failures are
+        # reported as such, and it never opens a panel or dialog.
+        self._automatic_active = False
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
@@ -280,8 +436,21 @@ class MainWindow(QMainWindow):
         self.draft_editor = DraftEditor(self)
         self._connect_draft_editor(self.draft_editor)
         self.cached_dialog = CachedMailDialog(self)
+        self.proposals_dialog = ProposalsDialog(self)
+        self.proposals_dialog.apply_requested.connect(self._request_apply_from_dialog)
+        self.proposals_dialog.dismiss_requested.connect(
+            lambda proposal_id: self._start_from_link(lambda: self._dismiss_proposal(proposal_id))
+        )
+        self.history_dialog = BriefHistoryDialog(self)
+        self.history_dialog.open_requested.connect(self._request_open_brief)
+        self.history_dialog.generate_requested.connect(self._request_brief_day)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
+        self.auto_send_dialog = AutoSendDialog(self.settings_dialog)
+        self.auto_send_dialog.save_requested.connect(self._request_set_auto_send)
+        # When an automatic run is due, by the owner's schedule; it stops with the window.
+        self.scheduler = RefreshScheduler(self, clock=lambda: self.now())
+        self.scheduler.due.connect(self._refresh_due)
         self.settings_dialog.save_requested.connect(self._request_save_preferences)
         self.settings_dialog.key_requested.connect(self._request_save_key)
         self.settings_dialog.remove_key_requested.connect(
@@ -289,6 +458,14 @@ class MainWindow(QMainWindow):
         )
         self.settings_dialog.revoke_requested.connect(
             lambda: self.start(self._revoke_consent, cancellable=False)
+        )
+        preferences_panel = self.settings_dialog.preferences_panel
+        preferences_panel.save_requested.connect(self._request_save_owner_preferences)
+        preferences_panel.reset_requested.connect(
+            lambda: self.start(self._reset_owner_preferences, cancellable=False)
+        )
+        preferences_panel.auto_send_requested.connect(
+            lambda: self.start(self._open_auto_send, cancellable=False)
         )
         self.setWindowTitle("MailBrief")
         self.resize(980, 760)
@@ -325,9 +502,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(actions)
         self.retry_button = QPushButton("&Retry loading saved data")
         self.retry_button.clicked.connect(lambda: self.start(self.initialize))
-        actions.addWidget(self.retry_button, 2, 0, 1, 3)
+        actions.addWidget(self.retry_button, 3, 0, 1, 3)
         self.cached_button = QPushButton("Browse saved &mail (offline)")
         actions.addWidget(self.cached_button, 1, 2)
+        self.briefs_button = QPushButton("&Briefs…")
+        self.briefs_button.setToolTip("Open saved briefs, or brief a missed day.")
+        actions.addWidget(self.briefs_button, 2, 0)
         self.status = plain_label("Loading saved brief…")
         layout.addWidget(self.status)
         self.undo_button = QPushButton("&Undo")
@@ -336,12 +516,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.undo_button)
         self.review_panel = QWidget()
         review_layout = QVBoxLayout(self.review_panel)
-        review_layout.addWidget(
-            plain_label(
-                "Review today's Inbox. Suggested messages are checked; add or remove any "
-                "message, up to ten. Only checked messages will have their bodies retrieved."
-            )
-        )
+        self.review_hint = plain_label(_review_hint(MAX_SHORTLIST_SIZE))
+        review_layout.addWidget(self.review_hint)
         self.shortlist = QListWidget()
         self.shortlist.setAccessibleName("Messages selected for analysis")
         self.shortlist.itemChanged.connect(self._selection_changed)
@@ -360,8 +536,21 @@ class MainWindow(QMainWindow):
         consent_layout.addWidget(self.decline_button)
         layout.addWidget(self.consent_panel)
         self.consent_panel.hide()
+        self.viewing = QWidget()
+        viewing = QHBoxLayout(self.viewing)
+        viewing.setContentsMargins(0, 0, 0, 0)
+        self.viewing_label = plain_label("")
+        self.latest_button = QPushButton("Back to &latest")
+        viewing.addWidget(self.viewing_label, 1)
+        viewing.addWidget(self.latest_button)
+        layout.addWidget(self.viewing)
+        self.viewing.hide()
         self.digest = DigestView()
+        self.digest.zone = self.zone
+        self.cached_dialog.zone = self.zone
         self.digest.suggestion_requested.connect(self._request_suggestion)
+        self.digest.accept_into_requested.connect(self._request_accept_into)
+        self.digest.proposal_requested.connect(self._request_proposal)
         self.digest.setMinimumHeight(180)
         layout.addWidget(self.digest, 1)
         self.actions_panel = ActionsPanel()
@@ -384,6 +573,10 @@ class MainWindow(QMainWindow):
         )
         self.settings_button.clicked.connect(lambda: self.start(self._open_settings))
         self.cached_button.clicked.connect(lambda: self.start(self._open_cached))
+        self.briefs_button.clicked.connect(lambda: self.start(self._open_history))
+        self.latest_button.clicked.connect(
+            lambda: self.start(self._back_to_latest, cancellable=False)
+        )
         self.generate_button.clicked.connect(lambda: self.start(self._generate))
         self.cancel_button.clicked.connect(self.cancel)
         self.review_button.clicked.connect(self._accept_review)
@@ -401,7 +594,11 @@ class MainWindow(QMainWindow):
         self.settings_button.setEnabled(not busy)
         self.settings_dialog.set_busy(busy)
         self.cached_button.setEnabled(not busy and self._ready)
+        self.briefs_button.setEnabled(not busy and self._ready)
+        self.history_dialog.set_busy(busy)
+        self.latest_button.setEnabled(not busy)
         self.cached_dialog.set_busy(busy)
+        self.proposals_dialog.set_busy(busy)
         self.undo_button.setEnabled(not busy)
         self.actions_panel.set_busy(busy)
         self.action_editor.set_busy(busy)
@@ -421,14 +618,46 @@ class MainWindow(QMainWindow):
         if _NOT_REFRESHED not in self.status.text():
             self.status.setText(f"{self.status.text()} {_NOT_REFRESHED}".strip())
 
+    def _set_shown(self, shown: tuple[str, date] | None) -> None:
+        """Show the latest brief (None), or say which past brief is shown."""
+        self._shown = shown
+        self.viewing.setVisible(shown is not None)
+        if shown is not None:
+            self.viewing_label.setText(f"Viewing the brief for {shown[1].isoformat()}.")
+
     async def _reload_brief(self) -> None:
+        """Reload the brief shown: the latest, or the past brief being viewed."""
+        shown = self._shown
         try:
-            saved = await self.backend.load_saved()
+            saved = await (
+                self.backend.load_saved() if shown is None else self.backend.load_brief(*shown)
+            )
         except Exception as exc:
             self._note_not_refreshed(exc)
             return
+        if saved is None and shown is not None:
+            self._set_shown(None)  # That brief is gone; show the latest instead.
+            await self._reload_brief()
+            return
         if saved is not None:
-            self.digest.show_digest(saved)
+            await self._show_digest(saved)
+
+    async def _show_digest(self, digest: DailyDigest) -> None:
+        """Every brief is shown here, with the actions that continue its threads and the
+        updates its emails propose; when either can't be read, the brief is shown without it."""
+        links: dict[str, tuple[ThreadLink, ...]] | None
+        try:
+            links = await self.backend.brief_links(digest)
+        except Exception as exc:
+            log_failure(exc)
+            links = None
+        proposals: dict[str, tuple[ActionProposal, ...]] | None
+        try:
+            proposals = await self.backend.brief_proposals(digest)
+        except Exception as exc:
+            log_failure(exc)
+            proposals = None
+        self.digest.show_digest(digest, links, proposals)
 
     async def _refresh_actions(self) -> None:
         now = self.now()
@@ -454,10 +683,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._note_not_refreshed(exc)
 
+    def _refresh_proposals_dialog(self) -> None:
+        """An open Proposals dialog follows the action's latest state."""
+        dialog = self.proposals_dialog
+        public_id = dialog.action_public_id
+        if dialog.isVisible() and public_id is not None:
+            dialog.show_proposals(self.actions_panel.action_with_id(public_id), self.zone)
+
     async def _refresh_views(self) -> None:
         await self._reload_brief()
         await self._refresh_actions()
         await self._refresh_drafts()
+        self._refresh_proposals_dialog()
 
     async def _stale(self, exc: Exception) -> None:
         log_failure(exc)
@@ -484,6 +721,89 @@ class MainWindow(QMainWindow):
         public_id, revision = action.public_id, action.revision
         self._offer_undo("Undo accept", lambda: self.backend.unaccept_action(public_id, revision))
         self.status.setText(f"Accepted: {action.title}. It stays open until you complete it.")
+        await self._refresh_views()
+
+    def _request_accept_into(self, suggestion_id: int, public_id: str, revision: int) -> None:
+        self._start_from_link(lambda: self._accept_into(suggestion_id, public_id, revision))
+
+    async def _accept_into(self, suggestion_id: int, public_id: str, revision: int) -> None:
+        """Add the suggestion's email to an action that continues its thread, with Undo when
+        that changed anything."""
+        try:
+            result = await self.backend.accept_into(suggestion_id, public_id, revision)
+        except ActionConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static; names no action or mail.
+            await self._refresh_views()
+            return
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        action = result.action
+        if not result.changed:  # Already there: nothing to undo.
+            self.status.setText(f"Already added to: {action.title}.")
+            await self._refresh_views()
+            return
+
+        async def undo() -> None:
+            await self.backend.undo_accept_into(
+                suggestion_id,
+                action.public_id,
+                action.revision,
+                result.source_added,
+                previous=result.previous,
+            )
+
+        self._offer_undo("Undo add", undo)
+        self.status.setText(f"Added to: {action.title}.")
+        await self._refresh_views()
+
+    def _request_proposal(self, kind: str, proposal_id: int, revision: int) -> None:
+        if kind == APPLY:
+            self._start_from_link(lambda: self._apply_proposal(proposal_id, revision))
+        elif kind == DISMISS:
+            self._start_from_link(lambda: self._dismiss_proposal(proposal_id))
+
+    def _request_apply_from_dialog(self, proposal_id: int) -> None:
+        proposal = self.proposals_dialog.proposal(proposal_id)
+        if proposal is not None:
+            revision = proposal.action_revision
+            self._start_from_link(lambda: self._apply_proposal(proposal_id, revision))
+
+    async def _apply_proposal(self, proposal_id: int, revision: int) -> None:
+        """Apply a proposal the owner chose, at the action revision they saw, with Undo."""
+        try:
+            action = await self.backend.apply_proposal(proposal_id, revision)
+        except ActionConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static; names no action or mail.
+            await self._refresh_views()
+            return
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        applied_revision = action.revision
+
+        async def undo() -> None:
+            await self.backend.undo_apply_proposal(proposal_id, applied_revision)
+
+        self._offer_undo("Undo apply", undo)
+        self.status.setText(f"Applied to: {action.title}.")
+        await self._refresh_views()
+
+    async def _dismiss_proposal(self, proposal_id: int) -> None:
+        try:
+            await self.backend.dismiss_proposal(proposal_id)
+        except ActionConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))
+            await self._refresh_views()
+            return
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._offer_undo("Undo dismiss", lambda: self.backend.restore_proposal(proposal_id))
+        self.status.setText("Proposal dismissed. It won't be proposed again.")
         await self._refresh_views()
 
     async def _dismiss_suggestion(self, suggestion_id: int) -> None:
@@ -521,6 +841,11 @@ class MainWindow(QMainWindow):
             self.start(lambda: self._reopen_action(action), cancellable=False)
         elif kind == DELETE:
             self.start(lambda: self._delete_action(action), cancellable=False)
+        elif kind == SEEN:
+            self.start(lambda: self._mark_seen(action), cancellable=False)
+        elif kind == PROPOSALS:
+            self.proposals_dialog.show_proposals(action, self.zone)
+            self.proposals_dialog.open()
 
     def _request_save_action(
         self, action: Action, edit: ActionEdit, steps: Sequence[StepEdit] | None
@@ -570,6 +895,16 @@ class MainWindow(QMainWindow):
 
         self._offer_undo("Undo delete", undo)
         self.status.setText(f"Deleted: {action.title}.")
+        await self._refresh_views()
+
+    async def _mark_seen(self, action: Action) -> None:
+        try:
+            marked = await self.backend.mark_thread_seen(action.public_id, action.revision)
+        except _STALE as exc:
+            await self._stale(exc)
+            return
+        self._offer_undo()  # Like an edit, it has no undo; an older offer could be stale.
+        self.status.setText(f"Marked seen: {marked.title}.")
         await self._refresh_views()
 
     async def _save_action(
@@ -976,17 +1311,24 @@ class MainWindow(QMainWindow):
         return True
 
     async def _run(self, operation: Callable[[], Awaitable[None]]) -> None:
+        failed = True
         try:
             await operation()
+            failed = False
         except asyncio.CancelledError:
+            failed = False
             self.status.setText("Cancelled. The displayed saved brief is unchanged.")
         except AuthenticationRequiredError as exc:
             log_failure(exc)
+            self._account_email = None
             self.connection.setText("Gmail: session expired or missing. Connect Gmail to continue.")
             self.status.setText("Sign in to Gmail, then retry. The saved brief is still available.")
         except ConfigurationError as exc:
             log_failure(exc)
             self.status.setText(configuration_guidance(exc))
+        except BriefDateError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static: the dates that can be briefed.
         except ProviderError as exc:
             log_failure(exc)
             self.status.setText("Provider unavailable. Check your connection and retry.")
@@ -995,10 +1337,16 @@ class MainWindow(QMainWindow):
             # Validation and HTTP exceptions can contain secret or mail-derived values.
             self.status.setText("Operation failed. The displayed saved brief is unchanged.")
         finally:
+            if self._automatic_active:
+                self._automatic_active = False
+                if failed:
+                    self.status.setText(_AUTOMATIC + self.status.text())
             if self.cached_dialog.isVisible() and not self.cached_dialog.has_page:
                 self.cached_dialog.status.setText(self.status.text())
             if self.settings_dialog.isVisible():
                 self.settings_dialog.status.setText(self.status.text())
+            if self.history_dialog.isVisible():
+                self.history_dialog.status.setText(self.status.text())
             self.review_panel.hide()
             self.consent_panel.hide()
             self.shortlist.clear()
@@ -1008,6 +1356,7 @@ class MainWindow(QMainWindow):
             self._set_busy(False)
 
     async def _open_cached(self) -> None:
+        self.cached_dialog.show_today()  # Today in the owner's zone, each time it opens.
         self.cached_dialog.configure(await self.backend.cached_accounts())
         self.cached_dialog.open()
         selected = self.cached_dialog.selection()
@@ -1032,8 +1381,62 @@ class MainWindow(QMainWindow):
             # A corrupt settings file must remain repairable from the editor.
             preferences = DesktopPreferences()
         self.settings_dialog.set_preferences(preferences)
-        self.status.setText("Edit connection and AI settings.")
+        panel = self.settings_dialog.preferences_panel
+        panel.set_zones(str(resolve_timezone(None)), await asyncio.to_thread(region_zones))
+        await self._show_auto_send()
+        self.status.setText("Edit connection and AI settings, and your preferences.")
+        try:
+            panel.set_preferences(await self.backend.get_owner_preferences())
+        except PreferencesUnavailableError as exc:
+            # Unreadable preferences stay repairable: the panel offers a reset.
+            log_failure(exc)
+            panel.set_unavailable()
+            self.status.setText(str(exc))
         self.settings_dialog.open()
+
+    def _apply_owner_preferences(self, preferences: OwnerPreferences) -> None:
+        """The owner's zone for every local day and time shown, and the drafting defaults."""
+        self.zone = owner_zone(preferences)
+        self.digest.zone = self.cached_dialog.zone = self.zone
+        self.draft_editor.ai_panel.set_defaults(preferences.draft_tone, preferences.draft_length)
+        self.scheduler.configure(
+            preferences.refresh_on_launch, preferences.refresh_interval_minutes
+        )
+
+    async def _load_owner_preferences(self) -> None:
+        """Views only display local data, so unreadable preferences fall back to the system
+        zone here; a brief or AI drafting still refuses to run until they are reset."""
+        try:
+            preferences = await self.backend.get_owner_preferences()
+        except Exception as exc:
+            log_failure(exc)
+            self._apply_owner_preferences(OwnerPreferences.defaults())
+            if isinstance(exc, PreferencesUnavailableError):
+                self.status.setText(str(exc))
+            return
+        self._apply_owner_preferences(preferences)
+
+    def _request_save_owner_preferences(self, edit: PreferencesEdit, revision: int) -> None:
+        self.start(lambda: self._save_owner_preferences(edit, revision), cancellable=False)
+
+    async def _save_owner_preferences(self, edit: PreferencesEdit, revision: int) -> None:
+        try:
+            saved = await self.backend.save_owner_preferences(edit, revision)
+        except PreferencesConflictError as exc:
+            log_failure(exc)
+            self.status.setText(str(exc))  # Static; _run shows it in the dialog too.
+            return
+        await self._owner_preferences_changed(saved, "Preferences saved.")
+
+    async def _reset_owner_preferences(self) -> None:
+        saved = await self.backend.reset_owner_preferences()
+        await self._owner_preferences_changed(saved, "Preferences reset to the defaults.")
+
+    async def _owner_preferences_changed(self, saved: OwnerPreferences, message: str) -> None:
+        self._apply_owner_preferences(saved)
+        self.settings_dialog.preferences_panel.set_preferences(saved)
+        self.status.setText(message)
+        await self._refresh_views()
 
     def _request_save_preferences(self, preferences: DesktopPreferences) -> None:
         self.start(lambda: self._save_preferences(preferences), cancellable=False)
@@ -1090,13 +1493,14 @@ class MainWindow(QMainWindow):
             self.digest.setPlainText("Saved brief unavailable until local storage can be opened.")
             return
         self._ready = True
+        self.status.setText("Ready. Sync to review today's messages.")
+        await self._load_owner_preferences()
         if saved is not None:
-            self.digest.show_digest(saved)
+            await self._show_digest(saved)
         else:
             self.digest.setPlainText(
                 "No saved brief yet. Connect Gmail, then sync and review your shortlist."
             )
-        self.status.setText("Ready. Sync to review today's messages.")
         await self._refresh_actions()
         await self._refresh_drafts()
         await self._refresh_ai_status()
@@ -1112,39 +1516,131 @@ class MainWindow(QMainWindow):
             log_failure(exc)
             self.connection.setText("Gmail: offline or unavailable. Saved brief available locally.")
         else:
+            self._account_email = email
             self.connection.setText(f"Gmail: connected as {email}")
+            self._launch_soon()
+
+    def _launch_soon(self) -> None:
+        """MailBrief has started and Gmail is connected: let the scheduler run the refresh the
+        owner asked for on launch, once this operation has finished, so it isn't turned away
+        as busy."""
+        asyncio.get_running_loop().call_soon(self.scheduler.launched)
 
     async def _connect(self) -> None:
         self.status.setText("Connecting to Gmail. Complete sign-in in your browser.")
         email = await self.backend.connect(silent_only=False)
+        self._account_email = email
         self.connection.setText(f"Gmail: connected as {email}")
         self.status.setText("Connected. Sync to review today's messages.")
+        await self._show_auto_send()  # The permission shown is the connected account's.
+        self._launch_soon()  # Only the first connection of a start counts as the launch.
 
     async def _disconnect(self) -> None:
         await self.backend.disconnect()
+        self._account_email = None
         self.connection.setText("Gmail: disconnected")
         self.status.setText("Local credentials removed. Saved briefs remain on this device.")
+        await self._show_auto_send()
 
-    async def _generate(self) -> None:
+    # Saved briefs by day. Opening one needs no connection; briefing a past day is the
+    # owner's explicit choice, one day at a time, for the connected account.
+
+    async def _open_history(self) -> None:
+        briefs = await self.backend.list_briefs()
+        email = self._account_email
+        missed = await self.backend.missed_days(email) if email is not None else ()
+        today = self.now().astimezone(self.zone).date()
+        self.history_dialog.configure(briefs, missed, email, today)
+        self.status.setText("Open a saved brief, or brief a missed day.")
+        self.history_dialog.open()
+
+    def _request_open_brief(self, account_email: str, local_date: date) -> None:
+        self.start(lambda: self._show_brief(account_email, local_date), cancellable=False)
+
+    async def _show_brief(self, account_email: str, local_date: date) -> None:
+        digest = await self.backend.load_brief(account_email, local_date)
+        if digest is None:
+            self.status.setText("That brief is no longer saved.")
+            return
+        await self._view(digest)
+        self.history_dialog.accept()
+        self.status.setText(f"Showing the brief for {local_date.isoformat()}.")
+
+    async def _view(self, digest: DailyDigest) -> None:
+        """Show a brief; the banner appears unless it is the latest."""
+        latest = await self.backend.load_saved()
+        identity = (digest.account_id, digest.local_date)
+        is_latest = latest is not None and (latest.account_id, latest.local_date) == identity
+        self._set_shown(None if is_latest else identity)
+        await self._show_digest(digest)
+
+    async def _back_to_latest(self) -> None:
+        self._set_shown(None)
+        await self._reload_brief()
+        self.status.setText("Showing the latest brief.")
+
+    def _request_brief_day(self, local_date: date) -> None:
+        if self._account_email is None:
+            self.history_dialog.status.setText(NEEDS_CONNECTION)
+            return
+        self.history_dialog.accept()
+        self.start(lambda: self._generate(local_date))
+
+    async def _generate(self, local_date: date | None = None) -> None:
+        """Brief today (Sync and review), or a past day chosen in Briefs…. However it ends,
+        the next automatic run is an interval later (ADR 0017)."""
+        try:
+            await self._generate_brief(local_date)
+        finally:
+            self.scheduler.note_run(self.now())
+
+    async def _generate_brief(self, local_date: date | None = None) -> None:
         self._offer_undo()  # A new brief replaces the suggestions that Undo would refer to.
-        self.status.setText("Syncing today's Inbox…")
-        result = await self.backend.generate(self, self, self._cancel, self._progress)
-        if result.digest is not None:
-            self.digest.show_digest(result.digest)
-            self.status.setText(f"Brief saved ({result.digest.status.value}).")
-            if result.digest.status is DigestStatus.EMPTY:
-                if result.sync.message_count == 0 and result.sync.status is SyncStatus.COMPLETE:
-                    self.status.setText("No messages in today's Inbox. Empty brief saved.")
+        if local_date is None and self._shown is not None:
+            self._set_shown(None)  # Sync and review returns to the latest brief.
+            await self._reload_brief()
+        day = "today's Inbox" if local_date is None else f"the Inbox for {local_date.isoformat()}"
+        self.status.setText(f"Syncing {day}…")
+        result = await self.backend.generate(
+            self, self, self._cancel, self._progress, local_date=local_date
+        )
+        match result.status:
+            case BriefStatus.SAVED:
+                digest = result.digest
+                assert digest is not None  # A saved result always carries its digest.
+                if local_date is None:
+                    await self._show_digest(digest)
                 else:
-                    self.status.setText(
-                        "No analyzed messages in this selection. Empty brief saved."
-                    )
-        elif result.status is BriefStatus.CANCELLED:
-            self.status.setText("Cancelled. The displayed saved brief is unchanged.")
-        elif result.status is BriefStatus.CONSENT_DECLINED:
-            self.status.setText("Transmission declined. No messages sent to AI in this run.")
-        else:
-            self.status.setText("Refresh failed. The displayed saved brief is unchanged.")
+                    await self._view(digest)
+                self.status.setText(f"Brief saved ({digest.status.value}).")
+                if digest.status is DigestStatus.EMPTY:
+                    if result.sync.message_count == 0 and result.sync.status is SyncStatus.COMPLETE:
+                        self.status.setText(f"No messages in {day}. Empty brief saved.")
+                    else:
+                        self.status.setText(
+                            "No analyzed messages in this selection. Empty brief saved."
+                        )
+            case BriefStatus.CANCELLED:
+                self.status.setText("Cancelled. The displayed saved brief is unchanged.")
+            case BriefStatus.CONSENT_DECLINED:
+                self.status.setText("Transmission declined. No messages sent to AI in this run.")
+            case BriefStatus.SYNC_FAILED:
+                self.status.setText(_REFRESH_FAILED)
+            case BriefStatus.ANALYSIS_FAILED:
+                self.status.setText(_REFRESH_FAILED)
+            case BriefStatus.READY_FOR_REVIEW:
+                # Only an automatic run ends this way; from here it is reported as a failure.
+                self.status.setText(_REFRESH_FAILED)
+            case _:
+                assert_never(result.status)
+        # A cancelled run's news is the cancellation; a partial count would invite misreading.
+        threads = "" if result.status is BriefStatus.CANCELLED else thread_check_text(result.sync)
+        if threads:
+            self.status.setText(f"{self.status.text()} {threads}")
+        if result.proposals_created > 0:
+            count = result.proposals_created
+            noun = "update" if count == 1 else "updates"
+            self.status.setText(f"{self.status.text()} Proposed {count} {noun} to your actions.")
         if result.error_code == "AUTH_REQUIRED" or result.sync.error_code == "AUTH_REQUIRED":
             self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
         for code in dict.fromkeys((result.error_code, result.sync.error_code)):
@@ -1154,6 +1650,159 @@ class MainWindow(QMainWindow):
                 if code.startswith("AI_"):
                     self.ai.setText("AI: " + guidance)
 
+    # Automatic refresh (ADR 0017): while MailBrief is open, on the owner's schedule. It has
+    # no review, no consent question and no dialog; everything it says goes to the status line.
+
+    def _dialog_open(self) -> bool:
+        """Whether the owner is working in one of the window's dialogs or editors."""
+        return any(
+            widget.isVisible()
+            for widget in (
+                self.settings_dialog,
+                self.auto_send_dialog,
+                self.history_dialog,
+                self.cached_dialog,
+                self.proposals_dialog,
+                self.action_editor,
+                self.draft_editor,
+            )
+        )
+
+    def _refresh_due(self) -> None:
+        """The scheduler says a run is due: start one unless something is in the way.
+
+        Another operation, or a dialog the owner is using, means try again a minute later; a
+        disconnected Gmail means skip this one, and say so. Nothing opens.
+        """
+        if self._closing or not self._ready:
+            return
+        busy = self._dialog_open() or (self.task is not None and not self.task.done())
+        if busy:
+            self.scheduler.retry_soon()
+            return
+        if self._account_email is None:
+            self.status.setText(_REFRESH_DISCONNECTED)
+            return
+        if not self.start(self._automatic_refresh):
+            self.scheduler.retry_soon()
+
+    async def _automatic_refresh(self) -> None:
+        """One automatic run. However it ends, the next is an interval later."""
+        self._automatic_active = True
+        self.status.setText(_AUTOMATIC + "checking Gmail…")
+        try:
+            result = await self.backend.generate_automatic(self._cancel, self._progress)
+            await self._automatic_finished(result)
+        finally:
+            self.scheduler.note_run(self.now())
+
+    async def _automatic_finished(self, result: BriefRunResult) -> None:
+        """Say what the run did, in the status line, and show what it saved."""
+        log_automatic_run(result)
+        stamp = f"{self.now().astimezone(self.zone):%H:%M}"
+        match result.status:
+            case BriefStatus.READY_FOR_REVIEW:
+                # Either it only checked, because nothing may be sent or nothing is new, or it
+                # saved nothing because the brief would have lost a carried message. When that
+                # was a failure, its guidance follows below.
+                found = (
+                    needs_review_sentence(result.unrefreshed, result.ready)
+                    if result.needs_review
+                    else _ready_text(result.ready)
+                )
+                text = f"Checked Gmail at {stamp}. {found}"
+            case BriefStatus.SAVED:
+                digest = result.digest
+                assert digest is not None  # A saved result always carries its digest.
+                analyzed = 0 if result.coverage is None else result.coverage.analyzed
+                text = f"Automatic brief at {stamp}: " + (
+                    f"analyzed {_count_messages(analyzed, new=True)}"
+                    if analyzed
+                    else "nothing new to analyze"
+                )
+                if result.deferred:
+                    waiting = "waits" if result.deferred == 1 else "wait"
+                    text += f"; {result.deferred} {waiting} for your review."
+                else:
+                    text += "."
+                if result.proposals_created > 0:
+                    count = result.proposals_created
+                    noun = "update" if count == 1 else "updates"
+                    text += f" Proposed {count} {noun} to your actions."
+                self._offer_undo()  # A new brief replaces the suggestions an Undo would refer to.
+                # Never pull the owner away from a past brief they're reading.
+                if self._shown is None:
+                    await self._show_digest(digest)
+            case BriefStatus.CANCELLED:
+                text = "Automatic refresh cancelled."
+            case BriefStatus.SYNC_FAILED:
+                text = ""  # The guidance for its code, below, says what failed.
+            case BriefStatus.ANALYSIS_FAILED:
+                text = ""  # As above.
+            case BriefStatus.CONSENT_DECLINED:
+                text = ""  # An automatic run never asks, so this never ends one.
+            case _:
+                assert_never(result.status)
+        if result.status is not BriefStatus.CANCELLED:
+            for code in dict.fromkeys((result.error_code, result.sync.error_code)):
+                if code:
+                    guidance = error_guidance(code)
+                    text = f"{text} {_AUTOMATIC}{guidance}".strip()
+                    if code.startswith("AI_"):
+                        self.ai.setText("AI: " + guidance)
+            if "AUTH_REQUIRED" in (result.error_code, result.sync.error_code):
+                self._account_email = None  # Nothing more runs until the owner signs in again.
+                self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
+        self.status.setText(text)
+        if result.status is not BriefStatus.CANCELLED:
+            await self._refresh_actions()  # Thread activity and proposals may have changed.
+
+    async def _show_auto_send(self) -> None:
+        """The automatic-analysis line in Settings, from the connected account's active
+        consent; local data only."""
+        panel = self.settings_dialog.preferences_panel
+        if self._account_email is None:
+            panel.set_auto_send(None, self.zone, connected=False)
+            return
+        try:
+            status = await self.backend.auto_send_status(self._account_email)
+        except Exception as exc:
+            log_failure(exc)
+            panel.set_auto_send(None, self.zone, unreadable=True)
+            return
+        panel.set_auto_send(status, self.zone)
+
+    async def _open_auto_send(self) -> None:
+        """Open the dialog on the connected account's permission; without an account or a
+        consent there is none to change."""
+        if self._account_email is None:
+            self.settings_dialog.preferences_panel.set_auto_send(None, self.zone, connected=False)
+            self.status.setText(AUTO_DISCONNECTED)
+            return
+        status = await self.backend.auto_send_status(self._account_email)
+        self.settings_dialog.preferences_panel.set_auto_send(status, self.zone)
+        if status is None:
+            self.status.setText(NO_CONSENT)
+            return
+        self.auto_send_dialog.configure(status)
+        self.auto_send_dialog.open()
+
+    def _request_set_auto_send(self, limit: int) -> None:
+        if not self.start(lambda: self._set_auto_send(limit), cancellable=False):
+            self.status.setText(_BUSY)
+
+    async def _set_auto_send(self, limit: int) -> None:
+        status = await self.backend.set_auto_send(limit, self._account_email)
+        self.settings_dialog.preferences_panel.set_auto_send(
+            status, self.zone, connected=self._account_email is not None
+        )
+        if status is None or status.limit == 0:
+            self.status.setText("Automatic analysis is off. Every run asks you first.")
+        else:
+            self.status.setText(
+                f"Automatic runs may now send up to {_count_messages(status.limit)} without asking."
+            )
+
     def _progress(self, progress: SyncProgress) -> None:
         self.status.setText(
             f"{progress.stage.value.capitalize()} · {progress.messages_fetched} messages · "
@@ -1161,19 +1810,47 @@ class MainWindow(QMainWindow):
         )
 
     async def review(
-        self, candidates: tuple[RankedMessage, ...], selected_ids: tuple[str, ...]
+        self,
+        candidates: tuple[RankedMessage, ...],
+        selected_ids: tuple[str, ...],
+        *,
+        blocked_ids: frozenset[str],
+        outside_ids: frozenset[str],
+        declined_ids: frozenset[str],
+        limit: int,
     ) -> tuple[str, ...] | None:
+        """Blocked messages are listed but can't be checked; at most ``limit`` can be.
+
+        Replies in tracked threads that aren't in today's Inbox (``outside_ids``) are labelled
+        as such and are otherwise like any other message. Messages the owner left out of an
+        earlier review (``declined_ids``) start unchecked, with "you left this out earlier"."""
         if not candidates:
             return ()
         self._review = asyncio.get_running_loop().create_future()
+        self._review_limit, self._review_blocked = limit, blocked_ids
+        self.review_hint.setText(_review_hint(limit))
         self.shortlist.clear()
         for ranked in candidates:
             message = ranked.message
-            item = QListWidgetItem(f"{message.sender.address} — {message.subject}")
+            label = f"{message.sender.address} — {message.subject}"
+            if message.provider_message_id in blocked_ids:
+                # Not user-checkable and never given a check box, so neither a click nor
+                # Space can select it.
+                item = QListWidgetItem(f"{label} — excluded in Settings")
+                item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                item.setToolTip(_EXCLUDED_TIP)
+                self.shortlist.addItem(item)
+                continue
+            if message.provider_message_id in outside_ids:
+                label = f"{label} — {OUTSIDE_REPLY_TEXT}"
+            if message.provider_message_id in declined_ids:
+                label = f"{label} — {DECLINED_TEXT}"
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
             item.setToolTip(
                 f"Rank score: {ranked.score}\n"
-                + ", ".join(reason.value.replace("_", " ") for reason in ranked.reasons)
+                + ", ".join(reason_text(reason) for reason in ranked.reasons)
             )
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
@@ -1192,36 +1869,39 @@ class MainWindow(QMainWindow):
         finally:
             self.review_panel.hide()
 
-    def _accept_review(self) -> None:
-        if self._review is None or self._review.done():
-            return
+    def _checked_ids(self) -> list[str]:
+        """The checked messages; a blocked message never counts, even if checked."""
         selected: list[str] = []
         for index in range(self.shortlist.count()):
             item = self.shortlist.item(index)
-            if item is not None and item.checkState() is Qt.CheckState.Checked:
-                selected.append(str(item.data(Qt.ItemDataRole.UserRole)))
+            if item is not None and item.checkState() == Qt.CheckState.Checked:
+                key = str(item.data(Qt.ItemDataRole.UserRole))
+                if key not in self._review_blocked:
+                    selected.append(key)
+        return selected
+
+    def _accept_review(self) -> None:
+        if self._review is None or self._review.done():
+            return
+        selected = self._checked_ids()
         if not selected:
             # Continuing with nothing would save an empty brief over today's saved one.
             self.status.setText(_PICK_ONE)
             return
-        if len(selected) > MAX_SHORTLIST_SIZE:
-            self.status.setText("Choose at most ten messages before continuing.")
+        if len(selected) > self._review_limit:
+            self.status.setText(_too_many(self._review_limit))
             return
         self._review.set_result(tuple(selected))
 
     def _selection_changed(self) -> None:
-        count = 0
-        for index in range(self.shortlist.count()):
-            item = self.shortlist.item(index)
-            if item is not None and item.checkState() == Qt.CheckState.Checked:
-                count += 1
+        count = len(self._checked_ids())
         noun = "message" if count == 1 else "messages"
         self.review_button.setText(f"Co&ntinue with {count} selected {noun}")
-        self.review_button.setEnabled(1 <= count <= MAX_SHORTLIST_SIZE)
+        self.review_button.setEnabled(1 <= count <= self._review_limit)
         if count == 0:
             self.status.setText(_PICK_ONE)
-        elif count > MAX_SHORTLIST_SIZE:
-            self.status.setText("Choose at most ten messages before continuing.")
+        elif count > self._review_limit:
+            self.status.setText(_too_many(self._review_limit))
 
     async def confirm(self, preview: TransmissionPreview) -> bool:
         self._consent = asyncio.get_running_loop().create_future()
@@ -1253,8 +1933,12 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self._closing = True
+        self.scheduler.stop()
+        self.auto_send_dialog.reject()
         self.settings_dialog.reject()
         self.cached_dialog.reject()
+        self.history_dialog.reject()
+        self.proposals_dialog.reject()
         self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
         self._cancel_drafting()
         final = self.draft_editor.final_edit() if self.draft_editor.isVisible() else None
@@ -1267,6 +1951,7 @@ class MainWindow(QMainWindow):
     async def shutdown(self) -> None:
         if self._shutdown_complete:
             return
+        self.scheduler.stop()  # No timer outlives the window.
         self.cancel()
         try:
             if self.task is not None:

@@ -1,10 +1,12 @@
 """Offline browsing and keyboard-driven shortlist inclusion."""
 
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
+import time_machine
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QTest
 from pytestqt.qtbot import QtBot
@@ -29,7 +31,16 @@ async def test_keyboard_review_can_select_outside_suggestions_and_enforces_limit
         )
         for index in range(12)
     )
-    task = asyncio.create_task(window.review(candidates, ("m0", "m1", "m2")))
+    task = asyncio.create_task(
+        window.review(
+            candidates,
+            ("m0", "m1", "m2"),
+            blocked_ids=frozenset(),
+            outside_ids=frozenset(),
+            declined_ids=frozenset(),
+            limit=10,
+        )
+    )
     await asyncio.sleep(0)
     try:
         assert window.shortlist.count() == 12
@@ -108,3 +119,56 @@ async def test_offline_browsing_filters_pages_and_renders_preview_as_text(
     await finish(window)
     assert requests[-1] == (2, date(2026, 8, 31), 0)
     forbidden.assert_not_called()
+
+
+class OneAccountBackend(FakeBackend):
+    """One cached account; records the pages asked for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[tuple[int, date, int]] = []
+
+    async def cached_accounts(self) -> tuple[CachedAccount, ...]:
+        return (CachedAccount(account_id=1, email_address="one@example.com"),)
+
+    async def cached_messages(self, account_id: int, day: date, offset: int = 0) -> CachedMailPage:
+        self.requests.append((account_id, day, offset))
+        return CachedMailPage(
+            account=(await self.cached_accounts())[0],
+            local_date=day,
+            timezone_name="Pacific/Kiritimati",
+            offset=offset,
+            has_more=False,
+            messages=(),
+        )
+
+
+async def test_browse_saved_mail_opens_on_today_in_your_time_zone(qtbot: QtBot) -> None:
+    backend = OneAccountBackend()
+    window = MainWindow(backend)
+    qtbot.addWidget(window)
+    window.start(window.initialize)
+    await finish(window)
+    # Kiritimati is UTC+14: at noon UTC on the 30th it is already 1 October there, a date no
+    # computer west of it shares.
+    window.cached_dialog.zone = ZoneInfo("Pacific/Kiritimati")
+    viewer = window.cached_dialog
+    assert viewer.day.accessibleName() == "Received date in your time zone"
+
+    with time_machine.travel(datetime(2026, 9, 30, 12, tzinfo=UTC), tick=False):
+        window.cached_button.click()
+        await finish(window)
+
+    assert viewer.day.date() == QDate(2026, 10, 1)
+    assert backend.requests == [(1, date(2026, 10, 1), 0)]
+
+    # Picking another day, closing and opening again starts from today once more.
+    viewer.day.setDate(QDate(2026, 9, 20))
+    await finish(window)
+    viewer.reject()
+    viewer.today = lambda: date(2026, 10, 2)  # An injected clock, a day later.
+    window.cached_button.click()
+    await finish(window)
+
+    assert viewer.day.date() == QDate(2026, 10, 2)
+    assert backend.requests[-1] == (1, date(2026, 10, 2), 0)

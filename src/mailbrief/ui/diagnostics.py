@@ -4,6 +4,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from mailbrief.domain.briefs import BriefRunResult
 from mailbrief.errors import ConfigurationError
 
 ERROR_MESSAGES = {
@@ -35,6 +36,7 @@ ERROR_MESSAGES = {
         "The draft changed before Groq's text could be used. Nothing was lost; try again."
     ),
     "ANALYSIS_FAILED": "No message could be analyzed. Review your selection and AI settings.",
+    "CARRIED_BODY_FAILED": "A message in today's brief couldn't be read.",
 }
 
 logger = logging.getLogger("mailbrief.desktop")
@@ -48,7 +50,7 @@ def configure_logging(directory: Path) -> RotatingFileHandler:
     )
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.disabled = False
-    logger.setLevel(logging.WARNING)
+    logger.setLevel(logging.INFO)  # Automatic runs leave one counts-only line each.
     logger.addHandler(handler)
     return handler
 
@@ -56,6 +58,25 @@ def configure_logging(directory: Path) -> RotatingFileHandler:
 def log_failure(exc: Exception) -> None:
     # Never log str(exc), tracebacks, request IDs, provider data or mail-derived text.
     logger.warning("exception=%s", type(exc).__name__)
+
+
+def log_automatic_run(result: BriefRunResult) -> None:
+    """One line per automatic run (ADR 0017): its outcome and counts, never mail text.
+
+    ``ai_requests`` is how many requests reached the AI provider, so the log itself shows
+    that a run without permission made none. ``unrefreshed`` above 0 is a run that saved
+    nothing rather than lose that many carried messages.
+    """
+    analyzed = 0 if result.coverage is None else result.coverage.analyzed
+    logger.info(
+        "automatic run: status=%s ready=%d unrefreshed=%d analyzed=%d deferred=%d ai_requests=%d",
+        result.status.value,
+        result.ready,
+        result.unrefreshed,
+        analyzed,
+        result.deferred,
+        result.ai_calls,
+    )
 
 
 def error_guidance(code: str) -> str:

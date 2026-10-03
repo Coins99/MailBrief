@@ -2,17 +2,29 @@
 
 import asyncio
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from pydantic import SecretStr
 
 from mailbrief.config import Settings
-from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, StepEdit
+from mailbrief.domain.actions import (
+    Action,
+    ActionEdit,
+    ActionFilter,
+    ActionProposal,
+    StepEdit,
+    ThreadLink,
+)
 from mailbrief.domain.bodies import MessageBody
-from mailbrief.domain.briefs import BriefRunResult
+from mailbrief.domain.briefs import (
+    AutoSendPermission,
+    AutoSendStatus,
+    BriefRunResult,
+    TransmissionPreview,
+)
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
-from mailbrief.domain.digests import DailyDigest, SyncProgress
+from mailbrief.domain.digests import DailyDigest, SavedBriefSummary, SyncProgress
 from mailbrief.domain.drafting import DraftContextPart, DraftingOptions, DraftingOutcome
 from mailbrief.domain.drafts import (
     Draft,
@@ -23,17 +35,26 @@ from mailbrief.domain.drafts import (
     DraftVersionInfo,
 )
 from mailbrief.domain.messages import ProviderKind
+from mailbrief.domain.preferences import OwnerPreferences, PreferencesEdit
 from mailbrief.providers.gmail.cache import GmailCredentialStore
 from mailbrief.providers.gmail.factory import gmail_provider
 from mailbrief.providers.gmail.oauth import DesktopClient
 from mailbrief.providers.groq.credentials import GroqKeyStore
 from mailbrief.providers.groq.factory import groq_provider
-from mailbrief.services.actions import ActionService
+from mailbrief.providers.groq.provider import PRIVACY_NOTICE, PROVIDER_NAME
+from mailbrief.services.actions import AcceptedInto, ActionService, DecisionSnapshot
 from mailbrief.services.analysis import AnalysisService
 from mailbrief.services.application import ApplicationService
 from mailbrief.services.bodies import BodyService
-from mailbrief.services.brief import BriefService, ConsentGate, ShortlistGate
-from mailbrief.services.calendar import local_day_window, resolve_timezone
+from mailbrief.services.brief import (
+    CONSENT_DISCLOSURE_VERSION,
+    BriefService,
+    ConsentGate,
+    ShortlistGate,
+    permission_preview,
+)
+from mailbrief.services.calendar import day_window, resolve_timezone
+from mailbrief.services.consent import auto_send_permission, set_auto_send
 from mailbrief.services.digest import DigestService
 from mailbrief.services.drafting import (
     DRAFTING_DISCLOSURE_VERSION,
@@ -43,6 +64,15 @@ from mailbrief.services.drafting import (
     DraftingService,
 )
 from mailbrief.services.drafts import DraftService
+from mailbrief.services.history import BriefHistory, check_brief_date
+from mailbrief.services.preferences import (
+    PreferencesService,
+    PreferencesUnavailableError,
+    effective_settings,
+    owner_zone,
+)
+from mailbrief.services.proposals import ProposalService
+from mailbrief.services.threads import ThreadService
 from mailbrief.storage.database import Database
 from mailbrief.storage.migrate import upgrade_database
 from mailbrief.storage.repositories import (
@@ -54,6 +84,14 @@ from mailbrief.storage.repositories import (
     SyncRunRepository,
 )
 from mailbrief.ui.preferences import DesktopPreferences, PreferencesStore
+
+
+class _NeverAsks:
+    """The consent gate of an automatic run, which has nobody to ask: BriefService never calls
+    it, and if it ever did, nothing would be sent."""
+
+    async def confirm(self, preview: object) -> bool:
+        return False
 
 
 class _GmailBodies:
@@ -72,7 +110,12 @@ class _GmailBodies:
 
 
 class DesktopRuntime:
-    """Use the same settings, vault, migrations and services as the diagnostic CLI."""
+    """Use the same settings, vault, migrations and services as the diagnostic CLI.
+
+    The owner's preferences are read for every operation that could send data, and
+    unreadable preferences stop it (PreferencesUnavailableError) rather than fall back to
+    defaults that would drop the owner's sender exclusions.
+    """
 
     def __init__(self, database_path: Path) -> None:
         self._path = database_path
@@ -148,14 +191,54 @@ class DesktopRuntime:
         review: ShortlistGate,
         cancel: asyncio.Event,
         progress: Callable[[SyncProgress], None],
+        local_date: date | None = None,
     ) -> BriefRunResult:
-        if self._database is None:
-            raise RuntimeError("Desktop storage is not initialized.")
-        settings = (await self.get_preferences()).settings()
+        """Brief today, or ``local_date``: one of the previous seven days, checked before any
+        provider is built. BriefService checks it again."""
+        return await self._brief(
+            gate=gate,
+            review=review,
+            cancel=cancel,
+            progress=progress,
+            local_date=local_date,
+            automatic=False,
+        )
+
+    async def generate_automatic(
+        self, cancel: asyncio.Event, progress: Callable[[SyncProgress], None]
+    ) -> BriefRunResult:
+        """One automatic run for today (ADR 0017): no review, no consent question and no past
+        day. It syncs, checks threads and ranks; only the automatic-analysis permission on the
+        active consent lets it send anything, and without one it reports how many messages
+        are ready to review."""
+        return await self._brief(
+            gate=_NeverAsks(),
+            review=None,
+            cancel=cancel,
+            progress=progress,
+            local_date=None,
+            automatic=True,
+        )
+
+    async def _brief(
+        self,
+        *,
+        gate: ConsentGate,
+        review: ShortlistGate | None,
+        cancel: asyncio.Event,
+        progress: Callable[[SyncProgress], None],
+        local_date: date | None,
+        automatic: bool,
+    ) -> BriefRunResult:
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
+        zone = owner_zone(preferences)
+        if local_date is not None:
+            check_brief_date(local_date, datetime.now(UTC).astimezone(zone).date())
         async with (
             gmail_provider(settings, silent_only=True) as provider,
             groq_provider(settings) as ai,
-            self._database.session() as session,
+            self._storage().session() as session,
         ):
             service = BriefService(
                 session=session,
@@ -164,16 +247,116 @@ class DesktopRuntime:
                     MessageRepository(session),
                     SyncRunRepository(session),
                     AccountRepository(session),
+                    threads=ThreadService(session, provider),
                 ),
                 bodies=BodyService(provider, limit=settings.ai_body_character_limit),
                 analysis=AnalysisService(session, ai, batch_size=settings.ai_batch_size),
                 digests=DigestService(session),
                 consent_gate=gate,
             )
-            return await service.generate(cancel=cancel, progress=progress, shortlist_gate=review)
+            return await service.generate(
+                tz_key=zone.key,
+                cancel=cancel,
+                progress=progress,
+                shortlist_gate=review,
+                shortlist_limit=preferences.shortlist_limit,
+                excluded_senders=preferences.excluded_senders,
+                local_date=local_date,
+                automatic=automatic,
+            )
+
+    # The automatic-analysis permission (ADR 0017) lives on the active consent. Reading and
+    # changing it needs no Gmail and no AI.
+
+    async def auto_send_status(self, account_email: str | None) -> AutoSendStatus | None:
+        """The connected account's permission and the disclosure it rests on; None when that
+        account has no active consent yet, so there is nothing to allow."""
+        async with self._storage().session() as session:
+            permission = await auto_send_permission(
+                session,
+                account_email,
+                provider=PROVIDER_NAME,
+                version=CONSENT_DISCLOSURE_VERSION,
+            )
+        return None if permission is None else await self._auto_send_status(permission)
+
+    async def set_auto_send(self, limit: int, account_email: str | None) -> AutoSendStatus | None:
+        """Allow automatic runs to send up to ``limit`` of the connected account's messages
+        without asking; 0 turns it off for every account. Raises ConfigurationError (a static
+        message) when a limit above 0 has no active consent to rest on. None when the
+        account has no active consent."""
+        async with self._storage().session() as session:
+            permission = await set_auto_send(
+                session,
+                limit,
+                account_email,
+                provider=PROVIDER_NAME,
+                version=CONSENT_DISCLOSURE_VERSION,
+            )
+        return None if permission is None else await self._auto_send_status(permission)
+
+    async def _auto_send_status(self, permission: AutoSendPermission) -> AutoSendStatus:
+        """The permission with what one automatic run would send: the chosen model and body
+        limit, from settings that can be read even when the saved preferences can't."""
+        try:
+            settings = await self._settings(await self.get_owner_preferences())
+        except PreferencesUnavailableError:
+            settings = (await self.get_preferences()).settings()
+        model = (settings.groq_model or "").strip() or "the model chosen in Settings"
+        preview: TransmissionPreview = permission_preview(
+            max(permission.limit, 1),
+            provider_name=PROVIDER_NAME,
+            model_name=model,
+            body_character_limit=settings.ai_body_character_limit,
+            privacy_notice=PRIVACY_NOTICE,
+        )
+        return AutoSendStatus(**permission.model_dump(), disclosure=preview)
+
+    # Saved briefs by day (M8 Part 3). Reading them needs no Gmail or AI.
+
+    async def list_briefs(self) -> tuple[SavedBriefSummary, ...]:
+        async with self._storage().session() as session:
+            return await BriefHistory(session).list_saved()
+
+    async def load_brief(self, account_email: str, local_date: date) -> DailyDigest | None:
+        async with self._storage().session() as session:
+            return await BriefHistory(session).get(account_email, local_date)
+
+    async def missed_days(self, account_email: str) -> tuple[date, ...]:
+        """The previous seven days in the owner's zone without a brief for the account.
+
+        Listing only displays, so unreadable preferences fall back to the system zone.
+        """
+        try:
+            zone = owner_zone(await self.get_owner_preferences())
+        except PreferencesUnavailableError:
+            zone = resolve_timezone(None)
+        today = datetime.now(UTC).astimezone(zone).date()
+        async with self._storage().session() as session:
+            return await BriefHistory(session).missed_days(account_email, today)
 
     async def get_preferences(self) -> DesktopPreferences:
         return await asyncio.to_thread(self._preferences.load)
+
+    async def _settings(self, preferences: OwnerPreferences) -> Settings:
+        """Device settings with the saved AI limits where no MAILBRIEF_* variable is set."""
+        return effective_settings((await self.get_preferences()).settings(), preferences)
+
+    # The owner's preferences (ADR 0014) live in the database, shared with the CLI.
+
+    async def get_owner_preferences(self) -> OwnerPreferences:
+        async with self._storage().session() as session:
+            return await PreferencesService(session).get()
+
+    async def save_owner_preferences(
+        self, edit: PreferencesEdit, revision: int
+    ) -> OwnerPreferences:
+        async with self._storage().session() as session:
+            return await PreferencesService(session).save(edit, revision)
+
+    async def reset_owner_preferences(self) -> OwnerPreferences:
+        async with self._storage().session() as session:
+            return await PreferencesService(session).reset()
 
     async def cached_accounts(self) -> tuple[CachedAccount, ...]:
         if self._database is None:
@@ -191,11 +374,12 @@ class DesktopRuntime:
             )
 
     async def cached_messages(self, account_id: int, day: date, offset: int = 0) -> CachedMailPage:
-        if self._database is None:
-            raise RuntimeError("Desktop storage is not initialized.")
-        zone = resolve_timezone(None)
-        window = local_day_window(datetime.combine(day, time(12), tzinfo=zone), zone)
-        async with self._database.session() as session:
+        try:
+            zone = owner_zone(await self.get_owner_preferences())
+        except PreferencesUnavailableError:
+            zone = resolve_timezone(None)  # Browsing only displays local data.
+        window = day_window(day, zone)
+        async with self._storage().session() as session:
             account = await AccountRepository(session).get_by_id(account_id)
             if account is None or account.provider != ProviderKind.GMAIL.value:
                 raise ValueError("Choose an existing cached Gmail account.")
@@ -272,6 +456,61 @@ class DesktopRuntime:
     async def accept_suggestion(self, suggestion_id: int) -> Action:
         async with self._storage().session() as session:
             return await ActionService(session).accept(suggestion_id)
+
+    async def brief_links(self, digest: DailyDigest) -> dict[str, tuple[ThreadLink, ...]]:
+        """The live, open actions that continue each item's thread; local data only."""
+        async with self._storage().session() as session:
+            return await ActionService(session).thread_links(
+                digest.account_id, (item.message_key for item in digest.items)
+            )
+
+    # Follow-up proposals (ADR 0016): derived after a brief, applied only when the owner asks.
+
+    async def brief_proposals(self, digest: DailyDigest) -> dict[str, tuple[ActionProposal, ...]]:
+        """The pending proposals of live, open actions made from each item's email, by message
+        key; local data only."""
+        async with self._storage().session() as session:
+            return await ProposalService(session).pending_for_messages(
+                digest.account_id, (item.message_key for item in digest.items)
+            )
+
+    async def apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ProposalService(session).apply(proposal_id, revision)
+
+    async def undo_apply_proposal(self, proposal_id: int, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ProposalService(session).undo_apply(proposal_id, revision)
+
+    async def dismiss_proposal(self, proposal_id: int) -> None:
+        async with self._storage().session() as session:
+            await ProposalService(session).dismiss(proposal_id)
+
+    async def restore_proposal(self, proposal_id: int) -> None:
+        async with self._storage().session() as session:
+            await ProposalService(session).restore(proposal_id)
+
+    async def accept_into(self, suggestion_id: int, public_id: str, revision: int) -> AcceptedInto:
+        async with self._storage().session() as session:
+            return await ActionService(session).accept_into(suggestion_id, public_id, revision)
+
+    async def undo_accept_into(
+        self,
+        suggestion_id: int,
+        public_id: str,
+        revision: int,
+        remove_source: bool,
+        *,
+        previous: DecisionSnapshot,
+    ) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).undo_accept_into(
+                suggestion_id, public_id, revision, remove_source, previous=previous
+            )
+
+    async def mark_thread_seen(self, public_id: str, revision: int) -> Action:
+        async with self._storage().session() as session:
+            return await ActionService(session).mark_thread_seen(public_id, revision)
 
     async def dismiss_suggestion(self, suggestion_id: int) -> None:
         async with self._storage().session() as session:
@@ -373,34 +612,44 @@ class DesktopRuntime:
     # opened for each call and closed afterwards.
 
     async def available_drafting_parts(self, public_id: str) -> frozenset[DraftContextPart]:
-        settings = (await self.get_preferences()).settings()
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
         async with groq_provider(settings) as ai, self._storage().session() as session:
             service = DraftingService(
                 session,
                 ai,
                 BodyService(_GmailBodies(settings), limit=settings.ai_body_character_limit),
-                zone=resolve_timezone(None),
+                zone=owner_zone(preferences),
+                excluded_senders=preferences.excluded_senders,
             )
             return await service.available_parts(public_id)
 
     async def prepare_drafting(self, public_id: str, options: DraftingOptions) -> DraftingPlan:
         """Build what would be sent; choosing the email downloads its body now, in memory."""
-        settings = (await self.get_preferences()).settings()
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
         async with groq_provider(settings) as ai, self._storage().session() as session:
             service = DraftingService(
                 session,
                 ai,
                 BodyService(_GmailBodies(settings), limit=settings.ai_body_character_limit),
-                zone=resolve_timezone(None),
+                zone=owner_zone(preferences),
+                excluded_senders=preferences.excluded_senders,
             )
             return await service.prepare(public_id, options)
 
     async def generate_draft(
         self, plan: DraftingPlan, gate: DraftingGate, cancel: asyncio.Event
     ) -> DraftingOutcome:
-        settings = (await self.get_preferences()).settings()
+        preferences = await self.get_owner_preferences()
+        settings = await self._settings(preferences)
         async with groq_provider(settings) as ai, self._storage().session() as session:
-            service = DraftingService(session, ai, zone=resolve_timezone(None))
+            service = DraftingService(
+                session,
+                ai,
+                zone=owner_zone(preferences),
+                excluded_senders=preferences.excluded_senders,
+            )
             return await service.generate(plan, gate, cancel)
 
     async def close(self) -> None:

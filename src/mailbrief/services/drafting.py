@@ -45,6 +45,7 @@ from mailbrief.domain.drafting import (
 )
 from mailbrief.domain.drafts import Draft, DraftKind
 from mailbrief.domain.messages import ProviderKind, RankedMessage
+from mailbrief.domain.preferences import sender_excluded
 from mailbrief.ports.drafting import DraftingProvider
 from mailbrief.ports.errors import ProviderError
 from mailbrief.services.actions import ActionService
@@ -58,6 +59,7 @@ from mailbrief.storage.repositories import (
     MessageRepository,
     OwnerConsentRepository,
 )
+from mailbrief.storage.tables import DraftSourceTable
 from mailbrief.text.matching import copies_long_run
 from mailbrief.text.prepare import (
     clean_generated_block,
@@ -179,20 +181,41 @@ class DraftingService:
         *,
         clock: Callable[[], datetime] = _utc_now,
         zone: ZoneInfo,
+        excluded_senders: tuple[str, ...] = (),
     ) -> None:
         self._session = session
         self._provider = provider
         self._bodies = bodies
         self._clock = clock
         self._zone = zone
+        self._excluded_senders = excluded_senders
         self._drafts = DraftService(session, clock=clock)
         self._consents = OwnerConsentRepository(session)
 
+    async def _email_source(self, public_id: str) -> DraftSourceTable | None:
+        """The email a generation would use: the first source still in local mail.
+
+        Sources are read in insertion order, the same order as ``Draft.sources``.
+        """
+        drafts = DraftRepository(self._session)
+        row = await drafts.get_draft(public_id)
+        rows = [] if row is None else await drafts.source_rows(row.id)
+        return next((source for source in rows if source.message_id is not None), None)
+
     async def available_parts(self, public_id: str) -> frozenset[DraftContextPart]:
-        """What the owner may send now for this draft."""
+        """What the owner may send now for this draft.
+
+        The email is offered only when bodies can be downloaded, it is still in local
+        mail and its sender isn't excluded in the owner's preferences.
+        """
         draft = await self._drafts.get(public_id)
         parts: set[DraftContextPart] = set()
-        if self._bodies is not None and any(source.available for source in draft.sources):
+        source = await self._email_source(public_id)
+        if (
+            self._bodies is not None
+            and source is not None
+            and not sender_excluded(source.sender_address, self._excluded_senders)
+        ):
             parts.add(DraftContextPart.SOURCE_EMAIL)
         if draft.action_public_id is not None:
             parts.add(DraftContextPart.ACTION)
@@ -269,13 +292,13 @@ class DraftingService:
     async def _source(self, draft: Draft) -> SourceContext:
         """The first source still in local mail, with its body downloaded now.
 
-        available_parts() has checked that there is one and that bodies can be downloaded.
+        available_parts() has checked that there is one, that its sender isn't excluded and
+        that bodies can be downloaded. The cached message's own sender is checked again
+        before anything is downloaded.
         """
         assert self._bodies is not None
-        drafts = DraftRepository(self._session)
-        row = await drafts.get_draft(draft.public_id)
-        rows = [] if row is None else await drafts.source_rows(row.id)
-        message_id = next((row.message_id for row in rows if row.message_id is not None), None)
+        source = await self._email_source(draft.public_id)
+        message_id = None if source is None else source.message_id
         messages = MessageRepository(self._session)
         message = None if message_id is None else await messages.get_by_id(message_id)
         account = (
@@ -284,6 +307,8 @@ class DraftingService:
             else await AccountRepository(self._session).get_by_id(message.account_id)
         )
         assert message is not None and account is not None
+        if sender_excluded(message.sender_address, self._excluded_senders):
+            raise DraftingContextError("That context is no longer available; choose again.")
         normalized = MessageRepository.to_domain(
             message, account.provider_account_id, ProviderKind(account.provider)
         )

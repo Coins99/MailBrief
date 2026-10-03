@@ -7,6 +7,7 @@ import pytest
 
 from mailbrief.services.calendar import (
     DayWindow,
+    day_window,
     graph_date_filter,
     local_day_window,
     resolve_timezone,
@@ -106,3 +107,35 @@ def test_resolve_timezone_fallback_on_error(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("tzlocal.get_localzone", fake_get_localzone)
     tz = resolve_timezone(None)
     assert tz.key == "UTC"
+
+
+@pytest.mark.parametrize(
+    ("zone_name", "day", "hours"),
+    [
+        ("America/Toronto", date(2026, 9, 29), 24),
+        ("Asia/Tokyo", date(2026, 1, 1), 24),
+        ("America/Toronto", date(2026, 3, 8), 23),  # 02:00 spring forward
+        ("America/Toronto", date(2026, 11, 1), 25),  # 02:00 fall back
+        ("America/Havana", date(2026, 3, 8), 23),  # Midnight doesn't exist: 00:00 -> 01:00.
+        ("America/Havana", date(2026, 11, 1), 25),  # 01:00 -> 00:00, so midnight repeats.
+        ("America/Santiago", date(2026, 9, 6), 23),  # 00:00 -> 01:00
+        ("UTC", date(2026, 2, 28), 24),
+    ],
+)
+def test_day_window_matches_the_window_of_any_moment_that_day(
+    zone_name: str, day: date, hours: int
+) -> None:
+    tz = ZoneInfo(zone_name)
+    window = day_window(day, tz)
+
+    assert window.local_date == day
+    assert window.timezone_name == zone_name
+    assert window.end_utc - window.start_utc == timedelta(hours=hours)
+    # The first instant, a midday instant and the last instant of the day all agree.
+    for moment in (
+        window.start_utc,
+        window.start_utc + timedelta(hours=hours / 2),
+        window.end_utc - timedelta(microseconds=1),
+    ):
+        assert local_day_window(moment, tz) == window
+    assert local_day_window(window.end_utc, tz).local_date == day + timedelta(days=1)
