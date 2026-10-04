@@ -5,8 +5,10 @@ import json
 import os
 import sqlite3
 import zipfile
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -101,6 +103,56 @@ def test_oversized_snapshot_refused_before_publication(
     database = tmp_path / "database.sqlite3"
     upgrade_database(database)
     monkeypatch.setattr(backup, "MAX_DATABASE_BYTES", 1)
+    real_connect = sqlite3.connect
+
+    class NoCopyConnection(sqlite3.Connection):
+        def backup(
+            self,
+            target: sqlite3.Connection,
+            *,
+            pages: int = -1,
+            progress: Callable[[int, int, int], object] | None = None,
+            name: str = "main",
+            sleep: float = 0.250,
+        ) -> None:
+            raise AssertionError("Oversized database must be refused before copying")
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        return real_connect(*args, **kwargs, factory=NoCopyConnection)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    with pytest.raises(ValueError, match="supported backup size"):
+        create_backup(database, tmp_path / "backup.zip")
+    assert not (tmp_path / "backup.zip").exists()
+    assert not list(tmp_path.glob(".mailbrief-backup-*"))
+
+
+def test_growth_during_backup_aborts_and_cleans_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "database.sqlite3"
+    upgrade_database(database)
+    monkeypatch.setattr(backup, "MAX_DATABASE_BYTES", database.stat().st_size)
+    real_connect = sqlite3.connect
+
+    class GrowingConnection(sqlite3.Connection):
+        def backup(
+            self,
+            target: sqlite3.Connection,
+            *,
+            pages: int = -1,
+            progress: Callable[[int, int, int], object] | None = None,
+            name: str = "main",
+            sleep: float = 0.250,
+        ) -> None:
+            assert pages == 1 and progress is not None
+            progress(sqlite3.SQLITE_OK, 1000000, 1000001)
+            raise AssertionError("Growth should abort the copy")
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        return real_connect(*args, **kwargs, factory=GrowingConnection)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
     with pytest.raises(ValueError, match="supported backup size"):
         create_backup(database, tmp_path / "backup.zip")
     assert not (tmp_path / "backup.zip").exists()

@@ -14,11 +14,12 @@ from uuid import uuid4
 
 from alembic.script import ScriptDirectory
 from pydantic import ValidationError
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, inspect
 from sqlalchemy.dialects.sqlite import dialect
 
 from mailbrief.domain.backup import MAX_DATABASE_BYTES, MAX_METADATA_BYTES, BackupMetadata
 from mailbrief.infra.data_lock import data_directory_lock
+from mailbrief.infra.files import sync_directory
 from mailbrief.storage.migrate import migration_config, upgrade_database
 from mailbrief.storage.tables import Base
 
@@ -29,7 +30,20 @@ class BackupValidationError(ValueError):
     """An archive cannot be safely restored; its content is never included in errors."""
 
 
-def _check_schema(connection: sqlite3.Connection) -> None:
+def _check_schema(connection: sqlite3.Connection, path: Path) -> None:
+    engine = create_engine(
+        "sqlite://",
+        creator=lambda: sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True),
+    )
+    try:
+        with engine.connect() as reflected:
+            inspector = inspect(reflected)
+            checks = {
+                name: {item["sqltext"].strip() for item in inspector.get_check_constraints(name)}
+                for name in Base.metadata.tables
+            }
+    finally:
+        engine.dispose()
     for name, table in Base.metadata.tables.items():
         columns = {
             row[1]: (row[2].upper(), bool(row[3]), bool(row[5]))
@@ -65,7 +79,17 @@ def _check_schema(connection: sqlite3.Connection) -> None:
             for constraint in table.constraints
             if isinstance(constraint, UniqueConstraint)
         }
-        if columns != expected or foreign_keys != expected_keys or not expected_unique <= unique:
+        expected_checks = {
+            str(constraint.sqltext.compile(dialect=dialect())).strip()
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint)
+        }
+        if (
+            columns != expected
+            or foreign_keys != expected_keys
+            or not expected_unique <= unique
+            or checks[name] != expected_checks
+        ):
             raise BackupValidationError(_INVALID)
 
 
@@ -90,7 +114,9 @@ def validate_snapshot(path: Path, *, current_schema: bool = False) -> tuple[str,
         if current_schema and not is_current:
             raise BackupValidationError(_INVALID)
         if is_current:
-            _check_schema(connection)
+            if not expected <= tables:
+                raise BackupValidationError(_INVALID)
+            _check_schema(connection, path)
         if connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise BackupValidationError(_INVALID)
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -252,6 +278,7 @@ def _restore_backup_locked(
             _preserve_database(database, snapshot)
             previous = database.with_name(f"{database.name}.pre-restore-{uuid4().hex}.sqlite3")
             os.link(snapshot, previous)
+            sync_directory(database.parent)
         if any(Path(f"{database}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")):
             raise BackupValidationError(
                 "Database sidecar files remain. Close all database clients before restoring."
@@ -260,4 +287,5 @@ def _restore_backup_locked(
             os.link(staged, database)
         else:
             os.replace(staged, database)
+        sync_directory(database.parent)
         return previous

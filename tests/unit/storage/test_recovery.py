@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from alembic import command
 from PySide6.QtCore import QLockFile
-from sqlalchemy import ForeignKeyConstraint, Integer, MetaData, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Integer, MetaData, UniqueConstraint
 from sqlalchemy.dialects.sqlite import dialect
 from sqlalchemy.schema import CreateTable
 
@@ -266,7 +266,9 @@ def test_inspect_checks_supported_archive(archive: Path) -> None:
     assert metadata.credentials_included is False
 
 
-@pytest.mark.parametrize("defect", ["foreign-key", "unique", "type", "nullable"])
+@pytest.mark.parametrize(
+    "defect", ["foreign-key", "unique", "type", "nullable", "check", "weak-check"]
+)
 def test_matching_column_names_do_not_make_a_valid_schema(
     archive: Path,
     tmp_path: Path,
@@ -278,7 +280,13 @@ def test_matching_column_names_do_not_make_a_valid_schema(
     for source in Base.metadata.tables.values():
         source.to_metadata(metadata)
     table = metadata.tables["draft_versions"]
-    if defect in ("foreign-key", "unique"):
+    if defect in ("check", "weak-check"):
+        for constraint in tuple(table.constraints):
+            if isinstance(constraint, CheckConstraint):
+                table.constraints.remove(constraint)
+        if defect == "weak-check":
+            table.append_constraint(CheckConstraint("1=1", name="origin_known"))
+    elif defect in ("foreign-key", "unique"):
         cls = ForeignKeyConstraint if defect == "foreign-key" else UniqueConstraint
         for constraint in tuple(table.constraints):
             if isinstance(constraint, cls):
@@ -293,6 +301,8 @@ def test_matching_column_names_do_not_make_a_valid_schema(
         connection.execute(str(CreateTable(table).compile(dialect=dialect())))
         placeholders = ",".join("?" for _ in table.columns)
         connection.executemany(f"INSERT INTO draft_versions VALUES ({placeholders})", rows)
+        if defect in ("check", "weak-check"):
+            connection.execute("UPDATE draft_versions SET origin='unknown'")
         connection.commit()
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
     payload = database.read_bytes()
@@ -305,6 +315,11 @@ def test_matching_column_names_do_not_make_a_valid_schema(
     )
     with pytest.raises(BackupValidationError):
         inspect_backup(archive)
+    current = tmp_path / "current.sqlite3"
+    sample_database(current, "keep me")
+    with pytest.raises(BackupValidationError):
+        restore_backup(archive, current, replace=True)
+    assert query(current, "SELECT body FROM drafts") == [("keep me",)]
 
 
 def test_reviewed_archive_cannot_be_swapped_before_restore(archive: Path, tmp_path: Path) -> None:
@@ -354,6 +369,49 @@ def test_replacement_keeps_old_database(archive: Path, tmp_path: Path) -> None:
     assert previous is not None and previous.is_file()
     assert query(previous, "SELECT body FROM drafts") == [("newer owner writing",)]
     assert query(current, "SELECT body FROM drafts") == [("owner writing",)]
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_restore_syncs_published_entries_before_success(
+    archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace: bool
+) -> None:
+    current = tmp_path / "current.sqlite3"
+    if replace:
+        sample_database(current, "keep me")
+    published: list[str] = []
+
+    def sync(directory: Path) -> None:
+        assert directory == tmp_path
+        previous = list(directory.glob("current.sqlite3.pre-restore-*.sqlite3"))
+        if replace:
+            assert len(previous) == 1
+            assert query(previous[0], "SELECT body FROM drafts") == [("keep me",)]
+        if replace and not published:
+            assert query(current, "SELECT body FROM drafts") == [("keep me",)]
+            published.append("snapshot")
+        else:
+            assert query(current, "SELECT body FROM drafts") == [("owner writing",)]
+            published.append("restored")
+
+    monkeypatch.setattr(recovery, "sync_directory", sync)
+    restore_backup(archive, current, replace=replace)
+    assert published == (["snapshot", "restored"] if replace else ["restored"])
+
+
+def test_snapshot_directory_sync_failure_prevents_replacement(
+    archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "current.sqlite3"
+    sample_database(current, "keep me")
+
+    def fail(directory: Path) -> None:
+        raise OSError("directory sync failed")
+
+    monkeypatch.setattr(recovery, "sync_directory", fail)
+    with pytest.raises(OSError, match="directory sync failed"):
+        restore_backup(archive, current, replace=True)
+    assert query(current, "SELECT body FROM drafts") == [("keep me",)]
+    assert len(list(tmp_path.glob("current.sqlite3.pre-restore-*.sqlite3"))) == 1
 
 
 @pytest.mark.parametrize("revision", ["20260928_0007", "20260929_0009"])

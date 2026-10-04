@@ -1,11 +1,41 @@
 """Atomic file writes for exports the owner chooses; nothing else writes draft text to disk."""
 
 import contextlib
+import ctypes
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 _EXISTS = "That file already exists."
+
+
+def sync_directory(path: Path) -> None:
+    """Persist directory entries on POSIX; Windows has no directory fsync API."""
+    if sys.platform != "win32":
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def publish_exclusively(source: str, destination: Path) -> None:
+    """Atomically publish a file without replacing a concurrent writer's file."""
+    if sys.platform == "win32":
+        os.rename(source, destination)
+    elif sys.platform == "darwin":
+        # Darwin RENAME_EXCL works without requiring hard-link support.
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        rename = library.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        if rename(os.fsencode(source), os.fsencode(destination), 0x00000004) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), destination)
+    else:
+        os.link(source, destination)
+        os.unlink(source)
 
 
 def write_text_atomically(path: Path, text: str, *, overwrite: bool) -> None:
@@ -27,8 +57,7 @@ def write_text_atomically(path: Path, text: str, *, overwrite: bool) -> None:
             os.replace(temporary, path)
         else:
             # Exclusive publication also refuses a destination created during the write.
-            os.link(temporary, path)
-            os.unlink(temporary)
+            publish_exclusively(temporary, path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(temporary)

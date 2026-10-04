@@ -26,7 +26,14 @@ def create_backup(database: Path, destination: Path) -> None:
             closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as source,
             closing(sqlite3.connect(snapshot)) as target,
         ):
-            source.backup(target)
+            page_size = source.execute("PRAGMA page_size").fetchone()[0]
+
+            def check_size(status: int, remaining: int, total: int) -> None:
+                if total * page_size > MAX_DATABASE_BYTES:
+                    raise ValueError("The database exceeds the supported backup size.")
+
+            check_size(0, 0, source.execute("PRAGMA page_count").fetchone()[0])
+            source.backup(target, pages=1, progress=check_size)
         if snapshot.stat().st_size > MAX_DATABASE_BYTES:
             raise ValueError("The database exceeds the supported backup size.")
         revisions = list(validate_snapshot(snapshot))
@@ -43,8 +50,8 @@ def create_backup(database: Path, destination: Path) -> None:
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
             output.writestr("metadata.json", json.dumps(metadata, indent=2) + "\n")
             output.write(snapshot, "database.sqlite3")
-        with archive.open("r+b") as file:
+        with archive.open("r+b") as archive_file:
             os.chmod(archive, 0o600)
-            os.fsync(file.fileno())
+            os.fsync(archive_file.fileno())
         # Exclusive publication must also refuse files created during the write.
         os.link(archive, destination)
