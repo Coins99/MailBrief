@@ -3,11 +3,13 @@
 import hashlib
 import os
 import sqlite3
+import struct
 import tempfile
 import zipfile
 import zlib
 from contextlib import closing
 from pathlib import Path
+from typing import BinaryIO
 from uuid import uuid4
 
 from alembic.script import ScriptDirectory
@@ -96,36 +98,40 @@ def validate_snapshot(path: Path, *, current_schema: bool = False) -> tuple[str,
     return revisions
 
 
+def _check_zip_directory(source: BinaryIO) -> None:
+    source.seek(0, os.SEEK_END)
+    size = source.tell()
+    if size > MAX_DATABASE_BYTES + MAX_METADATA_BYTES + 1024 * 1024:
+        raise BackupValidationError(_INVALID)
+    source.seek(max(0, size - 65557))
+    tail = source.read(65557)
+    offset = tail.rfind(b"PK\x05\x06")
+    if offset < 0 or len(tail) - offset < 22:
+        raise BackupValidationError(_INVALID)
+    _, disk, directory_disk, disk_entries, entries, directory_size, _, comment_size = (
+        struct.unpack_from("<4s4H2IH", tail, offset)
+    )
+    source.seek(max(0, size - len(tail) + offset - 20))
+    zip64 = source.read(4) == b"PK\x06\x07"
+    if (
+        disk != 0
+        or directory_disk != 0
+        or disk_entries != 2
+        or entries != 2
+        or directory_size > MAX_METADATA_BYTES
+        or len(tail) - offset != 22 + comment_size
+        or zip64
+    ):
+        raise BackupValidationError(_INVALID)
+    source.seek(0)
+
+
 def _stage_archive(archive: Path, database: Path) -> BackupMetadata:
     """Read only the two fixed members; no archive path is ever extracted."""
     try:
-        with zipfile.ZipFile(archive) as source:
-            members = source.infolist()
-            if len(members) != 2 or {member.filename for member in members} != {
-                "metadata.json",
-                "database.sqlite3",
-            }:
-                raise BackupValidationError(_INVALID)
-            if source.getinfo("metadata.json").file_size > MAX_METADATA_BYTES:
-                raise BackupValidationError(_INVALID)
-            size = source.getinfo("database.sqlite3").file_size
-            if not 0 < size <= MAX_DATABASE_BYTES:
-                raise BackupValidationError(_INVALID)
-            metadata = BackupMetadata.model_validate_json(source.read("metadata.json"))
-            digest = hashlib.sha256()
-            count = 0
-            with source.open("database.sqlite3") as incoming, database.open("xb") as output:
-                while chunk := incoming.read(1024 * 1024):
-                    count += len(chunk)
-                    if count > MAX_DATABASE_BYTES:
-                        raise BackupValidationError(_INVALID)
-                    digest.update(chunk)
-                    output.write(chunk)
-            if count != size or digest.hexdigest() != metadata.database_sha256:
-                raise BackupValidationError(_INVALID)
-        if validate_snapshot(database) != metadata.schema_revisions:
-            raise BackupValidationError(_INVALID)
-        return metadata
+        with archive.open("rb") as handle:
+            _check_zip_directory(handle)
+            return _read_archive(handle, database)
     except (
         zipfile.BadZipFile,
         ValidationError,
@@ -136,6 +142,42 @@ def _stage_archive(archive: Path, database: Path) -> BackupMetadata:
         zlib.error,
     ):
         raise BackupValidationError(_INVALID) from None
+
+
+def _read_archive(handle: BinaryIO, database: Path) -> BackupMetadata:
+    with zipfile.ZipFile(handle) as source:
+        members = source.infolist()
+        if len(members) != 2 or {member.filename for member in members} != {
+            "metadata.json",
+            "database.sqlite3",
+        }:
+            raise BackupValidationError(_INVALID)
+        if any(
+            member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+            or member.flag_bits & 1
+            for member in members
+        ):
+            raise BackupValidationError(_INVALID)
+        if source.getinfo("metadata.json").file_size > MAX_METADATA_BYTES:
+            raise BackupValidationError(_INVALID)
+        size = source.getinfo("database.sqlite3").file_size
+        if not 0 < size <= MAX_DATABASE_BYTES:
+            raise BackupValidationError(_INVALID)
+        metadata = BackupMetadata.model_validate_json(source.read("metadata.json"))
+        digest = hashlib.sha256()
+        count = 0
+        with source.open("database.sqlite3") as incoming, database.open("xb") as output:
+            while chunk := incoming.read(1024 * 1024):
+                count += len(chunk)
+                if count > MAX_DATABASE_BYTES:
+                    raise BackupValidationError(_INVALID)
+                digest.update(chunk)
+                output.write(chunk)
+        if count != size or digest.hexdigest() != metadata.database_sha256:
+            raise BackupValidationError(_INVALID)
+    if validate_snapshot(database) != metadata.schema_revisions:
+        raise BackupValidationError(_INVALID)
+    return metadata
 
 
 def inspect_backup(archive: Path) -> BackupMetadata:

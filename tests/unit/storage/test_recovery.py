@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import struct
 import subprocess
 import sys
 import textwrap
@@ -32,6 +33,115 @@ from mailbrief.storage.recovery import (
 from mailbrief.storage.tables import Base
 
 STAMP = "2026-10-04 12:00:00.000000"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        (0, 0, 2, 2, 1024 * 1024, 0, 0),
+        (0, 0, 65535, 65535, 100, 0, 0),
+        (0, 0, 3, 3, 100, 0, 0),
+        (1, 0, 2, 2, 100, 0, 0),
+        (0, 1, 2, 2, 100, 0, 0),
+        (0, 0, 1, 2, 100, 0, 0),
+        (0, 0, 2, 2, 100, 0, 1),
+    ],
+)
+def test_archive_directory_is_bounded_before_zip_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fields: tuple[int, ...]
+) -> None:
+    archive = tmp_path / "hostile.zip"
+    archive.write_bytes(struct.pack("<4s4H2IH", b"PK\x05\x06", *fields))
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Untrusted directory reached the ZIP parser")
+
+    monkeypatch.setattr(zipfile, "ZipFile", fail)
+    with pytest.raises(BackupValidationError):
+        inspect_backup(archive)
+
+
+@pytest.mark.parametrize("payload", [b"", b"PK\x05\x06", b"not an archive"])
+def test_missing_or_truncated_zip_directory_is_refused(tmp_path: Path, payload: bytes) -> None:
+    archive = tmp_path / "hostile.zip"
+    archive.write_bytes(payload)
+    with pytest.raises(BackupValidationError):
+        inspect_backup(archive)
+
+
+@pytest.mark.parametrize("comment_size", [0, 65535])
+def test_zip64_directory_cannot_override_bounds(tmp_path: Path, comment_size: int) -> None:
+    archive = tmp_path / "hostile.zip"
+    archive.write_bytes(
+        b"PK\x06\x07"
+        + bytes(16)
+        + struct.pack("<4s4H2IH", b"PK\x05\x06", 0, 0, 2, 2, 100, 0, comment_size)
+        + bytes(comment_size)
+    )
+    with pytest.raises(BackupValidationError):
+        inspect_backup(archive)
+
+
+def test_oversized_outer_archive_is_refused_before_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "oversized.zip"
+    with archive.open("wb") as file:
+        file.seek(1024 * 1024 + 2)
+        file.write(b"x")
+    monkeypatch.setattr(recovery, "MAX_DATABASE_BYTES", 1)
+    monkeypatch.setattr(recovery, "MAX_METADATA_BYTES", 1)
+    with pytest.raises(BackupValidationError):
+        inspect_backup(archive)
+
+
+def test_archive_with_comment_remains_supported(archive: Path) -> None:
+    with zipfile.ZipFile(archive, "a") as file:
+        file.comment = b"owner backup"
+    assert inspect_backup(archive).format_version == 1
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_unbounded_compression_methods_are_refused_before_member_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: int
+) -> None:
+    archive = tmp_path / "hostile.zip"
+    with zipfile.ZipFile(archive, "w", compression=method) as file:
+        file.writestr("metadata.json", "{}")
+        file.writestr("database.sqlite3", b"untrusted")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Untrusted compression reached a decompressor")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", fail)
+    with pytest.raises(BackupValidationError):
+        inspect_backup(archive)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE VIEW unexpected AS SELECT body FROM drafts",
+        "CREATE TRIGGER unexpected AFTER UPDATE ON drafts BEGIN SELECT 1; END",
+    ],
+)
+def test_archive_cannot_introduce_executable_schema(
+    archive: Path, tmp_path: Path, sql: str
+) -> None:
+    hostile = tmp_path / "hostile.sqlite3"
+    sample_database(hostile)
+    with closing(sqlite3.connect(hostile)) as connection:
+        connection.execute(sql)
+        connection.commit()
+    payload = hostile.read_bytes()
+    rewrite_archive(
+        archive, payload=payload, metadata={"database_sha256": hashlib.sha256(payload).hexdigest()}
+    )
+    current = tmp_path / "current.sqlite3"
+    sample_database(current, "keep me")
+    with pytest.raises(BackupValidationError):
+        restore_backup(archive, current, replace=True)
+    assert query(current, "SELECT body FROM drafts") == [("keep me",)]
 
 
 def test_process_exit_before_publication_keeps_both_copies(archive: Path, tmp_path: Path) -> None:

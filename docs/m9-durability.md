@@ -121,7 +121,9 @@ The archive must contain exactly two members, with valid format-1 metadata, a UT
 timestamp, no credentials, a matching SHA-256 and a known schema revision. Unknown
 formats/revisions, extra or duplicate members, invalid SQLite relationships, views
 and triggers are refused. Metadata is limited to 16 KiB and the snapshot to 1 GiB.
-No member paths are extracted from the archive.
+The outer file and directory are bounded before ZIP parsing. Only stored/deflated,
+unencrypted members are accepted; ZIP64 and multi-disk archives are refused.
+No member paths are extracted. A checksum establishes integrity, not authenticity.
 
 Restore validates in a temporary folder beside the target, upgrades that staged
 database with the bundled migrations, verifies column types, nullability, primary/
@@ -160,7 +162,7 @@ No live mailbox, credentials, paid AI or real owner database was used in automat
 
 ## Automated validation
 
-Windows, 4 October 2026: reviewed full suite **2,744 passed, 1 skipped**, **97.11%**
+Windows, 4 October 2026: reviewed full suite **2,762 passed, 1 skipped**, **97.09%**
 combined statement/branch coverage; all required services meet 90%. Additional focused
 checks passed for an actual subprocess exit immediately before restore publication
 and a cleanup commit failing after SQL deletes were flushed. Ruff format/lint and
@@ -173,6 +175,10 @@ Engineering review replaced quadratic cleanup previews and full-cache materializ
 with SQL counts and bounded batches. Regression tests cover failed-save tracking per
 draft, closed dialogs remaining closed after asynchronous work, recovery help without
 opening unavailable storage, and archives with missing keys or incompatible columns.
+Security review additionally bounds ZIP parsing and compression, refuses executable
+schema objects, and updates PyJWT/urllib3. The OSV recheck found no known advisories
+for the 69 locked PyPI packages; native components and unknown vulnerabilities are
+outside that check.
 
 Backup tests cover committed WAL data, migrated schema snapshots, existing-file
 preservation, invalid/missing sources and publication failure cleanup. Recovery

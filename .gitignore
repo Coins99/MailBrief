@@ -222,3 +222,11 @@ __marimo__/
 # Local validation artifacts and macOS metadata
 out/
 .DS_Store
+client_secret*.json
+credentials.json
+token.json
+token-cache.json
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
