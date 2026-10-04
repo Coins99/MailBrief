@@ -405,9 +405,8 @@ class MainWindow(QMainWindow):
     def __init__(self, backend: DesktopBackend, *, database_path: Path | None = None) -> None:
         super().__init__()
         self.backend = backend
-        self.pending_restore: Path | None = None
-        self.pending_restore_metadata: BackupMetadata | None = None
-        self._draft_save_failed = False
+        self.pending_restore: tuple[Path, BackupMetadata] | None = None
+        self._unsaved_drafts: set[str] = set()
         self.data_dialog = (
             None
             if database_path is None
@@ -623,7 +622,7 @@ class MainWindow(QMainWindow):
         self.drafts_panel.set_busy(busy)
 
     async def _open_data(self) -> None:
-        if self._draft_save_failed:
+        if self._unsaved_drafts:
             self.status.setText("Resolve the failed draft save before managing data.")
             return
         if (
@@ -636,7 +635,10 @@ class MainWindow(QMainWindow):
             )
             return
         if self.data_dialog is not None:
-            await self.data_dialog.configure()
+            accounts = await self.backend.cached_accounts() if self._ready else ()
+            if not self._closing:
+                self.data_dialog.configure(accounts, available=self._ready)
+                self.data_dialog.open()
 
     def _run_data(self, operation: Callable[[], Awaitable[None]]) -> bool:
         if self.data_dialog is None:
@@ -645,11 +647,12 @@ class MainWindow(QMainWindow):
         return self.start(lambda: dialog.guarded(operation), cancellable=False)
 
     def _request_restore(self, path: Path, metadata: BackupMetadata) -> None:
-        self.pending_restore = path
-        self.pending_restore_metadata = metadata
+        self.pending_restore = (path, metadata)
         self.close()
 
     async def _refresh_data(self) -> None:
+        if self._closing:
+            return
         self._offer_undo()
         self._shown = None
         self.viewing.hide()
@@ -664,7 +667,7 @@ class MainWindow(QMainWindow):
         self.history_dialog.reject()
         self.proposals_dialog.reject()
         if self.data_dialog is not None:
-            await self.data_dialog.configure()
+            self.data_dialog.configure(await self.backend.cached_accounts(), available=True)
 
     def _offer_undo(
         self, label: str | None = None, operation: Callable[[], Awaitable[None]] | None = None
@@ -1227,17 +1230,17 @@ class MainWindow(QMainWindow):
         try:
             saved = await self.backend.autosave_draft(public_id, draft.revision, edit)
         except _DRAFT_STALE as exc:
-            self._draft_save_failed = True
+            self._unsaved_drafts.add(public_id)
             log_failure(exc)
             editor.show_conflict()
             return False
         except Exception as exc:
-            self._draft_save_failed = True
+            self._unsaved_drafts.add(public_id)
             log_failure(exc)
             editor.save_failed()
             return False
         editor.saved(saved, edit)
-        self._draft_save_failed = False
+        self._unsaved_drafts.discard(public_id)
         return True
 
     def _writable_draft(self) -> Draft | None:
@@ -1315,7 +1318,7 @@ class MainWindow(QMainWindow):
             return
         try:
             copy = await self.backend.save_draft_as_new(draft.public_id, edit)
-            self._draft_save_failed = False
+            self._unsaved_drafts.discard(draft.public_id)
         except Exception as exc:
             log_failure(exc)
             editor.set_status("Couldn't save a new draft; try again.")

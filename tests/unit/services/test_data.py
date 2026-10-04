@@ -222,3 +222,42 @@ async def test_missing_or_dormant_account_refused(owner_database: Database) -> N
     for identifier in (1, 99):
         with pytest.raises(ValueError):
             await preview_cleanup(owner_database, CleanupRequest(CleanupKind.ACCOUNT, identifier))
+
+
+async def test_large_cleanup_streams_preview_and_deletes_in_batches(
+    owner_database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with owner_database.transaction() as session:
+        for identifier in range(3, 304):
+            session.add(
+                MessageTable(
+                    account_id=1,
+                    provider_message_id=str(identifier),
+                    subject="Cached",
+                    sender_address="sender@example.invalid",
+                    received_at_utc=NOW,
+                    importance="normal",
+                    web_link="https://mail.google.com/",
+                )
+            )
+
+    async def forbid_materializing(*args: object) -> None:
+        raise AssertionError("Preview must not materialize all database records.")
+
+    monkeypatch.setattr(data, "_records", forbid_materializing)
+    preview = await preview_cleanup(owner_database, CleanupRequest(CleanupKind.CACHE, 1))
+    assert preview.messages == 303
+    await apply_cleanup(owner_database, preview)
+    async with owner_database.session() as session:
+        assert list(await session.scalars(select(MessageTable))) == []
+
+
+async def test_nonrevisioned_cache_changes_invalidate_preview(owner_database: Database) -> None:
+    preview = await preview_cleanup(owner_database, CleanupRequest(CleanupKind.CACHE, 1))
+    async with owner_database.transaction() as session:
+        message = await session.get(MessageTable, 1)
+        assert message is not None
+        message.body_preview = "Changed after review"
+    with pytest.raises(CleanupChangedError):
+        await apply_cleanup(owner_database, preview)

@@ -31,6 +31,7 @@ async def data_window(
     window = MainWindow(FakeBackend(), database_path=tmp_path / "owner.sqlite3")
     qtbot.addWidget(window)
     window.show()
+    window._ready = True
     await window._open_data()
     try:
         yield window
@@ -213,10 +214,10 @@ async def test_data_waits_for_editors_and_pending_writes(
     assert not dialog.isVisible()
     waiting.set()
     await data_window.draft_writes.drain()
-    data_window._draft_save_failed = True
+    data_window._unsaved_drafts.add("failed")
     await data_window._open_data()
     assert "failed draft save" in data_window.status.text()
-    data_window._draft_save_failed = False
+    data_window._unsaved_drafts.clear()
     await data_window._open_data()
     assert dialog.isVisible()
 
@@ -259,3 +260,77 @@ async def test_data_available_when_storage_cannot_open(qtbot: QtBot, tmp_path: P
     finally:
         window.close()
         await window.shutdown()
+
+
+async def test_closing_during_verification_cannot_reopen_confirmation(
+    data_window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mailbrief.storage.recovery import inspect_backup
+
+    dialog = data_window.data_dialog
+    assert dialog is not None
+    archive = dialog.path.parent / "backup.zip"
+    monkeypatch.setattr(dialog, "choose", AsyncMock(return_value=archive))
+    await dialog.backup()
+    metadata = inspect_backup(archive)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def verify(*args: object, **kwargs: object) -> object:
+        started.set()
+        await release.wait()
+        return metadata
+
+    monkeypatch.setattr(asyncio, "to_thread", verify)
+    task = asyncio.create_task(dialog.restore())
+    await started.wait()
+    dialog.reject()
+    release.set()
+    await task
+    assert dialog._confirmation is None and data_window.pending_restore is None
+    assert not dialog.isVisible()
+
+
+async def test_cleanup_refresh_does_not_reopen_closed_dialog(data_window: MainWindow) -> None:
+    dialog = data_window.data_dialog
+    assert dialog is not None
+    dialog.reject()
+    await data_window._refresh_data()
+    assert not dialog.isVisible()
+
+
+async def test_recovery_help_does_not_create_unavailable_database(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "missing.sqlite3"
+    window = MainWindow(FakeBackend(), database_path=path)
+    qtbot.addWidget(window)
+    try:
+        await window._open_data()
+        assert not path.exists()
+        assert window.data_dialog is not None and window.data_dialog.isVisible()
+    finally:
+        window.close()
+        await window.shutdown()
+
+
+async def test_saving_another_draft_does_not_clear_failed_writing(
+    data_window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.ui.test_draft_editor import make_draft
+
+    first = make_draft(public_id="20000000-0000-4000-8000-000000000001")
+    second = make_draft(public_id="20000000-0000-4000-8000-000000000002")
+    save = AsyncMock(side_effect=[OSError("disk full"), second.model_copy(update={"revision": 2})])
+    monkeypatch.setattr(data_window.backend, "autosave_draft", save)
+    data_window.draft_editor.load(first, data_window.zone)
+    assert not await data_window._autosave_draft(first.public_id, first.content())
+    data_window.draft_editor.load(second, data_window.zone)
+    assert await data_window._autosave_draft(second.public_id, second.content())
+    assert data_window._unsaved_drafts == {first.public_id}
+    data_window.draft_editor.load(first, data_window.zone)
+    monkeypatch.setattr(data_window.backend, "save_draft_as_new", AsyncMock(return_value=second))
+    await data_window._save_draft_as_new(first.content())
+    assert not data_window._unsaved_drafts

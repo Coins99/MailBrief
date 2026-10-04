@@ -12,6 +12,8 @@ from uuid import uuid4
 
 from alembic.script import ScriptDirectory
 from pydantic import ValidationError
+from sqlalchemy import UniqueConstraint
+from sqlalchemy.dialects.sqlite import dialect
 
 from mailbrief.domain.backup import MAX_DATABASE_BYTES, MAX_METADATA_BYTES, BackupMetadata
 from mailbrief.infra.data_lock import data_directory_lock
@@ -25,46 +27,72 @@ class BackupValidationError(ValueError):
     """An archive cannot be safely restored; its content is never included in errors."""
 
 
-def _database_revisions(path: Path, *, current_schema: bool = False) -> tuple[str, ...]:
+def _check_schema(connection: sqlite3.Connection) -> None:
+    for name, table in Base.metadata.tables.items():
+        columns = {
+            row[1]: (row[2].upper(), bool(row[3]), bool(row[5]))
+            for row in connection.execute("SELECT * FROM pragma_table_info(?)", (name,))
+        }
+        expected = {
+            column.name: (
+                column.type.compile(dialect=dialect()).upper(),
+                not column.nullable,
+                column.primary_key,
+            )
+            for column in table.columns
+        }
+        foreign_keys = {
+            (row[3], row[2], row[4], row[6])
+            for row in connection.execute("SELECT * FROM pragma_foreign_key_list(?)", (name,))
+        }
+        expected_keys = {
+            (column.name, key.column.table.name, key.column.name, key.ondelete)
+            for column in table.columns
+            for key in column.foreign_keys
+        }
+        unique = {
+            tuple(
+                row[2]
+                for row in connection.execute("SELECT * FROM pragma_index_info(?)", (index[1],))
+            )
+            for index in connection.execute("SELECT * FROM pragma_index_list(?)", (name,))
+            if index[2] and not index[4]
+        }
+        expected_unique = {
+            tuple(column.name for column in constraint.columns)
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+        }
+        if columns != expected or foreign_keys != expected_keys or not expected_unique <= unique:
+            raise BackupValidationError(_INVALID)
+
+
+def validate_snapshot(path: Path, *, current_schema: bool = False) -> tuple[str, ...]:
+    scripts = ScriptDirectory.from_config(migration_config(path))
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
         connection.execute("PRAGMA trusted_schema=OFF")
         objects = connection.execute("SELECT name, type FROM sqlite_master").fetchall()
-        if any(kind in {"trigger", "view"} for _, kind in objects):
-            raise BackupValidationError(_INVALID)
         tables = {name for name, kind in objects if kind == "table"}
         expected = set(Base.metadata.tables) | {"alembic_version"}
-        if tables - expected - {"sqlite_sequence"}:
+        if any(kind in {"trigger", "view"} for _, kind in objects) or (
+            tables - expected - {"sqlite_sequence"}
+        ):
             raise BackupValidationError(_INVALID)
-        if current_schema:
-            if not expected <= tables:
-                raise BackupValidationError(_INVALID)
-            for name, table in Base.metadata.tables.items():
-                # Names come only from checked-in metadata, never archive content.
-                columns = {row[1] for row in connection.execute(f'PRAGMA table_info("{name}")')}
-                if columns != set(table.columns.keys()):
-                    raise BackupValidationError(_INVALID)
+        rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
+        if len(rows) != 1 or rows[0][0] not in {
+            script.revision for script in scripts.walk_revisions()
+        }:
+            raise BackupValidationError(_INVALID)
+        revisions = (rows[0][0],)
+        is_current = set(revisions) == set(scripts.get_heads())
+        if current_schema and not is_current:
+            raise BackupValidationError(_INVALID)
+        if is_current:
+            _check_schema(connection)
         if connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise BackupValidationError(_INVALID)
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise BackupValidationError(_INVALID)
-        rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
-        if len(rows) != 1 or not isinstance(rows[0][0], str):
-            raise BackupValidationError(_INVALID)
-        revisions = (rows[0][0],)
-    scripts = ScriptDirectory.from_config(migration_config(path))
-    if revisions[0] not in {script.revision for script in scripts.walk_revisions()}:
-        raise BackupValidationError(_INVALID)
-    if current_schema and set(revisions) != set(scripts.get_heads()):
-        raise BackupValidationError(_INVALID)
-    return revisions
-
-
-def validate_snapshot(database: Path) -> tuple[str, ...]:
-    """Refuse unknown objects/revisions and enforce current columns on current snapshots."""
-    revisions = _database_revisions(database)
-    scripts = ScriptDirectory.from_config(migration_config(database))
-    if set(revisions) == set(scripts.get_heads()):
-        _database_revisions(database, current_schema=True)
     return revisions
 
 
@@ -118,7 +146,6 @@ def inspect_backup(archive: Path) -> BackupMetadata:
 
 def _prepare_restored_database(database: Path) -> None:
     upgrade_database(database)
-    _database_revisions(database, current_schema=True)
     with closing(sqlite3.connect(database)) as connection:
         # Restoring history must not restore permission to send automatically.
         connection.execute(
@@ -127,7 +154,7 @@ def _prepare_restored_database(database: Path) -> None:
         connection.commit()
         # Publish a self-contained file; no staging WAL can be left behind.
         connection.execute("PRAGMA journal_mode=DELETE")
-    _database_revisions(database, current_schema=True)
+    validate_snapshot(database, current_schema=True)
     with database.open("r+b") as file:
         os.chmod(database, 0o600)
         os.fsync(file.fileno())

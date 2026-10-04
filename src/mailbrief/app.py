@@ -61,10 +61,10 @@ async def run_desktop() -> None:
             try:
                 previous = await asyncio.to_thread(
                     _restore_backup_locked,
-                    window.pending_restore,
+                    window.pending_restore[0],
                     paths.database_path,
                     replace=True,
-                    expected=window.pending_restore_metadata,
+                    expected=window.pending_restore[1],
                 )
             except Exception as exc:
                 log_failure(exc)

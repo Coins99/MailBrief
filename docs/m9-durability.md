@@ -124,7 +124,8 @@ and triggers are refused. Metadata is limited to 16 KiB and the snapshot to 1 Gi
 No member paths are extracted from the archive.
 
 Restore validates in a temporary folder beside the target, upgrades that staged
-database with the bundled migrations, verifies the current tables and columns, and
+database with the bundled migrations, verifies column types, nullability, primary/
+foreign keys and uniqueness against the current schema, and
 flushes it before publishing. For an existing target, `--replace` is required: a
 consistent snapshot named `<database>.pre-restore-<unique-id>.sqlite3` is kept beside
 it before the atomic replacement. The command prints that retained path. A failed
@@ -159,7 +160,7 @@ No live mailbox, credentials, paid AI or real owner database was used in automat
 
 ## Automated validation
 
-Windows, 4 October 2026: final full suite **2,733 passed, 1 skipped**, **96.97%**
+Windows, 4 October 2026: reviewed full suite **2,744 passed, 1 skipped**, **97.11%**
 combined statement/branch coverage; all required services meet 90%. Additional focused
 checks passed for an actual subprocess exit immediately before restore publication
 and a cleanup commit failing after SQL deletes were flushed. Ruff format/lint and
@@ -167,6 +168,11 @@ strict mypy (native, win32 and darwin) passed. The native Windows package built 
 passed the distribution audit and two independent offline smoke processes at 100%/200%.
 The data dialog was also visually inspected at 200% with an OS font.
 Native macOS build/execution runs in CI; it cannot be performed locally on Windows.
+
+Engineering review replaced quadratic cleanup previews and full-cache materialization
+with SQL counts and bounded batches. Regression tests cover failed-save tracking per
+draft, closed dialogs remaining closed after asynchronous work, recovery help without
+opening unavailable storage, and archives with missing keys or incompatible columns.
 
 Backup tests cover committed WAL data, migrated schema snapshots, existing-file
 preservation, invalid/missing sources and publication failure cleanup. Recovery

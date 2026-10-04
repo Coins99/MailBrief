@@ -22,12 +22,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from sqlalchemy import select
 
 from mailbrief import __version__
 from mailbrief.domain.backup import BackupMetadata
+from mailbrief.domain.cached_mail import CachedAccount
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.services.data import (
+    CleanupChangedError,
     CleanupKind,
     CleanupRequest,
     apply_cleanup,
@@ -37,7 +38,6 @@ from mailbrief.services.data import (
 from mailbrief.storage.backup import create_backup
 from mailbrief.storage.database import Database
 from mailbrief.storage.recovery import BackupValidationError, inspect_backup
-from mailbrief.storage.tables import AccountTable
 from mailbrief.ui.diagnostics import log_failure
 
 HELP = """Your data stays on this computer. Disconnect removes Gmail credentials only.
@@ -157,33 +157,21 @@ class DataDialog(QDialog):
             control.setEnabled(not busy)
         self.buttons[-1].setEnabled(not busy and self._storage_available)
 
-    async def configure(self) -> None:
-        database = Database.from_path(self.path)
-        try:
-            async with database.session() as session:
-                rows = await session.scalars(
-                    select(AccountTable)
-                    .where(AccountTable.provider == "gmail")
-                    .order_by(AccountTable.id)
-                )
-                self.account.clear()
-                for row in rows:
-                    self.account.addItem(row.email_address, row.id)
-                if self.account.count():
-                    self.account.setCurrentIndex(0)
-                self._storage_available = True
-        except Exception as exc:
-            log_failure(exc)
-            self._storage_available = False
-            self.account.clear()
+    def configure(self, accounts: tuple[CachedAccount, ...], *, available: bool) -> None:
+        self._storage_available = available
+        self.account.clear()
+        for account in accounts:
+            self.account.addItem(account.email_address, account.account_id)
+        if accounts:
+            self.account.setCurrentIndex(0)
+        if not available:
             self.status.setText(
                 "Saved data is unavailable. You can verify a backup or attempt recovery."
             )
-        finally:
-            await database.dispose()
-        self.open()
 
     async def choose(self, title: str, pattern: str, *, save: bool) -> Path | None:
+        if not self.isVisible():
+            return None
         picker = QFileDialog(self, title)
         self._picker = picker
         picker.setAcceptMode(
@@ -212,10 +200,13 @@ class DataDialog(QDialog):
                 raise ValueError("Choose a destination outside MailBrief's data folder.")
             return path
         finally:
+            picker.reject()
             picker.deleteLater()
             self._picker = None
 
     async def confirm(self, message: str) -> bool:
+        if not self.isVisible():
+            return False
         box = QMessageBox(self)
         self._confirmation = box
         box.setWindowTitle("Review data change")
@@ -231,6 +222,7 @@ class DataDialog(QDialog):
         try:
             return await future == QMessageBox.StandardButton.Ok
         finally:
+            box.reject()
             box.deleteLater()
             self._confirmation = None
 
@@ -271,7 +263,6 @@ class DataDialog(QDialog):
     async def diagnostics(self) -> None:
         path = await self.choose("Export safe diagnostics", "JSON (*.json)", save=True)
         if path is not None:
-            # Deliberately omit paths, account identity, settings, mail and historical log text.
             payload = (
                 json.dumps(
                     {
@@ -294,13 +285,13 @@ class DataDialog(QDialog):
         choice = self.kind.currentData()
         cutoff = datetime.now(UTC) - timedelta(days=self.days.value())
         request = CleanupRequest(
-            CleanupKind.ORPHAN_DECISIONS
-            if choice == "decisions"
-            else CleanupKind.DELETED
-            if choice == "deleted"
-            else CleanupKind.ACCOUNT
-            if choice == "account"
-            else CleanupKind.CACHE,
+            {
+                "old-cache": CleanupKind.CACHE,
+                "all-cache": CleanupKind.CACHE,
+                "account": CleanupKind.ACCOUNT,
+                "deleted": CleanupKind.DELETED,
+                "decisions": CleanupKind.ORPHAN_DECISIONS,
+            }[choice],
             None if choice in ("deleted", "decisions") else self.account.currentData(),
             cutoff if choice in ("deleted", "decisions", "old-cache") else None,
         )
@@ -337,6 +328,8 @@ class DataDialog(QDialog):
             self.status.setText("That destination already exists. Choose a new filename.")
         except BackupValidationError:
             self.status.setText("This backup is damaged or incompatible. Saved data is unchanged.")
+        except CleanupChangedError:
+            self.status.setText("Saved data changed. Review a new cleanup preview.")
         except Exception as exc:
             log_failure(exc)
             self.status.setText(

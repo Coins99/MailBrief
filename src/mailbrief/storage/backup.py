@@ -17,11 +17,7 @@ FORMAT_VERSION = 1
 
 
 def create_backup(database: Path, destination: Path) -> None:
-    """Publish a new archive atomically, including committed WAL pages.
-
-    Existing files are never replaced. All intermediate files live next to the
-    destination and are removed on failure. The source is opened read-only.
-    """
+    """Publish a consistent snapshot without replacing an existing file."""
     if destination.exists():
         raise FileExistsError("That file already exists.")
     with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".mailbrief-backup-") as work:
@@ -31,15 +27,6 @@ def create_backup(database: Path, destination: Path) -> None:
             closing(sqlite3.connect(snapshot)) as target,
         ):
             source.backup(target)
-            if target.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
-                raise ValueError("The database failed its integrity check.")
-            if target.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                raise ValueError("The database has invalid relationships.")
-            revisions = sorted(
-                row[0] for row in target.execute("SELECT version_num FROM alembic_version")
-            )
-            if not revisions:
-                raise ValueError("The database has no schema revision.")
         if snapshot.stat().st_size > MAX_DATABASE_BYTES:
             raise ValueError("The database exceeds the supported backup size.")
         revisions = list(validate_snapshot(snapshot))
@@ -59,6 +46,5 @@ def create_backup(database: Path, destination: Path) -> None:
         with archive.open("r+b") as file:
             os.chmod(archive, 0o600)
             os.fsync(file.fileno())
-        # Exclusive creation closes the destination race without replacing anyone's backup.
-        # A hard link publishes the finished archive in one operation, on the same volume.
+        # Exclusive publication must also refuse files created during the write.
         os.link(archive, destination)

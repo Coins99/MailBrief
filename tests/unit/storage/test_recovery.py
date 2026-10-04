@@ -15,6 +15,9 @@ from typing import Any
 import pytest
 from alembic import command
 from PySide6.QtCore import QLockFile
+from sqlalchemy import ForeignKeyConstraint, Integer, MetaData, UniqueConstraint
+from sqlalchemy.dialects.sqlite import dialect
+from sqlalchemy.schema import CreateTable
 
 from mailbrief.infra.data_lock import DataInUseError, data_directory_lock
 from mailbrief.storage import recovery
@@ -26,6 +29,7 @@ from mailbrief.storage.recovery import (
     inspect_backup,
     restore_backup,
 )
+from mailbrief.storage.tables import Base
 
 STAMP = "2026-10-04 12:00:00.000000"
 
@@ -150,6 +154,47 @@ def test_inspect_checks_supported_archive(archive: Path) -> None:
     metadata = inspect_backup(archive)
     assert metadata.schema_revisions == ("20260930_0012",)
     assert metadata.credentials_included is False
+
+
+@pytest.mark.parametrize("defect", ["foreign-key", "unique", "type", "nullable"])
+def test_matching_column_names_do_not_make_a_valid_schema(
+    archive: Path,
+    tmp_path: Path,
+    defect: str,
+) -> None:
+    database = tmp_path / "tampered.sqlite3"
+    sample_database(database)
+    metadata = MetaData()
+    for source in Base.metadata.tables.values():
+        source.to_metadata(metadata)
+    table = metadata.tables["draft_versions"]
+    if defect in ("foreign-key", "unique"):
+        cls = ForeignKeyConstraint if defect == "foreign-key" else UniqueConstraint
+        for constraint in tuple(table.constraints):
+            if isinstance(constraint, cls):
+                table.constraints.remove(constraint)
+    elif defect == "type":
+        table.c.body.type = Integer()
+    else:
+        table.c.body.nullable = True
+    with closing(sqlite3.connect(database)) as connection:
+        rows = connection.execute("SELECT * FROM draft_versions").fetchall()
+        connection.execute("DROP TABLE draft_versions")
+        connection.execute(str(CreateTable(table).compile(dialect=dialect())))
+        placeholders = ",".join("?" for _ in table.columns)
+        connection.executemany(f"INSERT INTO draft_versions VALUES ({placeholders})", rows)
+        connection.commit()
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    payload = database.read_bytes()
+    rewrite_archive(
+        archive,
+        payload=payload,
+        metadata={
+            "database_sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    )
+    with pytest.raises(BackupValidationError):
+        inspect_backup(archive)
 
 
 def test_reviewed_archive_cannot_be_swapped_before_restore(archive: Path, tmp_path: Path) -> None:

@@ -38,8 +38,7 @@ def data_directory_lock(database: Path) -> Iterator[None]:
     finally:
         if acquired and lock is not None:
             lock.unlock()
-        # Failed sign-in must not leave a new profile directory behind. Never remove
-        # existing directories or directories to which a client has written anything.
+        # Remove only new, empty directories.
         for path in created:
             with suppress(OSError):
                 path.rmdir()

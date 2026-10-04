@@ -7,6 +7,7 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -158,17 +159,10 @@ async def check_package(directory: Path) -> None:
             await window.shutdown()
         finally:
             await runtime.close()
-    archive = directory / "smoke-backup.zip"
-    export = directory / "smoke-writing.json"
-    restored = directory / "smoke-restored.sqlite3"
-    # Smoke's directory is disposable; each separate process reuses its original DB,
-    # but creates fresh named artifacts without deleting or replacing an earlier copy.
-    from uuid import uuid4
-
     suffix = uuid4().hex
-    archive = archive.with_stem(f"smoke-backup-{suffix}")
-    export = export.with_stem(f"smoke-writing-{suffix}")
-    restored = restored.with_stem(f"smoke-restored-{suffix}")
+    archive = directory / f"smoke-backup-{suffix}.zip"
+    export = directory / f"smoke-writing-{suffix}.json"
+    restored = directory / f"smoke-restored-{suffix}.sqlite3"
     await asyncio.to_thread(create_backup, directory / "smoke.sqlite3", archive)
     await asyncio.to_thread(inspect_backup, archive)
     await asyncio.to_thread(restore_backup, archive, restored)
