@@ -60,6 +60,7 @@ from mailbrief.domain.drafts import (
 from mailbrief.domain.messages import ProviderKind, RankReason
 from mailbrief.domain.preferences import OwnerPreferences, sender_excluded
 from mailbrief.errors import ConfigurationError
+from mailbrief.infra.data_lock import DataInUseError, data_directory_lock
 from mailbrief.infra.files import write_text_atomically
 from mailbrief.paths import AppPaths
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
@@ -1883,7 +1884,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
     # Wire/debug logging can expose authorization headers, loopback URLs and request bodies.
     for name in ("httpx", "httpcore", "groq"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
+    locks = contextlib.ExitStack()
     try:
+        if args.command in {"sync", "bodies", "brief"} or (
+            args.command == "drafts" and args.action == "generate"
+        ):
+            _load_settings()  # Reject invalid configuration before touching the data folder.
+        timezone = getattr(args, "timezone", None)
+        if timezone is not None and timezone.strip():
+            resolve_timezone(timezone)
+        if hasattr(args, "database"):
+            path = args.database or AppPaths.from_qt().database_path
+            locks.enter_context(data_directory_lock(path))
         if args.command == "brief":
             return asyncio.run(
                 brief(
@@ -1992,6 +2004,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except PreferencesUnavailableError as exc:
         print(str(exc))  # Static and actionable; nothing is sent while it lasts.
         return 3
+    except DataInUseError as exc:
+        print(str(exc))
+        return 5
     except ConfigurationError as exc:
         # AI setup errors (model, key, vault) carry static, actionable messages.
         print(str(exc) if args.command in _OWN_MESSAGE_COMMANDS else _SETUP_UNAVAILABLE)
@@ -2049,6 +2064,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("Cancelled.")
         return 130
+    finally:
+        locks.close()
 
 
 if __name__ == "__main__":

@@ -23,9 +23,12 @@ def write_text_atomically(path: Path, text: str, *, overwrite: bool) -> None:
             file.write(text.encode("utf-8"))
             file.flush()
             os.fsync(file.fileno())
-        if not overwrite and path.exists():
-            raise FileExistsError(_EXISTS)
-        os.replace(temporary, path)
+        if overwrite:
+            os.replace(temporary, path)
+        else:
+            # Exclusive publication also refuses a destination created during the write.
+            os.link(temporary, path)
+            os.unlink(temporary)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(temporary)

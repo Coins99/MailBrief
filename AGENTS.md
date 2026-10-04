@@ -52,6 +52,17 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   with one brief per day. The consolidated live acceptance and known limits are in
   `docs/m8-daily-operation.md`.
 
+- M9 implemented on `feat/m9-durability`, awaiting owner live acceptance:
+  Data and recovery provides consistent backup, archive verification, restore after
+  shutdown, portable action/draft/note exports, previewed manual retention, safe
+  diagnostics and bundled help. Offline backup/verify/restore is also available through
+  `python -m mailbrief.diagnostics.backup`. Restore retains a pre-restore snapshot,
+  clears automatic AI permission and never touches credentials. Diagnostic DB commands
+  share the desktop folder lock. CI enforces the service coverage target and checks
+  native packages at 100%/200% scale with synthetic backup/recovery/export/cleanup.
+  See `docs/m9-durability.md` and `docs/m9-live-validation.md`. Do not claim M9 accepted
+  until the owner completes real-record recovery and the 7–14-day release scenario.
+
 ## Layout (ports and adapters)
 
 - `src/mailbrief/domain/`: frozen Pydantic models; no I/O.
@@ -269,7 +280,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts, drafting, preferences, history, threads, proposals and consent services.
+  drafts, drafting, preferences, history, threads, proposals, consent and data services.
+  `scripts/check_coverage.py` enforces the 90% combined statement/branch service gate.
 
 ## Dormant Microsoft notes
 

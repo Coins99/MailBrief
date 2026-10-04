@@ -5,6 +5,7 @@ import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -330,6 +331,7 @@ def test_an_internal_validation_error_is_unexpected_only_in_ai_commands(
     command: str,
     code: int,
     message: str,
+    tmp_path: Path,
 ) -> None:
     async def fail_validation(**options: Any) -> int:
         SyncResult.model_validate({})  # Raises pydantic's ValidationError.
@@ -337,7 +339,7 @@ def test_an_internal_validation_error_is_unexpected_only_in_ai_commands(
 
     monkeypatch.setattr(gmail, command, fail_validation)
 
-    assert gmail.main([command]) == code
+    assert gmail.main([command, "--database", str(tmp_path / "diagnostic.sqlite3")]) == code
     assert capsys.readouterr().out.startswith(message)
 
 
