@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
 
 from mailbrief.paths import AppPaths, configure_qt_identity
+from mailbrief.storage.recovery import _restore_backup_locked
 from mailbrief.ui.diagnostics import configure_logging, log_failure, logger
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
@@ -45,7 +46,7 @@ async def run_desktop() -> None:
     handler = None
     try:
         handler = configure_logging(paths.data_dir)
-        window = MainWindow(DesktopRuntime(paths.database_path))
+        window = MainWindow(DesktopRuntime(paths.database_path), database_path=paths.database_path)
         closed = asyncio.Event()
         window.closing.connect(closed.set)
         window.show()
@@ -54,6 +55,34 @@ async def run_desktop() -> None:
             await closed.wait()
         finally:
             await window.shutdown()
+        if window.pending_restore is not None:
+            # The folder lock stays held across shutdown and publication. No editor,
+            # autosave task or pooled connection can write to the restored database.
+            try:
+                previous = await asyncio.to_thread(
+                    _restore_backup_locked,
+                    window.pending_restore[0],
+                    paths.database_path,
+                    replace=True,
+                    expected=window.pending_restore[1],
+                )
+            except Exception as exc:
+                log_failure(exc)
+                QMessageBox.warning(
+                    None,
+                    "MailBrief recovery",
+                    "Restore could not finish. "
+                    "The current database was kept. Check free space, folder "
+                    "access and other database clients, then retry.",
+                )
+            else:
+                QMessageBox.information(
+                    None,
+                    "MailBrief recovery",
+                    "Backup restored. "
+                    f"Previous database: {previous}\n"
+                    "Relaunch MailBrief. Automatic AI permission is off.",
+                )
     except Exception as exc:
         log_failure(exc)
         QMessageBox.warning(None, "MailBrief", "MailBrief could not start or close cleanly.")

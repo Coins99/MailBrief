@@ -31,6 +31,7 @@ from mailbrief.domain.actions import (
     StepEdit,
     ThreadLink,
 )
+from mailbrief.domain.backup import BackupMetadata
 from mailbrief.domain.briefs import (
     AutoSendStatus,
     BriefRunResult,
@@ -117,6 +118,7 @@ from mailbrief.ui.actions_view import (
 )
 from mailbrief.ui.auto_send_view import AutoSendDialog
 from mailbrief.ui.cached_view import CachedMailDialog
+from mailbrief.ui.data_view import DataDialog
 from mailbrief.ui.diagnostics import (
     configuration_guidance,
     error_guidance,
@@ -400,9 +402,18 @@ class MainWindow(QMainWindow):
 
     closing = Signal()
 
-    def __init__(self, backend: DesktopBackend) -> None:
+    def __init__(self, backend: DesktopBackend, *, database_path: Path | None = None) -> None:
         super().__init__()
         self.backend = backend
+        self.pending_restore: tuple[Path, BackupMetadata] | None = None
+        self._unsaved_drafts: set[str] = set()
+        self.data_dialog = (
+            None
+            if database_path is None
+            else DataDialog(
+                self, database_path, self._run_data, self._request_restore, self._refresh_data
+            )
+        )
         self.task: asyncio.Task[None] | None = None
         self._cancel = asyncio.Event()
         self._review: asyncio.Future[tuple[str, ...] | None] | None = None
@@ -508,6 +519,9 @@ class MainWindow(QMainWindow):
         self.briefs_button = QPushButton("&Briefs…")
         self.briefs_button.setToolTip("Open saved briefs, or brief a missed day.")
         actions.addWidget(self.briefs_button, 2, 0)
+        self.data_button = QPushButton("&Data and recovery…")
+        self.data_button.clicked.connect(lambda: self.start(self._open_data, cancellable=False))
+        actions.addWidget(self.data_button, 2, 1)
         self.status = plain_label("Loading saved brief…")
         layout.addWidget(self.status)
         self.undo_button = QPushButton("&Undo")
@@ -595,6 +609,9 @@ class MainWindow(QMainWindow):
         self.settings_dialog.set_busy(busy)
         self.cached_button.setEnabled(not busy and self._ready)
         self.briefs_button.setEnabled(not busy and self._ready)
+        self.data_button.setEnabled(not busy and self.data_dialog is not None)
+        if self.data_dialog is not None:
+            self.data_dialog.set_busy(busy)
         self.history_dialog.set_busy(busy)
         self.latest_button.setEnabled(not busy)
         self.cached_dialog.set_busy(busy)
@@ -603,6 +620,54 @@ class MainWindow(QMainWindow):
         self.actions_panel.set_busy(busy)
         self.action_editor.set_busy(busy)
         self.drafts_panel.set_busy(busy)
+
+    async def _open_data(self) -> None:
+        if self._unsaved_drafts:
+            self.status.setText("Resolve the failed draft save before managing data.")
+            return
+        if (
+            self.action_editor.isVisible()
+            or self.draft_editor.isVisible()
+            or not self.draft_writes.idle
+        ):
+            self.status.setText(
+                "Close the editors and let pending saves finish before managing data."
+            )
+            return
+        if self.data_dialog is not None:
+            accounts = await self.backend.cached_accounts() if self._ready else ()
+            if not self._closing:
+                self.data_dialog.configure(accounts, available=self._ready)
+                self.data_dialog.open()
+
+    def _run_data(self, operation: Callable[[], Awaitable[None]]) -> bool:
+        if self.data_dialog is None:
+            return False
+        dialog = self.data_dialog
+        return self.start(lambda: dialog.guarded(operation), cancellable=False)
+
+    def _request_restore(self, path: Path, metadata: BackupMetadata) -> None:
+        self.pending_restore = (path, metadata)
+        self.close()
+
+    async def _refresh_data(self) -> None:
+        if self._closing:
+            return
+        self._offer_undo()
+        self._shown = None
+        self.viewing.hide()
+        saved = await self.backend.load_saved()
+        if saved is None:
+            self.digest.clear()
+        else:
+            await self._show_digest(saved)
+        await self._refresh_actions()
+        await self._refresh_drafts()
+        self.cached_dialog.reject()
+        self.history_dialog.reject()
+        self.proposals_dialog.reject()
+        if self.data_dialog is not None:
+            self.data_dialog.configure(await self.backend.cached_accounts(), available=True)
 
     def _offer_undo(
         self, label: str | None = None, operation: Callable[[], Awaitable[None]] | None = None
@@ -1165,14 +1230,17 @@ class MainWindow(QMainWindow):
         try:
             saved = await self.backend.autosave_draft(public_id, draft.revision, edit)
         except _DRAFT_STALE as exc:
+            self._unsaved_drafts.add(public_id)
             log_failure(exc)
             editor.show_conflict()
             return False
         except Exception as exc:
+            self._unsaved_drafts.add(public_id)
             log_failure(exc)
             editor.save_failed()
             return False
         editor.saved(saved, edit)
+        self._unsaved_drafts.discard(public_id)
         return True
 
     def _writable_draft(self) -> Draft | None:
@@ -1250,6 +1318,7 @@ class MainWindow(QMainWindow):
             return
         try:
             copy = await self.backend.save_draft_as_new(draft.public_id, edit)
+            self._unsaved_drafts.discard(draft.public_id)
         except Exception as exc:
             log_failure(exc)
             editor.set_status("Couldn't save a new draft; try again.")
@@ -1655,7 +1724,7 @@ class MainWindow(QMainWindow):
 
     def _dialog_open(self) -> bool:
         """Whether the owner is working in one of the window's dialogs or editors."""
-        return any(
+        return (self.data_dialog is not None and self.data_dialog.isVisible()) or any(
             widget.isVisible()
             for widget in (
                 self.settings_dialog,
@@ -1939,6 +2008,8 @@ class MainWindow(QMainWindow):
         self.cached_dialog.reject()
         self.history_dialog.reject()
         self.proposals_dialog.reject()
+        if self.data_dialog is not None:
+            self.data_dialog.reject()
         self.action_editor.force_close()  # Even mid-save; a Save during shutdown is refused.
         self._cancel_drafting()
         final = self.draft_editor.final_edit() if self.draft_editor.isVisible() else None

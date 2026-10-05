@@ -34,6 +34,11 @@ later use after Microsoft Entra access is resolved.
   replies outside today's Inbox offered in review; and refreshing while MailBrief is open,
   with automatic analysis only by your explicit permission.
   See [M8 daily operation](docs/m8-daily-operation.md).
+- M9 implemented, awaiting live acceptance: **Data and recovery** provides snapshot
+  backup, verification, safe restore on exit, portable writing exports, manual retention
+  previews, safe diagnostics and bundled setup/recovery help.
+  See [M9 durability](docs/m9-durability.md) and the
+  [owner's live-validation checklist](docs/m9-live-validation.md).
 
 ## Start here
 
@@ -48,6 +53,8 @@ later use after Microsoft Entra access is resolved.
 - [Actions, target dates and plans (M6)](docs/m6-actions.md)
 - [Drafts, notes and messages (M7)](docs/m7-drafts.md)
 - [Preferences and daily operation (M8)](docs/m8-daily-operation.md)
+- [Backup, exports and retention (M9)](docs/m9-durability.md)
+- [Live validation and personal-use journal (M9)](docs/m9-live-validation.md)
 - [File change map](docs/change-map.md)
 - [Microsoft work retained for later](docs/microsoft-setup.md)
 

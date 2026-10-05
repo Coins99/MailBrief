@@ -57,6 +57,9 @@ jobs:
         # Adds these tests' coverage to the main run's; the 80% gate applies to the total.
         run: uv run pytest --cov-append tests/ui tests/unit/test_app.py
 
+      - name: Verify required service coverage
+        run: uv run python scripts/check_coverage.py
+
       - name: Build desktop package
         run: uv run python scripts/build_desktop.py
 

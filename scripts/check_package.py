@@ -8,6 +8,19 @@ import tempfile
 from pathlib import Path
 
 
+def audit_distribution(directory: Path) -> None:
+    """Only inspect generated artifacts, never developer credentials or real profiles."""
+    for path in directory.rglob("*"):
+        name = path.name.lower()
+        if (
+            name in {".env", ".git", ".venv", "desktop-settings.json"}
+            or name.startswith("client_secret")
+            or name.endswith((".sqlite", ".sqlite3", ".db", ".log"))
+            or name in {"credentials.json", "token.json", "token-cache.json"}
+        ):
+            raise ValueError("Distribution contains private or development artifacts.")
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     if sys.platform == "win32":
@@ -16,6 +29,7 @@ def main() -> int:
         executable = root / "out" / "dist" / "MailBrief.app" / "Contents" / "MacOS" / "MailBrief"
     else:
         raise SystemExit("Package checks require Windows or macOS.")
+    audit_distribution(executable.parent if sys.platform == "win32" else executable.parents[2])
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -25,7 +39,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="package-check-", dir=root / "out") as temporary:
         directory = Path(temporary)
         report = directory / "smoke-result.json"
-        for _ in range(2):
+        for scale in ("1", "2"):
+            environment["QT_SCALE_FACTOR"] = scale
             report.unlink(missing_ok=True)
             completed = subprocess.run(
                 [str(executable), "--smoke-test-dir", str(directory)],
