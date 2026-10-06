@@ -628,3 +628,60 @@ def test_no_replace_permission_survives_destination_race(
     with pytest.raises(FileExistsError):
         restore_backup(archive, database)
     assert database.read_bytes() == b"only copy, created during validation"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE UNIQUE INDEX extra ON drafts(title)",
+        "CREATE INDEX extra ON drafts(body)",
+        "CREATE INDEX extra ON drafts(lower(title))",
+        "CREATE INDEX extra ON drafts(title) WHERE deleted_at_utc IS NULL",
+        "DROP INDEX ix_actions_status",
+    ],
+)
+def test_archive_indexes_must_match_the_migrated_schema(
+    archive: Path, tmp_path: Path, sql: str
+) -> None:
+    """An extra unique index would make ordinary saves fail after restore."""
+    hostile = tmp_path / "hostile.sqlite3"
+    sample_database(hostile)
+    with closing(sqlite3.connect(hostile)) as connection:
+        connection.execute(sql)
+        connection.commit()
+    payload = hostile.read_bytes()
+    rewrite_archive(
+        archive, payload=payload, metadata={"database_sha256": hashlib.sha256(payload).hexdigest()}
+    )
+    current = tmp_path / "current.sqlite3"
+    sample_database(current, "keep me")
+    with pytest.raises(BackupValidationError):
+        restore_backup(archive, current, replace=True)
+    assert query(current, "SELECT body FROM drafts") == [("keep me",)]
+
+
+def test_untrusted_files_open_read_only_and_defensive(archive: Path, tmp_path: Path) -> None:
+    database = tmp_path / "source.sqlite3"
+    with closing(recovery._untrusted(database)) as connection:
+        assert connection.getconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE)
+        assert connection.execute("PRAGMA trusted_schema").fetchone() == (0,)
+        assert connection.execute("PRAGMA cell_size_check").fetchone() == (1,)
+        assert connection.execute("PRAGMA mmap_size").fetchone() == (0,)
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("DELETE FROM drafts")
+
+
+def test_restore_refuses_a_symlinked_database(archive: Path, tmp_path: Path) -> None:
+    real = tmp_path / "real.sqlite3"
+    sample_database(real, "keep me")
+    link = tmp_path / "database.sqlite3"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("Creating symlinks needs Developer Mode on Windows")
+    before = hashlib.sha256(real.read_bytes()).hexdigest()
+    with pytest.raises(BackupValidationError, match="regular database path"):
+        restore_backup(archive, link, replace=True)
+    assert hashlib.sha256(real.read_bytes()).hexdigest() == before
+    assert link.is_symlink()
+    assert not list(tmp_path.glob("*.pre-restore-*"))

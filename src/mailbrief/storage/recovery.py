@@ -8,10 +8,12 @@ import tempfile
 import zipfile
 import zlib
 from contextlib import closing
+from functools import cache
 from pathlib import Path
 from typing import BinaryIO
 from uuid import uuid4
 
+from alembic import command
 from alembic.script import ScriptDirectory
 from pydantic import ValidationError
 from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, inspect
@@ -30,11 +32,50 @@ class BackupValidationError(ValueError):
     """An archive cannot be safely restored; its content is never included in errors."""
 
 
+def _untrusted(path: Path) -> sqlite3.Connection:
+    """A read-only connection configured for a file that may be hostile."""
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        # Defensive mode blocks features that can corrupt a file, such as writable_schema.
+        connection.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
+        for pragma in ("trusted_schema=OFF", "cell_size_check=ON", "mmap_size=0"):
+            connection.execute(f"PRAGMA {pragma}")
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _indexes(connection: sqlite3.Connection) -> frozenset[tuple[object, ...]]:
+    """Every index on MailBrief's tables by shape; names differ between equal databases."""
+    found: set[tuple[object, ...]] = set()
+    for table in (*Base.metadata.tables, "alembic_version"):
+        for name, unique, origin, partial in connection.execute(
+            'SELECT name, "unique", origin, partial FROM pragma_index_list(?)', (table,)
+        ):
+            # Key columns with their order and collation; an expression has no name.
+            columns = tuple(
+                connection.execute(
+                    'SELECT name, "desc", coll FROM pragma_index_xinfo(?) WHERE key ORDER BY seqno',
+                    (name,),
+                )
+            )
+            found.add((table, unique, origin, partial, columns))
+    return frozenset(found)
+
+
+@cache
+def _reference_indexes() -> frozenset[tuple[object, ...]]:
+    """The indexes of a freshly migrated database, built once per process."""
+    with tempfile.TemporaryDirectory(prefix="mailbrief-reference-") as work:
+        reference = Path(work) / "reference.sqlite3"
+        command.upgrade(migration_config(reference), "head")
+        with closing(sqlite3.connect(reference)) as connection:
+            return _indexes(connection)
+
+
 def _check_schema(connection: sqlite3.Connection, path: Path) -> None:
-    engine = create_engine(
-        "sqlite://",
-        creator=lambda: sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True),
-    )
+    engine = create_engine("sqlite://", creator=lambda: _untrusted(path))
     try:
         with engine.connect() as reflected:
             inspector = inspect(reflected)
@@ -91,12 +132,14 @@ def _check_schema(connection: sqlite3.Connection, path: Path) -> None:
             or checks[name] != expected_checks
         ):
             raise BackupValidationError(_INVALID)
+    # An extra unique index would make ordinary saves fail after a restore.
+    if _indexes(connection) != _reference_indexes():
+        raise BackupValidationError(_INVALID)
 
 
 def validate_snapshot(path: Path, *, current_schema: bool = False) -> tuple[str, ...]:
     scripts = ScriptDirectory.from_config(migration_config(path))
-    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-        connection.execute("PRAGMA trusted_schema=OFF")
+    with closing(_untrusted(path)) as connection:
         objects = connection.execute("SELECT name, type FROM sqlite_master").fetchall()
         tables = {name for name, kind in objects if kind == "table"}
         expected = set(Base.metadata.tables) | {"alembic_version"}
