@@ -7,6 +7,7 @@ import struct
 import tempfile
 import zipfile
 import zlib
+from collections import Counter
 from contextlib import closing
 from functools import cache
 from pathlib import Path
@@ -46,9 +47,10 @@ def _untrusted(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _indexes(connection: sqlite3.Connection) -> frozenset[tuple[object, ...]]:
-    """Every index on MailBrief's tables by shape; names differ between equal databases."""
-    found: set[tuple[object, ...]] = set()
+def _indexes(connection: sqlite3.Connection) -> frozenset[tuple[tuple[object, ...], int]]:
+    """Every index on MailBrief's tables by shape, with how many have that shape; names
+    differ between equal databases, and a duplicate of an existing index still counts."""
+    found: Counter[tuple[object, ...]] = Counter()
     for table in (*Base.metadata.tables, "alembic_version"):
         for name, unique, origin, partial in connection.execute(
             'SELECT name, "unique", origin, partial FROM pragma_index_list(?)', (table,)
@@ -60,12 +62,12 @@ def _indexes(connection: sqlite3.Connection) -> frozenset[tuple[object, ...]]:
                     (name,),
                 )
             )
-            found.add((table, unique, origin, partial, columns))
-    return frozenset(found)
+            found[(table, unique, origin, partial, columns)] += 1
+    return frozenset(found.items())
 
 
 @cache
-def _reference_indexes() -> frozenset[tuple[object, ...]]:
+def _reference_indexes() -> frozenset[tuple[tuple[object, ...], int]]:
     """The indexes of a freshly migrated database, built once per process."""
     with tempfile.TemporaryDirectory(prefix="mailbrief-reference-") as work:
         reference = Path(work) / "reference.sqlite3"

@@ -669,6 +669,7 @@ def test_no_replace_permission_survives_destination_race(
         "CREATE INDEX extra ON drafts(lower(title))",
         "CREATE INDEX extra ON drafts(title) WHERE deleted_at_utc IS NULL",
         "DROP INDEX ix_actions_status",
+        "CREATE INDEX extra ON actions(status)",  # Same shape as ix_actions_status.
     ],
 )
 def test_archive_indexes_must_match_the_migrated_schema(

@@ -142,8 +142,8 @@ No member paths are extracted. A checksum establishes integrity, not authenticit
 
 Restore validates in a temporary folder beside the target, upgrades that staged
 database with the bundled migrations, verifies column types, nullability, primary/
-foreign keys, uniqueness and indexes against the current schema (an extra or missing
-index is refused), and
+foreign keys, uniqueness and indexes against the current schema (an extra, missing or
+duplicate index is refused), and
 flushes it before publishing. For an existing target, `--replace` is required: a
 consistent snapshot named `<database>.pre-restore-<unique-id>.sqlite3` is kept beside
 it before the atomic replacement. The command prints that retained path. A failed
