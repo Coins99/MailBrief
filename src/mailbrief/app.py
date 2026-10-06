@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
 
 from mailbrief.paths import AppPaths, configure_qt_identity
-from mailbrief.storage.recovery import _restore_backup_locked
+from mailbrief.storage.recovery import BackupValidationError, restore_backup_holding_lock
 from mailbrief.ui.diagnostics import configure_logging, log_failure, logger
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
@@ -37,7 +37,8 @@ async def run_desktop() -> None:
     lock.setStaleLockTime(0)
     if not lock.tryLock(0):
         message = (
-            "MailBrief is already running."
+            "MailBrief is already running, or a MailBrief diagnostic command is using its "
+            "data. Close it and retry."
             if lock.error() == QLockFile.LockError.LockFailedError
             else "MailBrief could not lock its data folder. Check folder access and retry."
         )
@@ -60,11 +61,17 @@ async def run_desktop() -> None:
             # autosave task or pooled connection can write to the restored database.
             try:
                 previous = await asyncio.to_thread(
-                    _restore_backup_locked,
+                    restore_backup_holding_lock,
                     window.pending_restore[0],
                     paths.database_path,
                     replace=True,
                     expected=window.pending_restore[1],
+                )
+            except BackupValidationError as exc:
+                # Fixed, safe text: archive content never appears in these messages.
+                log_failure(exc)
+                QMessageBox.warning(
+                    None, "MailBrief recovery", f"{exc} The current database was kept."
                 )
             except Exception as exc:
                 log_failure(exc)
@@ -76,11 +83,12 @@ async def run_desktop() -> None:
                     "access and other database clients, then retry.",
                 )
             else:
+                retained = f"Previous database: {previous}\n" if previous is not None else ""
                 QMessageBox.information(
                     None,
                     "MailBrief recovery",
                     "Backup restored. "
-                    f"Previous database: {previous}\n"
+                    f"{retained}"
                     "Relaunch MailBrief. Automatic AI permission is off.",
                 )
     except Exception as exc:

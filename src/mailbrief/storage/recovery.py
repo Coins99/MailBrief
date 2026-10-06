@@ -250,13 +250,19 @@ def restore_backup(archive: Path, database: Path, *, replace: bool = False) -> P
     also be closed. A failed validation or migration never replaces the destination.
     """
     with data_directory_lock(database):
-        return _restore_backup_locked(archive, database, replace=replace)
+        return restore_backup_holding_lock(archive, database, replace=replace)
 
 
-def _restore_backup_locked(
+def restore_backup_holding_lock(
     archive: Path, database: Path, *, replace: bool, expected: BackupMetadata | None = None
 ) -> Path | None:
-    """Desktop shutdown only: the caller must hold its data-folder lock and close SQLite."""
+    """Restore for a caller that already holds the data-folder lock (desktop shutdown).
+
+    Preconditions: the caller holds ``data_directory_lock`` for ``database`` and has
+    disposed every SQLite connection to it. With ``expected``, the archive must still match
+    the metadata the owner reviewed. Returns the pre-restore copy, or None when no database
+    existed. Use ``restore_backup`` everywhere else; it takes the lock itself.
+    """
     if database.is_symlink():
         raise BackupValidationError("Restore requires a regular database path.")
     database = database.resolve()

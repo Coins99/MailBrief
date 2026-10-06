@@ -26,9 +26,9 @@ from mailbrief.storage.backup import create_backup
 from mailbrief.storage.migrate import migration_config
 from mailbrief.storage.recovery import (
     BackupValidationError,
-    _restore_backup_locked,
     inspect_backup,
     restore_backup,
+    restore_backup_holding_lock,
 )
 from mailbrief.storage.tables import Base
 
@@ -331,7 +331,7 @@ def test_reviewed_archive_cannot_be_swapped_before_restore(archive: Path, tmp_pa
     current = tmp_path / "current.sqlite3"
     sample_database(current, "current writing")
     with data_directory_lock(current), pytest.raises(BackupValidationError, match="changed"):
-        _restore_backup_locked(archive, current, replace=True, expected=reviewed)
+        restore_backup_holding_lock(archive, current, replace=True, expected=reviewed)
     assert query(current, "SELECT body FROM drafts") == [("current writing",)]
     assert not list(tmp_path.glob("*.pre-restore-*.sqlite3"))
 

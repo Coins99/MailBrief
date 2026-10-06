@@ -17,6 +17,7 @@ from sqlalchemy import select
 from mailbrief.storage.database import Database
 from mailbrief.storage.recovery import BackupValidationError
 from mailbrief.storage.tables import DraftTable, MessageTable
+from mailbrief.ui import data_view
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.test_workflow import FakeBackend
 from tests.unit.services import test_data as fixtures
@@ -167,6 +168,26 @@ async def test_picker_refuses_data_folder_and_cancellation(
     await asyncio.sleep(0)
     dialog.reject()
     assert await task is None
+
+
+async def test_backup_inside_data_folder_shows_the_specific_refusal(
+    data_window: MainWindow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dialog = data_window.data_dialog
+    assert dialog is not None
+    log_failure = Mock()
+    monkeypatch.setattr(data_view, "log_failure", log_failure)
+    task = asyncio.create_task(dialog.guarded(dialog.backup))
+    await asyncio.sleep(0)
+    assert dialog._picker is not None
+    dialog._picker.selectFile(str(tmp_path / "backup.zip"))
+    dialog._picker.done(QDialog.DialogCode.Accepted)
+    await task
+    assert dialog.status.text() == "Choose a destination outside MailBrief's data folder."
+    assert not (tmp_path / "backup.zip").exists()
+    log_failure.assert_not_called()
 
 
 async def test_failed_operations_hide_private_errors(data_window: MainWindow) -> None:

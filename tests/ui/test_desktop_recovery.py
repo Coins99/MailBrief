@@ -15,13 +15,13 @@ from mailbrief import app
 from mailbrief.domain.backup import BackupMetadata
 from mailbrief.paths import AppPaths
 from mailbrief.storage.backup import create_backup
-from mailbrief.storage.recovery import _restore_backup_locked, inspect_backup
+from mailbrief.storage.recovery import inspect_backup, restore_backup_holding_lock
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.test_workflow import FakeBackend
 from tests.unit.storage.test_recovery import query, sample_database
 
 
-@pytest.mark.parametrize("failure", [None, "archive", "shutdown"])
+@pytest.mark.parametrize("failure", [None, "no-previous", "archive", "swapped", "shutdown"])
 def test_restore_follows_shutdown_and_holds_lock(
     qtbot: QtBot,
     tmp_path: Path,
@@ -35,6 +35,11 @@ def test_restore_follows_shutdown_and_holds_lock(
     metadata = inspect_backup(archive)
     if failure == "archive":
         archive.write_bytes(b"invalid archive")
+    elif failure == "swapped":
+        replacement = tmp_path / "replacement.sqlite3"
+        sample_database(replacement, "other writing")
+        archive.unlink()
+        create_backup(replacement, archive)
     current = tmp_path / "current.sqlite3"
     sample_database(current, "current writing")
 
@@ -62,7 +67,7 @@ def test_restore_follows_shutdown_and_holds_lock(
     warning = Mock()
     monkeypatch.setattr(QMessageBox, "information", information)
     monkeypatch.setattr(QMessageBox, "warning", warning)
-    real_restore = _restore_backup_locked
+    real_restore = restore_backup_holding_lock
     restores: list[Path | None] = []
 
     def restore(
@@ -72,11 +77,13 @@ def test_restore_follows_shutdown_and_holds_lock(
         contender = QLockFile(str(tmp_path / "desktop.lock"))
         assert not contender.tryLock(0)
         assert query(current, "SELECT notes FROM actions") == [("shutdown finished",)]
+        if failure == "no-previous":
+            current.unlink()  # Removed while the app ran: nothing to retain.
         result = real_restore(path, database, replace=replace, expected=expected)
         restores.append(result)
         return result
 
-    monkeypatch.setattr(app, "_restore_backup_locked", restore)
+    monkeypatch.setattr(app, "restore_backup_holding_lock", restore)
 
     def request_restore() -> None:
         for widget in QApplication.topLevelWidgets():
@@ -93,11 +100,24 @@ def test_restore_follows_shutdown_and_holds_lock(
             assert query(current, "SELECT notes FROM actions") == [("backup writing",)]
             assert query(restores[0], "SELECT notes FROM actions") == [("shutdown finished",)]
             information.assert_called_once()
+            assert f"Previous database: {restores[0]}" in information.call_args.args[2]
+        elif failure == "no-previous":
+            assert restores == [None]
+            assert query(current, "SELECT notes FROM actions") == [("backup writing",)]
+            information.assert_called_once()
+            assert "Previous database" not in information.call_args.args[2]
         else:
             assert restores == []
             assert query(current, "SELECT notes FROM actions") == [("shutdown finished",)]
             warning.assert_called_once()
-            assert "PRIVATE" not in warning.call_args.args[2]
+            text = warning.call_args.args[2]
+            assert "PRIVATE" not in text
+            if failure == "archive":
+                assert text.startswith("The backup is damaged, incompatible")
+            elif failure == "swapped":
+                assert text.startswith("The selected backup changed. Verify and review it again.")
+            if failure != "shutdown":
+                assert text.endswith("The current database was kept.")
         contender = QLockFile(str(tmp_path / "desktop.lock"))
         assert contender.tryLock(0)
         contender.unlock()
