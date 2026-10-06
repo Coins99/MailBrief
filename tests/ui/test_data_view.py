@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from pytestqt.qtbot import QtBot
 from sqlalchemy import select
 
@@ -155,7 +155,21 @@ async def test_native_confirmation_defaults_cancel_and_closes_cleanly(
     assert dialog._confirmation is None
 
 
+@pytest.fixture
+def qt_file_dialogs(qapp: QApplication) -> Iterator[None]:
+    """Qt's own file dialog. A native macOS one ignores selectFile() until it has run, so
+    the test could never pick a file."""
+    attribute = Qt.ApplicationAttribute.AA_DontUseNativeDialogs
+    before = QApplication.testAttribute(attribute)
+    QApplication.setAttribute(attribute, True)
+    try:
+        yield
+    finally:
+        QApplication.setAttribute(attribute, before)
+
+
 async def test_picker_refuses_data_folder_and_cancellation(
+    qt_file_dialogs: None,
     data_window: MainWindow,
     tmp_path: Path,
 ) -> None:
