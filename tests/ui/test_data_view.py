@@ -146,7 +146,11 @@ async def test_native_confirmation_defaults_cancel_and_closes_cleanly(
     box = dialog._confirmation
     assert box is not None
     assert box.defaultButton() == box.button(QMessageBox.StandardButton.Cancel)
-    QTest.keyClick(box, Qt.Key.Key_Escape)
+    # On macOS, Escape uses animateClick, which clicks Cancel from a Qt timer; this test's
+    # asyncio loop never runs it, so wait for the result in a Qt event loop. Elsewhere it
+    # clicks at once, which the context manager also catches.
+    with qtbot.waitSignal(box.finished, timeout=5000):
+        QTest.keyClick(box, Qt.Key.Key_Escape)
     assert await task is False
     assert dialog._confirmation is None
 
