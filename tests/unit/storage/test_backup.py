@@ -3,6 +3,7 @@
 import errno
 import hashlib
 import json
+import os
 import sqlite3
 import stat
 import sys
@@ -209,3 +210,33 @@ def test_unexpected_storage_objects_are_not_backed_up(tmp_path: Path) -> None:
     assert "SYNTHETIC SECRET" not in str(caught.value)
     assert not (tmp_path / "backup.zip").exists()
     assert not list(tmp_path.glob(".mailbrief-backup-*"))
+
+
+def test_a_copied_backup_is_saved_even_if_its_staging_file_cannot_be_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy on disk counts as saved; a staging file another process holds stays behind."""
+    database = tmp_path / "database.sqlite3"
+    upgrade_database(database)
+    folder = tmp_path / "drive"
+    folder.mkdir()
+    destination = folder / "saved.zip"
+    real = os.unlink
+
+    def held_open(path: Any, *args: Any, **kwargs: Any) -> None:
+        if os.path.basename(os.fspath(path)) == "backup.zip":
+            raise PermissionError(errno.EACCES, "Permission denied", path)
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported_rename)
+    monkeypatch.setattr(os, "unlink", held_open)
+    create_backup(database, destination)
+    monkeypatch.undo()
+
+    assert inspect_backup(destination).schema_revisions == ("20260930_0012",)
+    left = [path.name for path in folder.iterdir() if path != destination]
+    assert len(left) == 1 and left[0].startswith(".mailbrief-backup-")
+
+
+def unsupported_rename(source: object, destination: object) -> None:
+    raise OSError(errno.ENOTSUP, "Operation not supported")

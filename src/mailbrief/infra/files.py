@@ -75,7 +75,10 @@ def _copy_exclusively(source: str, destination: Path) -> None:
         with contextlib.suppress(OSError):
             os.unlink(destination)  # O_EXCL succeeded, so this partial file is ours.
         raise
-    os.unlink(source)
+    # Published and flushed: the copy has succeeded, and deleting the source is cleanup.
+    # The callers' own cleanup tries again; a source that still can't go is left behind.
+    with contextlib.suppress(OSError):
+        os.unlink(source)
 
 
 def write_text_atomically(path: Path, text: str, *, overwrite: bool) -> None:
@@ -84,8 +87,9 @@ def write_text_atomically(path: Path, text: str, *, overwrite: bool) -> None:
 
     Line breaks are written as they are. With ``overwrite`` false an existing file is
     refused with FileExistsError; on a filesystem without an exclusive rename or hard links
-    the new file is copied exclusively instead, which a crash can leave partial. Errors
-    carry no file content.
+    the new file is copied exclusively instead, which a crash can leave partial. A
+    temporary file that can't be deleted never fails a finished write. Errors carry no file
+    content.
     """
     if not overwrite and path.exists():
         raise FileExistsError(_EXISTS)
@@ -100,7 +104,7 @@ def write_text_atomically(path: Path, text: str, *, overwrite: bool) -> None:
         else:
             # Exclusive publication also refuses a destination created during the write.
             publish_exclusively(temporary, path)
-    except BaseException:
+    finally:
+        # Already gone after a rename; after a copy, a second try at a delete that failed.
         with contextlib.suppress(OSError):
             os.unlink(temporary)
-        raise

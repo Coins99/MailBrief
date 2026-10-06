@@ -6,8 +6,10 @@ import os
 import shutil
 import stat
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -210,3 +212,61 @@ def test_export_falls_back_on_a_filesystem_without_exclusive_rename(
 
     assert target.read_text(encoding="utf-8") == "owner writing"
     assert list(tmp_path.iterdir()) == [target]
+
+
+def locked(names: Callable[[str], bool], *, times: int | None = None) -> Callable[..., None]:
+    """os.unlink failing like a file another process holds open, ``times`` times or always."""
+    real = os.unlink
+    failures: list[str] = []
+
+    def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        name = os.path.basename(os.fspath(path))
+        if names(name) and (times is None or len(failures) < times):
+            failures.append(name)
+            raise PermissionError(errno.EACCES, "Permission denied", path)
+        real(path, *args, **kwargs)
+
+    return unlink
+
+
+def test_a_copy_succeeds_when_its_source_cannot_be_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "staged.tmp"
+    source.write_bytes(b"owner writing")
+    target = tmp_path / "export.txt"
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+    monkeypatch.setattr(os, "unlink", locked(lambda name: name == "staged.tmp"))
+
+    publish_exclusively(str(source), target)
+
+    assert target.read_bytes() == b"owner writing"
+
+
+def test_a_copied_export_cleans_up_its_temporary_file_when_the_first_delete_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+    monkeypatch.setattr(os, "unlink", locked(lambda name: name.startswith(".mailbrief-"), times=1))
+    target = tmp_path / "draft.txt"
+
+    write_text_atomically(target, "owner writing", overwrite=False)
+
+    assert target.read_text(encoding="utf-8") == "owner writing"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_a_copied_export_is_saved_even_if_its_temporary_file_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+    monkeypatch.setattr(os, "unlink", locked(lambda name: name.startswith(".mailbrief-")))
+    target = tmp_path / "draft.txt"
+
+    write_text_atomically(target, "owner writing", overwrite=False)
+
+    assert target.read_text(encoding="utf-8") == "owner writing"
+    # Only the hidden temporary file, holding the same text, is left beside it.
+    assert [
+        path.name.startswith(".mailbrief-") for path in tmp_path.iterdir() if path != target
+    ] == [True]

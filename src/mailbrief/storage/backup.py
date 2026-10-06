@@ -21,7 +21,11 @@ def create_backup(database: Path, destination: Path) -> None:
     """Publish a consistent snapshot without replacing an existing file."""
     if destination.exists():
         raise FileExistsError("That file already exists.")
-    with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".mailbrief-backup-") as work:
+    # A staging file that can't be deleted (an antivirus scan, a drive error) never turns a
+    # published backup into a failure; at worst the hidden staging folder stays behind.
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent, prefix=".mailbrief-backup-", ignore_cleanup_errors=True
+    ) as work:
         snapshot = Path(work) / "database.sqlite3"
         with (
             closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as source,
