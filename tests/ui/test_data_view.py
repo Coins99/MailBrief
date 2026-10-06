@@ -189,6 +189,7 @@ async def test_picker_refuses_data_folder_and_cancellation(
 
 
 async def test_backup_inside_data_folder_shows_the_specific_refusal(
+    qt_file_dialogs: None,
     data_window: MainWindow,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
