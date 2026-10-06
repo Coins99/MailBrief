@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DailyDigest, DigestStatus
@@ -98,5 +98,5 @@ def test_empty_brief_says_so(qtbot: QtBot) -> None:
     workspace.show_digest(empty)
     assert workspace.brief_list.model().rowCount() == 0
     assert workspace.detail.title is None
-    texts = [label.text() for label in workspace.detail.findChildren(type(workspace.coverage))]
+    texts = [label.text() for label in workspace.detail.findChildren(QLabel)]
     assert EMPTY_BRIEF in texts

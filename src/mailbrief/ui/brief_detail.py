@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -80,6 +80,7 @@ def outline_button(text: str, icon_name: str | None = None) -> QPushButton:
     button.setAutoDefault(False)
     if icon_name is not None:
         button.setIcon(icon(icon_name, current_tokens().text, _ICON_PX))
+        button.setIconSize(QSize(_ICON_PX, _ICON_PX))
     return button
 
 
@@ -176,9 +177,10 @@ class BriefDetailPane(QScrollArea):
         card.setAccessibleName("Suggested action")
         layout = QVBoxLayout(card)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(4)
         layout.addWidget(plain_label(view.suggestion.title, px=TEXT_PX, medium=True))
         layout.addWidget(plain_label(suggestion_meta(view, zone), tone="secondary", px=SMALL_PX))
+        layout.addSpacing(4)
         decisions = QHBoxLayout()
         decisions.setSpacing(8)
         accept = outline_button("Accept")
@@ -205,6 +207,7 @@ class BriefDetailPane(QScrollArea):
                 button.clicked.connect(self._into(view.suggestion_id, link))
                 into.addWidget(button)
             into.addStretch(1)
+            layout.addSpacing(4)
             layout.addLayout(into)
         return card
 

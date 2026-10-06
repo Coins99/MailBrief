@@ -248,7 +248,9 @@ class BriefItemDelegate(QStyledItemDelegate):
         painter.setPen(hairline_pen(tokens.hairline))
         bottom = rect.bottom()
         painter.drawLine(QPointF(rect.left(), bottom), QPointF(rect.right(), bottom))
-        if state & QStyle.StateFlag.State_HasFocus:
+        if state & QStyle.StateFlag.State_HasFocus and (
+            state & QStyle.StateFlag.State_KeyboardFocusChange
+        ):
             painter.setPen(hairline_pen(tokens.accent_fg))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(rect).adjusted(1, 1, -1, -1))

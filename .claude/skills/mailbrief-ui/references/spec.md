@@ -102,8 +102,19 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
   `set_note(text)`.
 - `ThreePaneWorkspace`: objectName `workspace`. HeaderBar, a horizontal divider, then
   SidebarNav, a vertical divider and a `HairlineSplitter` holding the list pane
-  (`BriefListView` and an 11px muted coverage label, margins 12, 10, 12, 10) and the
+  (`BriefListView` and an 11px muted coverage line, margins 12, 10, 12, 10, drawn as one
+  elided line by `ElidedLabel` with the full text as its accessible name) and the
   `BriefDetailPane`; stretch 4:5, not collapsible, minimum widths 220 and 280.
   Attributes `header`, `sidebar`, `brief_list`, `coverage`, `detail`. `show_digest`
   builds the rows and `coverage_line`, shows the selected item's links and proposals, and
   shows "No analyzed messages in this brief." when empty. MainWindow doesn't use it yet.
+
+## Stylesheet additions from the Phase 4 visual pass
+
+- Outline buttons use `padding: 5px 14px` (the brief's 4px 10px looked small next to the
+  mockup), with 14px icons.
+- Scrollbars are thin token-coloured handles with no arrow buttons: 8px wide, handle
+  `border_strong`, radius 3, transparent track.
+- Focus rings in the painted lists show only after the keyboard moves focus
+  (`State_KeyboardFocusChange`), not on first show.
+- Suggestion cards: 4px between title and meta, 8px before each button row.

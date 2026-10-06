@@ -96,7 +96,6 @@ def mockup_digest() -> MockupBrief:
                 "Priya needs your approval of the revised Q3 budget before Friday's finance "
                 "review. Two line items changed since last month."
             ),
-            action_text="Approve the revised Q3 budget by Friday at 17:00.",
             deadline_text="by Friday at 5pm",
             deadline_precision=DeadlinePrecision.DATETIME,
             deadline_date=date(2026, 10, 9),

@@ -28,7 +28,7 @@ from mailbrief.services.history import coverage_line
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
 from mailbrief.ui.hairline import HairlineDivider, HairlineSplitter, hairline_pen
-from mailbrief.ui.labels import button_label, plain_label
+from mailbrief.ui.labels import ElidedLabel, button_label, plain_label
 from mailbrief.ui.theme import (
     CAPTION_PX,
     RADIUS,
@@ -125,7 +125,7 @@ class _NavDelegate(QStyledItemDelegate):
         if isinstance(count, int):
             painter.setPen(QColor(tokens.text_secondary))
             painter.drawText(label, flags | int(Qt.AlignmentFlag.AlignRight), str(count))
-        if state & QStyle.StateFlag.State_HasFocus:
+        if _keyboard_focus(state):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             painter.setPen(hairline_pen(tokens.accent_fg))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -134,6 +134,14 @@ class _NavDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option: QStyleOptionViewItem, index: _Index) -> QSize:
         return QSize(option.rect.width(), _NAV_ROW)
+
+
+def _keyboard_focus(state: QStyle.StateFlag) -> bool:
+    """The focus ring shows once the keyboard has moved focus, not on first show."""
+    return bool(
+        state & QStyle.StateFlag.State_HasFocus
+        and state & QStyle.StateFlag.State_KeyboardFocusChange
+    )
 
 
 class _NavList(QListView):
@@ -192,6 +200,7 @@ class SidebarNav(QWidget):
         self.settings.setProperty("variant", "nav")
         self.settings.setAutoDefault(False)
         self.settings.setIcon(icon("settings", current_tokens().text_secondary, _ICON_PX))
+        self.settings.setIconSize(QSize(_ICON_PX, _ICON_PX))
         self.settings.clicked.connect(self.settings_requested)
         layout.addWidget(self.settings)
         self.note = plain_label("", tone="muted", px=CAPTION_PX)
@@ -252,8 +261,7 @@ class ThreePaneWorkspace(QWidget):
         list_layout.setSpacing(0)
         self.brief_list = BriefListView()
         list_layout.addWidget(self.brief_list, 1)
-        self.coverage = plain_label("", tone="muted", px=CAPTION_PX)
-        self.coverage.setAccessibleName("Brief coverage")
+        self.coverage = ElidedLabel(tone="muted", px=CAPTION_PX)
         self.coverage.setContentsMargins(12, 10, 12, 10)
         list_layout.addWidget(self.coverage)
         list_pane.setMinimumWidth(220)

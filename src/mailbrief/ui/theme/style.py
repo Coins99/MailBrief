@@ -15,13 +15,18 @@ QWidget#headerBar { background: $canvas; }
 QLabel[tone="secondary"] { color: $text_secondary; }
 QLabel[tone="muted"] { color: $text_muted; }
 QLabel[tone="warning"] { color: $warning_fg; }
-QPushButton[variant="outline"] { background: transparent; color: $text; border: 1px solid $border_strong; border-radius: 8px; padding: 4px 10px; }
+QPushButton[variant="outline"] { background: transparent; color: $text; border: 1px solid $border_strong; border-radius: 8px; padding: 5px 14px; }
 QPushButton[variant="outline"]:hover { background: $selection; }
 QPushButton[variant="outline"]:focus { border-color: $accent_fg; }
 QPushButton[variant="nav"] { text-align: left; background: transparent; color: $text_secondary; border: none; border-radius: 8px; padding: 6px 10px; }
 QPushButton[variant="nav"]:hover, QPushButton[variant="nav"]:focus { background: $selection; color: $text; }
 QListView#sidebarNav, QListView#briefList { background: $panel; border: none; outline: 0; }
 QScrollArea#briefDetail { background: $panel; border: none; }
+QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 1px; }
+QScrollBar:horizontal { background: transparent; height: 8px; margin: 1px 2px; }
+QScrollBar::handle { background: $border_strong; border-radius: 3px; min-height: 24px; min-width: 24px; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """  # noqa: E501
 
 _current = DARK
