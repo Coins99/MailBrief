@@ -1,8 +1,8 @@
 """Snapshot consistency and failure preservation, using synthetic data only."""
 
+import errno
 import hashlib
 import json
-import os
 import sqlite3
 import zipfile
 from collections.abc import Callable
@@ -85,15 +85,30 @@ def test_publication_failure_cleans_staging(
     upgrade_database(database)
 
     def fail(source: object, destination: object) -> None:
-        raise OSError("simulated disk or permission failure")
+        raise OSError(errno.EACCES, "simulated disk or permission failure")
 
-    monkeypatch.setattr(os, "link", fail)
+    monkeypatch.setattr(backup, "publish_exclusively", fail)
     with pytest.raises(OSError):
         create_backup(database, tmp_path / "backup.zip")
     assert not (tmp_path / "backup.zip").exists()
     assert not list(tmp_path.glob(".mailbrief-backup-*"))
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+
+
+def test_backup_folder_is_synced_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "database.sqlite3"
+    upgrade_database(database)
+    destination = tmp_path / "backups" / "backup.zip"
+    destination.parent.mkdir()
+    synced: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        backup, "sync_directory", lambda path: synced.append((path, destination.exists()))
+    )
+    create_backup(database, destination)
+    assert synced == [(destination.parent, True)]
 
 
 def test_oversized_snapshot_refused_before_publication(

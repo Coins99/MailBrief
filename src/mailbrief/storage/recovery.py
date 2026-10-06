@@ -1,5 +1,6 @@
 """Validate and stage recovery before publishing a database; retain the old copy."""
 
+import contextlib
 import hashlib
 import os
 import sqlite3
@@ -7,19 +8,22 @@ import struct
 import tempfile
 import zipfile
 import zlib
+from collections import Counter
 from contextlib import closing
+from functools import cache
 from pathlib import Path
 from typing import BinaryIO
 from uuid import uuid4
 
+from alembic import command
 from alembic.script import ScriptDirectory
 from pydantic import ValidationError
-from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, inspect
+from sqlalchemy import CheckConstraint, create_engine, inspect
 from sqlalchemy.dialects.sqlite import dialect
 
 from mailbrief.domain.backup import MAX_DATABASE_BYTES, MAX_METADATA_BYTES, BackupMetadata
 from mailbrief.infra.data_lock import data_directory_lock
-from mailbrief.infra.files import sync_directory
+from mailbrief.infra.files import publish_exclusively, sync_directory
 from mailbrief.storage.migrate import migration_config, upgrade_database
 from mailbrief.storage.tables import Base
 
@@ -30,11 +34,51 @@ class BackupValidationError(ValueError):
     """An archive cannot be safely restored; its content is never included in errors."""
 
 
+def _untrusted(path: Path) -> sqlite3.Connection:
+    """A read-only connection configured for a file that may be hostile."""
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        # Defensive mode blocks features that can corrupt a file, such as writable_schema.
+        connection.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
+        for pragma in ("trusted_schema=OFF", "cell_size_check=ON", "mmap_size=0"):
+            connection.execute(f"PRAGMA {pragma}")
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _indexes(connection: sqlite3.Connection) -> frozenset[tuple[tuple[object, ...], int]]:
+    """Every index on MailBrief's tables by shape, with how many have that shape; names
+    differ between equal databases, and a duplicate of an existing index still counts."""
+    found: Counter[tuple[object, ...]] = Counter()
+    for table in (*Base.metadata.tables, "alembic_version"):
+        for name, unique, origin, partial in connection.execute(
+            'SELECT name, "unique", origin, partial FROM pragma_index_list(?)', (table,)
+        ):
+            # Key columns with their order and collation; an expression has no name.
+            columns = tuple(
+                connection.execute(
+                    'SELECT name, "desc", coll FROM pragma_index_xinfo(?) WHERE key ORDER BY seqno',
+                    (name,),
+                )
+            )
+            found[(table, unique, origin, partial, columns)] += 1
+    return frozenset(found.items())
+
+
+@cache
+def _reference_indexes() -> frozenset[tuple[tuple[object, ...], int]]:
+    """The indexes of a freshly migrated database, built once per process."""
+    with tempfile.TemporaryDirectory(prefix="mailbrief-reference-") as work:
+        reference = Path(work) / "reference.sqlite3"
+        command.upgrade(migration_config(reference), "head")
+        with closing(sqlite3.connect(reference)) as connection:
+            return _indexes(connection)
+
+
 def _check_schema(connection: sqlite3.Connection, path: Path) -> None:
-    engine = create_engine(
-        "sqlite://",
-        creator=lambda: sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True),
-    )
+    engine = create_engine("sqlite://", creator=lambda: _untrusted(path))
     try:
         with engine.connect() as reflected:
             inspector = inspect(reflected)
@@ -66,37 +110,22 @@ def _check_schema(connection: sqlite3.Connection, path: Path) -> None:
             for column in table.columns
             for key in column.foreign_keys
         }
-        unique = {
-            tuple(
-                row[2]
-                for row in connection.execute("SELECT * FROM pragma_index_info(?)", (index[1],))
-            )
-            for index in connection.execute("SELECT * FROM pragma_index_list(?)", (name,))
-            if index[2] and not index[4]
-        }
-        expected_unique = {
-            tuple(column.name for column in constraint.columns)
-            for constraint in table.constraints
-            if isinstance(constraint, UniqueConstraint)
-        }
         expected_checks = {
             str(constraint.sqltext.compile(dialect=dialect())).strip()
             for constraint in table.constraints
             if isinstance(constraint, CheckConstraint)
         }
-        if (
-            columns != expected
-            or foreign_keys != expected_keys
-            or not expected_unique <= unique
-            or checks[name] != expected_checks
-        ):
+        if columns != expected or foreign_keys != expected_keys or checks[name] != expected_checks:
             raise BackupValidationError(_INVALID)
+    # Every index, unique constraints included, must match the migrated schema: a missing
+    # unique index lets duplicates in, and an extra one makes ordinary saves fail.
+    if _indexes(connection) != _reference_indexes():
+        raise BackupValidationError(_INVALID)
 
 
 def validate_snapshot(path: Path, *, current_schema: bool = False) -> tuple[str, ...]:
     scripts = ScriptDirectory.from_config(migration_config(path))
-    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-        connection.execute("PRAGMA trusted_schema=OFF")
+    with closing(_untrusted(path)) as connection:
         objects = connection.execute("SELECT name, type FROM sqlite_master").fetchall()
         tables = {name for name, kind in objects if kind == "table"}
         expected = set(Base.metadata.tables) | {"alembic_version"}
@@ -250,13 +279,19 @@ def restore_backup(archive: Path, database: Path, *, replace: bool = False) -> P
     also be closed. A failed validation or migration never replaces the destination.
     """
     with data_directory_lock(database):
-        return _restore_backup_locked(archive, database, replace=replace)
+        return restore_backup_holding_lock(archive, database, replace=replace)
 
 
-def _restore_backup_locked(
+def restore_backup_holding_lock(
     archive: Path, database: Path, *, replace: bool, expected: BackupMetadata | None = None
 ) -> Path | None:
-    """Desktop shutdown only: the caller must hold its data-folder lock and close SQLite."""
+    """Restore for a caller that already holds the data-folder lock (desktop shutdown).
+
+    Preconditions: the caller holds ``data_directory_lock`` for ``database`` and has
+    disposed every SQLite connection to it. With ``expected``, the archive must still match
+    the metadata the owner reviewed. Returns the pre-restore copy, or None when no database
+    existed. Use ``restore_backup`` everywhere else; it takes the lock itself.
+    """
     if database.is_symlink():
         raise BackupValidationError("Restore requires a regular database path.")
     database = database.resolve()
@@ -276,15 +311,21 @@ def _restore_backup_locked(
                 raise FileExistsError("That database already exists; replacement must be explicit.")
             snapshot = Path(work) / "previous.sqlite3"
             _preserve_database(database, snapshot)
-            previous = database.with_name(f"{database.name}.pre-restore-{uuid4().hex}.sqlite3")
-            os.link(snapshot, previous)
+            candidate = database.with_name(f"{database.name}.pre-restore-{uuid4().hex}.sqlite3")
+            publish_exclusively(str(snapshot), candidate)
+            previous = candidate  # Ours to remove only once published.
             sync_directory(database.parent)
         if any(Path(f"{database}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")):
+            if previous is not None:
+                # Nothing was replaced, so this copy is redundant: don't leave private copies
+                # behind on every refused retry. Later failures keep it, as before.
+                with contextlib.suppress(OSError):
+                    previous.unlink()
             raise BackupValidationError(
                 "Database sidecar files remain. Close all database clients before restoring."
             )
         if previous is None:
-            os.link(staged, database)
+            publish_exclusively(str(staged), database)
         else:
             os.replace(staged, database)
         sync_directory(database.parent)

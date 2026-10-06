@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -10,13 +10,14 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from pytestqt.qtbot import QtBot
 from sqlalchemy import select
 
 from mailbrief.storage.database import Database
 from mailbrief.storage.recovery import BackupValidationError
 from mailbrief.storage.tables import DraftTable, MessageTable
+from mailbrief.ui import data_view
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.test_workflow import FakeBackend
 from tests.unit.services import test_data as fixtures
@@ -145,12 +146,30 @@ async def test_native_confirmation_defaults_cancel_and_closes_cleanly(
     box = dialog._confirmation
     assert box is not None
     assert box.defaultButton() == box.button(QMessageBox.StandardButton.Cancel)
-    QTest.keyClick(box, Qt.Key.Key_Escape)
+    # On macOS, Escape uses animateClick, which clicks Cancel from a Qt timer; this test's
+    # asyncio loop never runs it, so wait for the result in a Qt event loop. Elsewhere it
+    # clicks at once, which the context manager also catches.
+    with qtbot.waitSignal(box.finished, timeout=5000):
+        QTest.keyClick(box, Qt.Key.Key_Escape)
     assert await task is False
     assert dialog._confirmation is None
 
 
+@pytest.fixture
+def qt_file_dialogs(qapp: QApplication) -> Iterator[None]:
+    """Qt's own file dialog. A native macOS one ignores selectFile() until it has run, so
+    the test could never pick a file."""
+    attribute = Qt.ApplicationAttribute.AA_DontUseNativeDialogs
+    before = QApplication.testAttribute(attribute)
+    QApplication.setAttribute(attribute, True)
+    try:
+        yield
+    finally:
+        QApplication.setAttribute(attribute, before)
+
+
 async def test_picker_refuses_data_folder_and_cancellation(
+    qt_file_dialogs: None,
     data_window: MainWindow,
     tmp_path: Path,
 ) -> None:
@@ -167,6 +186,27 @@ async def test_picker_refuses_data_folder_and_cancellation(
     await asyncio.sleep(0)
     dialog.reject()
     assert await task is None
+
+
+async def test_backup_inside_data_folder_shows_the_specific_refusal(
+    qt_file_dialogs: None,
+    data_window: MainWindow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dialog = data_window.data_dialog
+    assert dialog is not None
+    log_failure = Mock()
+    monkeypatch.setattr(data_view, "log_failure", log_failure)
+    task = asyncio.create_task(dialog.guarded(dialog.backup))
+    await asyncio.sleep(0)
+    assert dialog._picker is not None
+    dialog._picker.selectFile(str(tmp_path / "backup.zip"))
+    dialog._picker.done(QDialog.DialogCode.Accepted)
+    await task
+    assert dialog.status.text() == "Choose a destination outside MailBrief's data folder."
+    assert not (tmp_path / "backup.zip").exists()
+    log_failure.assert_not_called()
 
 
 async def test_failed_operations_hide_private_errors(data_window: MainWindow) -> None:

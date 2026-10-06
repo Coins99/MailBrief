@@ -26,9 +26,9 @@ from mailbrief.storage.backup import create_backup
 from mailbrief.storage.migrate import migration_config
 from mailbrief.storage.recovery import (
     BackupValidationError,
-    _restore_backup_locked,
     inspect_backup,
     restore_backup,
+    restore_backup_holding_lock,
 )
 from mailbrief.storage.tables import Base
 
@@ -331,7 +331,7 @@ def test_reviewed_archive_cannot_be_swapped_before_restore(archive: Path, tmp_pa
     current = tmp_path / "current.sqlite3"
     sample_database(current, "current writing")
     with data_directory_lock(current), pytest.raises(BackupValidationError, match="changed"):
-        _restore_backup_locked(archive, current, replace=True, expected=reviewed)
+        restore_backup_holding_lock(archive, current, replace=True, expected=reviewed)
     assert query(current, "SELECT body FROM drafts") == [("current writing",)]
     assert not list(tmp_path.glob("*.pre-restore-*.sqlite3"))
 
@@ -514,6 +514,29 @@ def test_restore_refuses_leftover_sidecars(archive: Path, tmp_path: Path) -> Non
     assert sidecar.read_bytes() == b"old committed pages"
 
 
+def test_a_sidecar_refusal_leaves_no_pre_restore_copy(
+    archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another client can recreate a sidecar after the current database is preserved."""
+    database = tmp_path / "current.sqlite3"
+    sample_database(database, "keep me")
+    preserve = recovery._preserve_database
+
+    def preserve_then_reopen(current: Path, snapshot: Path) -> None:
+        preserve(current, snapshot)
+        Path(f"{current}-wal").write_bytes(b"another client")
+
+    monkeypatch.setattr(recovery, "_preserve_database", preserve_then_reopen)
+    with pytest.raises(BackupValidationError, match="sidecar"):
+        restore_backup(archive, database, replace=True)
+    monkeypatch.undo()
+
+    assert not list(tmp_path.glob("current.sqlite3.pre-restore-*.sqlite3"))
+    assert not list(tmp_path.glob(".mailbrief-restore-*"))
+    Path(f"{database}-wal").unlink()  # The simulated client's file, not SQLite's.
+    assert query(database, "SELECT body FROM drafts") == [("keep me",)]
+
+
 def test_flush_failure_preserves_database(
     archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -628,3 +651,61 @@ def test_no_replace_permission_survives_destination_race(
     with pytest.raises(FileExistsError):
         restore_backup(archive, database)
     assert database.read_bytes() == b"only copy, created during validation"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE UNIQUE INDEX extra ON drafts(title)",
+        "CREATE INDEX extra ON drafts(body)",
+        "CREATE INDEX extra ON drafts(lower(title))",
+        "CREATE INDEX extra ON drafts(title) WHERE deleted_at_utc IS NULL",
+        "DROP INDEX ix_actions_status",
+        "CREATE INDEX extra ON actions(status)",  # Same shape as ix_actions_status.
+    ],
+)
+def test_archive_indexes_must_match_the_migrated_schema(
+    archive: Path, tmp_path: Path, sql: str
+) -> None:
+    """An extra unique index would make ordinary saves fail after restore."""
+    hostile = tmp_path / "hostile.sqlite3"
+    sample_database(hostile)
+    with closing(sqlite3.connect(hostile)) as connection:
+        connection.execute(sql)
+        connection.commit()
+    payload = hostile.read_bytes()
+    rewrite_archive(
+        archive, payload=payload, metadata={"database_sha256": hashlib.sha256(payload).hexdigest()}
+    )
+    current = tmp_path / "current.sqlite3"
+    sample_database(current, "keep me")
+    with pytest.raises(BackupValidationError):
+        restore_backup(archive, current, replace=True)
+    assert query(current, "SELECT body FROM drafts") == [("keep me",)]
+
+
+def test_untrusted_files_open_read_only_and_defensive(archive: Path, tmp_path: Path) -> None:
+    database = tmp_path / "source.sqlite3"
+    with closing(recovery._untrusted(database)) as connection:
+        assert connection.getconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE)
+        assert connection.execute("PRAGMA trusted_schema").fetchone() == (0,)
+        assert connection.execute("PRAGMA cell_size_check").fetchone() == (1,)
+        assert connection.execute("PRAGMA mmap_size").fetchone() == (0,)
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("DELETE FROM drafts")
+
+
+def test_restore_refuses_a_symlinked_database(archive: Path, tmp_path: Path) -> None:
+    real = tmp_path / "real.sqlite3"
+    sample_database(real, "keep me")
+    link = tmp_path / "database.sqlite3"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("Creating symlinks needs Developer Mode on Windows")
+    before = hashlib.sha256(real.read_bytes()).hexdigest()
+    with pytest.raises(BackupValidationError, match="regular database path"):
+        restore_backup(archive, link, replace=True)
+    assert hashlib.sha256(real.read_bytes()).hexdigest() == before
+    assert link.is_symlink()
+    assert not list(tmp_path.glob("*.pre-restore-*"))

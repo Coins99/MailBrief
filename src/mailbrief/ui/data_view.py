@@ -69,6 +69,15 @@ Enable Groq Zero Data Retention in its console before approving real mail transm
 Use Tab/Shift+Tab to navigate, Alt+underlined letter for buttons, and Escape to close.
 """
 
+_INSIDE_DATA = "Choose a destination outside MailBrief's data folder."
+
+
+class DestinationInsideDataError(ValueError):
+    """Backups and exports must be stored outside MailBrief's data folder."""
+
+    def __init__(self) -> None:
+        super().__init__(_INSIDE_DATA)
+
 
 class DataDialog(QDialog):
     def __init__(
@@ -197,7 +206,7 @@ class DataDialog(QDialog):
                 lambda: path.resolve().is_relative_to(self.path.parent.resolve())
             )
             if save and inside:
-                raise ValueError("Choose a destination outside MailBrief's data folder.")
+                raise DestinationInsideDataError()
             return path
         finally:
             picker.reject()
@@ -330,6 +339,8 @@ class DataDialog(QDialog):
             self.status.setText("This backup is damaged or incompatible. Saved data is unchanged.")
         except CleanupChangedError:
             self.status.setText("Saved data changed. Review a new cleanup preview.")
+        except DestinationInsideDataError:
+            self.status.setText(_INSIDE_DATA)
         except Exception as exc:
             log_failure(exc)
             self.status.setText(
