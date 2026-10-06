@@ -94,6 +94,38 @@ def test_directory_sync_closes_descriptor_on_failure(
     assert closed == [91]
 
 
+@pytest.mark.parametrize(
+    ("error", "fails"),
+    [
+        (errno.EINVAL, False),
+        (errno.ENOTSUP, False),
+        (errno.EOPNOTSUPP, False),
+        (errno.EBADF, False),
+        (errno.EIO, True),
+        (errno.ENOSPC, True),
+    ],
+)
+def test_directory_sync_accepts_filesystems_that_cannot_sync_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: int, fails: bool
+) -> None:
+    monkeypatch.setattr(files, "sys", SimpleNamespace(platform="darwin"))
+    closed: list[int] = []
+    monkeypatch.setattr(os, "open", lambda path, flags: 91)
+    monkeypatch.setattr(os, "close", closed.append)
+
+    def refuse(descriptor: int) -> None:
+        raise OSError(error, os.strerror(error))
+
+    monkeypatch.setattr(os, "fsync", refuse)
+    if fails:
+        with pytest.raises(OSError) as caught:
+            sync_directory(tmp_path)
+        assert caught.value.errno == error
+    else:
+        sync_directory(tmp_path)
+    assert closed == [91]
+
+
 @pytest.mark.skipif(sys.platform not in ("win32", "darwin"), reason="Supported native platforms")
 def test_export_does_not_require_hard_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

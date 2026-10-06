@@ -12,12 +12,21 @@ from pathlib import Path
 _EXISTS = "That file already exists."
 
 
+# What fsync on a folder returns where the filesystem can't sync folders (some USB drives
+# and network shares): not a data error. EIO, ENOSPC and the rest still fail.
+_NO_DIRECTORY_SYNC = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF})
+
+
 def sync_directory(path: Path) -> None:
-    """Persist directory entries on POSIX; Windows has no directory fsync API."""
+    """Persist directory entries on POSIX where the filesystem supports it; Windows has no
+    directory fsync API."""
     if sys.platform != "win32":
         descriptor = os.open(path, os.O_RDONLY)
         try:
             os.fsync(descriptor)
+        except OSError as error:
+            if error.errno not in _NO_DIRECTORY_SYNC:
+                raise
         finally:
             os.close(descriptor)
 

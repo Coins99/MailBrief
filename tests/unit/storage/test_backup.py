@@ -240,3 +240,28 @@ def test_a_copied_backup_is_saved_even_if_its_staging_file_cannot_be_deleted(
 
 def unsupported_rename(source: object, destination: object) -> None:
     raise OSError(errno.ENOTSUP, "Operation not supported")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no folder fsync")
+@pytest.mark.parametrize(("error", "saved"), [(errno.EINVAL, True), (errno.EIO, False)])
+def test_a_drive_that_cannot_sync_folders_still_saves_the_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: int, saved: bool
+) -> None:
+    database = tmp_path / "database.sqlite3"
+    upgrade_database(database)
+    destination = tmp_path / "saved.zip"
+    real = os.fsync
+
+    def folders_refuse(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(error, os.strerror(error))
+        real(descriptor)
+
+    monkeypatch.setattr(os, "fsync", folders_refuse)
+    if saved:
+        create_backup(database, destination)
+    else:
+        with pytest.raises(OSError):
+            create_backup(database, destination)
+    monkeypatch.undo()
+    assert inspect_backup(destination).schema_revisions == ("20260930_0012",)
