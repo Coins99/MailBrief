@@ -17,7 +17,7 @@ from uuid import uuid4
 from alembic import command
 from alembic.script import ScriptDirectory
 from pydantic import ValidationError
-from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, inspect
+from sqlalchemy import CheckConstraint, create_engine, inspect
 from sqlalchemy.dialects.sqlite import dialect
 
 from mailbrief.domain.backup import MAX_DATABASE_BYTES, MAX_METADATA_BYTES, BackupMetadata
@@ -109,32 +109,15 @@ def _check_schema(connection: sqlite3.Connection, path: Path) -> None:
             for column in table.columns
             for key in column.foreign_keys
         }
-        unique = {
-            tuple(
-                row[2]
-                for row in connection.execute("SELECT * FROM pragma_index_info(?)", (index[1],))
-            )
-            for index in connection.execute("SELECT * FROM pragma_index_list(?)", (name,))
-            if index[2] and not index[4]
-        }
-        expected_unique = {
-            tuple(column.name for column in constraint.columns)
-            for constraint in table.constraints
-            if isinstance(constraint, UniqueConstraint)
-        }
         expected_checks = {
             str(constraint.sqltext.compile(dialect=dialect())).strip()
             for constraint in table.constraints
             if isinstance(constraint, CheckConstraint)
         }
-        if (
-            columns != expected
-            or foreign_keys != expected_keys
-            or not expected_unique <= unique
-            or checks[name] != expected_checks
-        ):
+        if columns != expected or foreign_keys != expected_keys or checks[name] != expected_checks:
             raise BackupValidationError(_INVALID)
-    # An extra unique index would make ordinary saves fail after a restore.
+    # Every index, unique constraints included, must match the migrated schema: a missing
+    # unique index lets duplicates in, and an extra one makes ordinary saves fail.
     if _indexes(connection) != _reference_indexes():
         raise BackupValidationError(_INVALID)
 
