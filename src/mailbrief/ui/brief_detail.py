@@ -34,7 +34,7 @@ from mailbrief.ui.brief_list import NO_SUBJECT, sender_text
 from mailbrief.ui.deadline_text import deadline_text
 from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS
 from mailbrief.ui.hairline import HairlineFrame
-from mailbrief.ui.labels import button_label, plain_label
+from mailbrief.ui.labels import button_label, plain_label, short_button_label
 from mailbrief.ui.proposals_view import effect_text
 from mailbrief.ui.theme import SMALL_PX, TEXT_PX, TITLE_PX, current_tokens, icon, icon_pixmap
 
@@ -74,8 +74,14 @@ def is_gmail_link(url: str) -> bool:
     return parts.scheme == "https" and parts.hostname == "mail.google.com"
 
 
-def outline_button(text: str, icon_name: str | None = None) -> QPushButton:
-    button = QPushButton(button_label(text))
+def outline_button(
+    text: str, icon_name: str | None = None, *, shorten: bool = False
+) -> QPushButton:
+    """An outline button. With ``shorten``, long mail-derived text is cut to one short
+    line and the full text becomes the accessible name, never a tooltip."""
+    button = QPushButton(short_button_label(text) if shorten else button_label(text))
+    if shorten:
+        button.setAccessibleName(text)
     button.setProperty("variant", "outline")
     button.setAutoDefault(False)
     if icon_name is not None:
@@ -199,16 +205,15 @@ class BriefDetailPane(QScrollArea):
         decisions.addWidget(dismiss)
         decisions.addStretch(1)
         layout.addLayout(decisions)
-        if links:
-            into = QHBoxLayout()
-            into.setSpacing(8)
-            for link in links:
-                button = outline_button(f"Add to “{link.title}”")
-                button.clicked.connect(self._into(view.suggestion_id, link))
-                into.addWidget(button)
-            into.addStretch(1)
+        for link in links:
+            # One row each, so a long title never widens the pane.
+            row = QHBoxLayout()
+            button = outline_button(f"Add to “{link.title}”", shorten=True)
+            button.clicked.connect(self._into(view.suggestion_id, link))
+            row.addWidget(button)
+            row.addStretch(1)
             layout.addSpacing(4)
-            layout.addLayout(into)
+            layout.addLayout(row)
         return card
 
     def _into(self, suggestion_id: int, link: ThreadLink) -> Callable[[], None]:
@@ -229,7 +234,7 @@ class BriefDetailPane(QScrollArea):
         )
         row = QHBoxLayout()
         row.setSpacing(8)
-        apply = outline_button(effect_text(proposal, zone))
+        apply = outline_button(effect_text(proposal, zone), shorten=True)
         apply.clicked.connect(
             lambda _checked=False, pid=proposal.id, revision=proposal.action_revision: (
                 self.proposal_requested.emit(APPLY, pid, revision)

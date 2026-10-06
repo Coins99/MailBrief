@@ -23,6 +23,7 @@ from mailbrief.services.history import (
     catch_up_days,
     check_brief_date,
     coverage_line,
+    coverage_short,
     parse_brief_date,
 )
 from mailbrief.storage.database import Database
@@ -211,3 +212,21 @@ def test_a_saved_brief_summary_says_the_same() -> None:
     assert line.endswith(
         "Also includes 1 reply from a thread you track that wasn't in today's Inbox."
     )
+
+
+def test_the_short_coverage_names_the_day_and_when_it_was_made() -> None:
+    today = summary(TODAY, datetime(2026, 9, 29, 13, 14, tzinfo=UTC))
+    later = summary(date(2026, 9, 28), datetime(2026, 9, 29, 14, 2, tzinfo=UTC))
+    assert coverage_short(today) == "Inbox on Sep 29, up to 09:14"
+    assert coverage_short(later) == "Inbox on Sep 28, checked Sep 29 at 10:02"
+
+
+@pytest.mark.parametrize(
+    ("count", "suffix"),
+    [(0, ""), (1, ", plus 1 tracked reply"), (2, ", plus 2 tracked replies")],
+)
+def test_the_short_coverage_counts_tracked_replies(count: int, suffix: str) -> None:
+    assert coverage_short(with_follow_ups(count)) == "Inbox on Sep 29, up to 09:14" + suffix
+    made = summary(TODAY, datetime(2026, 9, 29, 13, 14, tzinfo=UTC))
+    saved = made.model_copy(update={"follow_up_count": count})
+    assert coverage_short(saved) == coverage_short(with_follow_ups(count))

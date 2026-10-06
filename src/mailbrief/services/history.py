@@ -67,11 +67,7 @@ def coverage_line(brief: DailyDigest | SavedBriefSummary) -> str:
             f"Covers messages received on {day} ({zone}) that were still in your Inbox on "
             f"{made.date().isoformat()} at {made:%H:%M}."
         )
-    outside = (
-        brief.follow_up_count
-        if isinstance(brief, SavedBriefSummary)
-        else sum(item.section is DigestSection.FOLLOW_UPS for item in brief.items)
-    )
+    outside = _outside_count(brief)
     if outside == 1:
         line += " Also includes 1 reply from a thread you track that wasn't in today's Inbox."
     elif outside:
@@ -80,6 +76,29 @@ def coverage_line(brief: DailyDigest | SavedBriefSummary) -> str:
             "today's Inbox."
         )
     return line
+
+
+def coverage_short(brief: DailyDigest | SavedBriefSummary) -> str:
+    """``coverage_line`` in a few words, for a one-line footer: "Inbox on Oct 6, up to
+    09:14" on the brief's own day, "Inbox on Oct 6, checked Oct 7 at 08:00" later, plus the
+    replies from tracked threads that weren't in that Inbox."""
+    made = brief.generated_at_utc.astimezone(ZoneInfo(brief.timezone_name))
+    day = brief.local_date
+    if made.date() <= day:
+        line = f"Inbox on {day:%b} {day.day}, up to {made:%H:%M}"
+    else:
+        line = f"Inbox on {day:%b} {day.day}, checked {made:%b} {made.day} at {made:%H:%M}"
+    outside = _outside_count(brief)
+    if outside:
+        line += f", plus {outside} tracked repl{'y' if outside == 1 else 'ies'}"
+    return line
+
+
+def _outside_count(brief: DailyDigest | SavedBriefSummary) -> int:
+    """How many replies from tracked threads that weren't in that day's Inbox it holds."""
+    if isinstance(brief, SavedBriefSummary):
+        return brief.follow_up_count
+    return sum(item.section is DigestSection.FOLLOW_UPS for item in brief.items)
 
 
 class BriefHistory:

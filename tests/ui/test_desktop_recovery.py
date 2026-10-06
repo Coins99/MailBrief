@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QLockFile, QTimer
+from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication, QMessageBox
 from pytestqt.qtbot import QtBot
 
@@ -18,6 +18,7 @@ from mailbrief.storage.backup import create_backup
 from mailbrief.storage.recovery import inspect_backup, restore_backup_holding_lock
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.test_workflow import FakeBackend
+from tests.ui.window_wait import WindowWait
 from tests.unit.storage.test_recovery import query, sample_database
 
 
@@ -86,17 +87,15 @@ def test_restore_follows_shutdown_and_holds_lock(
 
     monkeypatch.setattr(app, "restore_backup_holding_lock", restore)
 
-    def request_restore() -> None:
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, MainWindow) and widget.isVisible():
-                widget._request_restore(archive, metadata)
-                return
-        # Applying the theme can delay the first show; keep looking until it appears.
-        QTimer.singleShot(10, request_restore)
+    def request_restore(window: MainWindow) -> bool:
+        window._request_restore(archive, metadata)
+        return True
 
-    QTimer.singleShot(100, request_restore)
+    # Applying the theme can delay the first show; keep looking until it appears.
+    wait = WindowWait(request_restore)
+    wait.start()
     try:
-        assert app.main([]) == 0
+        assert wait.run(lambda: app.main([])) == 0
         assert backend.closed
         if failure is None:
             assert len(restores) == 1 and restores[0] is not None

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
 from collections.abc import Sequence
@@ -112,7 +113,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     options = parser.parse_args(arguments)
     application = create_application([sys.argv[0]])
-    apply_theme(application, ThemeMode.DARK)
+    # The theme is cosmetic: run unthemed rather than not at all. The package check
+    # reports missing fonts or icons.
+    with contextlib.suppress(Exception):
+        apply_theme(application, ThemeMode.DARK)
     application.setQuitOnLastWindowClosed(False)
     with QEventLoop(application) as loop:
         asyncio.set_event_loop(loop)

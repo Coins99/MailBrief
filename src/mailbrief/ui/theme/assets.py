@@ -26,18 +26,18 @@ ICON_NAMES: Final = frozenset(
 
 _HERE: Final = Path(__file__).resolve().parent
 _FONTS: Final = (_HERE / "fonts" / "Inter-Regular.ttf", _HERE / "fonts" / "Inter-Medium.ttf")
-_registered = False
+_fonts_loaded: bool | None = None  # None until the first attempt; then cached.
 
 
-def register_fonts() -> None:
-    """Load the bundled fonts once per process."""
-    global _registered
-    if _registered:
-        return
-    for path in _FONTS:
-        if QFontDatabase.addApplicationFont(str(path)) == -1:
-            raise RuntimeError("Bundled fonts could not be loaded.")
-    _registered = True
+def register_fonts() -> bool:
+    """Load the bundled fonts once per process; True only when both loaded.
+
+    A missing or unreadable font never stops the app: the theme then keeps Qt's font.
+    """
+    global _fonts_loaded
+    if _fonts_loaded is None:
+        _fonts_loaded = all(QFontDatabase.addApplicationFont(str(path)) != -1 for path in _FONTS)
+    return _fonts_loaded
 
 
 def ui_font(px: int, *, medium: bool = False) -> QFont:

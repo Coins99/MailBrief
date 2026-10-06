@@ -6,7 +6,7 @@ import string
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
-from mailbrief.ui.theme.assets import register_fonts, ui_font
+from mailbrief.ui.theme.assets import icon_pixmap, register_fonts, ui_font
 from mailbrief.ui.theme.tokens import DARK, TEXT_PX, ThemeMode, Tokens, tokens_for
 
 QSS = """\
@@ -30,6 +30,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """  # noqa: E501
 
 _current = DARK
+_cache_hooked = False
 
 
 def current_tokens() -> Tokens:
@@ -73,15 +74,23 @@ def build_stylesheet(t: Tokens) -> str:
 
 
 def apply_theme(app: QApplication, mode: ThemeMode = ThemeMode.DARK) -> Tokens:
-    """Apply Fusion, the bundled font, the palette and the stylesheet for ``mode``."""
+    """Apply Fusion, the bundled font, the palette and the stylesheet for ``mode``.
+
+    Without the bundled font the app keeps Qt's font; the colours still apply.
+    """
     tokens = tokens_for(mode)
     # A stylesheet wraps the style in a proxy that hides its name; clear it first.
     app.setStyleSheet("")
     if app.style().name().lower() != "fusion":
         app.setStyle("Fusion")
-    register_fonts()
-    app.setFont(ui_font(TEXT_PX))
+    if register_fonts():
+        app.setFont(ui_font(TEXT_PX))
     app.setPalette(build_palette(tokens))
     app.setStyleSheet(build_stylesheet(tokens))
     set_current_tokens(tokens)
+    global _cache_hooked
+    if not _cache_hooked:
+        # Release the cached icon pixmaps while Qt can still free them.
+        app.aboutToQuit.connect(icon_pixmap.cache_clear)
+        _cache_hooked = True
     return tokens

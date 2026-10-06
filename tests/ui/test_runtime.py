@@ -23,6 +23,7 @@ from mailbrief.ui import runtime
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
 from tests.ui.test_workflow import FakeBackend
+from tests.ui.window_wait import WindowWait
 from tests.unit.services.ai_fakes import FakeAIProvider
 from tests.unit.services.test_sync import FakeEmailProvider
 
@@ -113,7 +114,6 @@ def test_real_qasync_loop_closes_window_and_backend(
     quit_via_qt: bool,
     during_run: bool,
 ) -> None:
-    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
     from mailbrief import app
@@ -142,29 +142,69 @@ def test_real_qasync_loop_closes_window_and_backend(
         ),
     )
 
-    def close_window() -> None:
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, MainWindow) and widget.isVisible():
-                if during_run and not widget.review_panel.isVisible():
-                    if widget.generate_button.isEnabled():
-                        widget.generate_button.click()
-                    QTimer.singleShot(10, close_window)
-                    return
-                if quit_via_qt:
-                    QApplication.quit()
-                else:
-                    widget.close()
-                return
-        # Applying the theme can delay the first show; keep looking until it appears.
-        QTimer.singleShot(10, close_window)
+    def close_window(window: MainWindow) -> bool:
+        if during_run and not window.review_panel.isVisible():
+            if window.generate_button.isEnabled():
+                window.generate_button.click()
+            return False  # Try again once the review is showing.
+        if quit_via_qt:
+            QApplication.quit()
+        else:
+            window.close()
+        return True
 
-    QTimer.singleShot(100, close_window)
-    assert app.main([]) == 0
+    # Applying the theme can delay the first show; keep looking until it appears.
+    wait = WindowWait(close_window)
+    wait.start()
+    assert wait.run(lambda: app.main([])) == 0
     assert backend.closed
     application = QApplication.instance()
     assert isinstance(application, QApplication)
     application.setQuitOnLastWindowClosed(True)
     asyncio.set_event_loop(None)
+
+
+def test_a_theme_failure_never_stops_the_desktop(
+    qtbot: QtBot,
+    themed: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from mailbrief import app
+    from mailbrief.paths import AppPaths
+
+    def broken_theme(*args: object) -> None:
+        raise RuntimeError("Bundled fonts could not be loaded.")
+
+    backend = FakeBackend()
+    monkeypatch.setattr(app, "apply_theme", broken_theme)
+    monkeypatch.setattr(app, "DesktopRuntime", lambda path: backend)
+    monkeypatch.setattr(
+        AppPaths,
+        "from_qt",
+        lambda: AppPaths(
+            data_dir=tmp_path,
+            database_path=tmp_path / "unused.sqlite3",
+            microsoft_token_cache_path=tmp_path / "unused.bin",
+        ),
+    )
+
+    def close(window: MainWindow) -> bool:
+        window.close()
+        return True
+
+    wait = WindowWait(close)
+    wait.start()
+    try:
+        assert wait.run(lambda: app.main([])) == 0
+        assert backend.closed
+    finally:
+        application = QApplication.instance()
+        assert isinstance(application, QApplication)
+        application.setQuitOnLastWindowClosed(True)
+        asyncio.set_event_loop(None)
 
 
 def test_offline_package_mode_never_opens_profile_or_vault(

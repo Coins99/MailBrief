@@ -4,7 +4,7 @@ import dataclasses
 import re
 
 import pytest
-from PySide6.QtGui import QFontInfo, QPalette
+from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QPalette
 from PySide6.QtWidgets import QApplication
 
 from mailbrief.ui.theme import (
@@ -12,6 +12,7 @@ from mailbrief.ui.theme import (
     ThemeMode,
     Tokens,
     apply_theme,
+    assets,
     build_stylesheet,
     current_tokens,
     icon_pixmap,
@@ -112,3 +113,26 @@ def test_unknown_icon_is_refused(qapp: QApplication) -> None:
 def test_registering_fonts_twice_is_harmless(qapp: QApplication) -> None:
     register_fonts()
     register_fonts()
+
+
+def test_missing_fonts_still_apply_the_colours(
+    qapp: QApplication, themed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(assets, "_fonts_loaded", None)
+    monkeypatch.setattr(QFontDatabase, "addApplicationFont", lambda path: -1)
+    qapp.setFont(QFont("Helvetica", 9))
+    before = qapp.font().family()
+    tokens = apply_theme(qapp, ThemeMode.DARK)
+    assert register_fonts() is False  # Cached: a failed load isn't retried.
+    assert tokens == DARK and current_tokens() == DARK
+    assert qapp.font().family() == before
+    assert qapp.palette().color(QPalette.ColorRole.Window).name() == DARK.panel
+    assert qapp.styleSheet() == build_stylesheet(DARK)
+
+
+def test_quitting_clears_the_icon_cache(qapp: QApplication, themed: None) -> None:
+    apply_theme(qapp)
+    icon_pixmap("sun", DARK.text, 16)
+    assert icon_pixmap.cache_info().currsize > 0
+    qapp.aboutToQuit.emit()
+    assert icon_pixmap.cache_info().currsize == 0

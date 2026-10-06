@@ -85,7 +85,8 @@ def test_selecting_a_row_updates_the_detail(qtbot: QtBot) -> None:
     assert workspace.detail.title.text() == "Q3 budget: approval needed by Friday"
     workspace.brief_list.setCurrentIndex(workspace.brief_list.model().index(4, 0))
     assert workspace.detail.title.text() == "Invoice 2041"
-    assert workspace.coverage.text().startswith("Covers messages received on 2026-10-06")
+    assert workspace.coverage.text() == "Inbox on Oct 6, up to 09:14, plus 1 tracked reply"
+    assert workspace.coverage.accessibleName().startswith("Covers messages received on 2026-10-06")
     assert workspace.header.status.text() == "Checked Gmail at 09:14"
 
 
@@ -100,3 +101,21 @@ def test_empty_brief_says_so(qtbot: QtBot) -> None:
     assert workspace.detail.title is None
     texts = [label.text() for label in workspace.detail.findChildren(QLabel)]
     assert EMPTY_BRIEF in texts
+
+
+def test_settings_lines_up_with_the_page_rows(qtbot: QtBot) -> None:
+    from mailbrief.ui import workspace as module
+
+    workspace = build(qtbot)
+    workspace.resize(*SIZES["mockup"])
+    show(qtbot, workspace)
+    settings = workspace.sidebar.settings
+    nav = workspace.sidebar.nav
+    # Both start at the same x inside the sidebar, and paint the same offsets.
+    assert (
+        settings.mapTo(workspace.sidebar, settings.rect().topLeft()).x()
+        == nav.mapTo(workspace.sidebar, nav.rect().topLeft()).x()
+    )
+    assert settings.height() == module._NAV_ROW
+    assert settings.accessibleName() == "Settings"
+    assert not settings.grab().isNull()

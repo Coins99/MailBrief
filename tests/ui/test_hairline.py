@@ -43,5 +43,9 @@ def test_card_divider_and_splitter_paint_hairlines(
     splitter.addWidget(QLabel("right"))
     splitter.resize(200, 50)
     splitter.show()
-    assert splitter.handleWidth() == 1
-    assert not splitter.handle(1).grab().isNull()
+    assert splitter.handleWidth() == 5  # Wide enough to grab.
+    handle = splitter.handle(1).grab().toImage()
+    assert handle.width() == 5
+    assert handle.pixelColor(2, 10) == QColor(DARK.hairline)  # One line at the centre.
+    assert handle.pixelColor(0, 10) == QColor(DARK.panel)
+    assert handle.pixelColor(4, 10) == QColor(DARK.panel)

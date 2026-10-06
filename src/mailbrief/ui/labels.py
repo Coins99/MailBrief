@@ -26,6 +26,15 @@ def button_label(text: str) -> str:
     return text.replace("&", "&&")
 
 
+def short_button_label(text: str, limit: int = 40) -> str:
+    """Button text of at most ``limit`` characters, on one line, escaped like
+    ``button_label``. Give the button the full text as its accessible name."""
+    flat = " ".join(text.split())
+    if len(flat) > limit:
+        flat = flat[: limit - 1] + "…"
+    return button_label(flat)
+
+
 class ElidedLabel(QLabel):
     """One line of plain text, elided at the right to fit; the full text stays the
     accessible name, never a tooltip."""
@@ -40,9 +49,10 @@ class ElidedLabel(QLabel):
             self.setFont(ui_font(px))
         self.setText(text)
 
-    def setText(self, text: str) -> None:
+    def setText(self, text: str, accessible_name: str | None = None) -> None:
+        """Show ``text``; screen readers get ``accessible_name``, else the text itself."""
         super().setText(text)
-        self.setAccessibleName(text)
+        self.setAccessibleName(text if accessible_name is None else accessible_name)
 
     def sizeHint(self) -> QSize:
         # Its width never drives a layout: the text elides to whatever width it gets.

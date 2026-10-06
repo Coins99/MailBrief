@@ -3,7 +3,7 @@
 from PySide6.QtCore import Qt
 from pytestqt.qtbot import QtBot
 
-from mailbrief.ui.labels import ElidedLabel, button_label, plain_label
+from mailbrief.ui.labels import ElidedLabel, button_label, plain_label, short_button_label
 
 HOSTILE = '<b>Win</b> & <a href="x">link</a>'
 
@@ -33,3 +33,21 @@ def test_elided_label_never_drives_width(qtbot: QtBot) -> None:
     assert not label.grab().isNull()
     label.setText("Covers today")
     assert label.accessibleName() == "Covers today"
+
+
+def test_short_button_label_cuts_long_text_to_one_escaped_line() -> None:
+    assert short_button_label("Add to\n  “Plan”") == "Add to “Plan”"
+    long = "A & B " * 20
+    short = short_button_label(long)
+    assert len(short.replace("&&", "&")) == 40 and short.endswith("…")
+    assert "&&" in short
+    assert short_button_label("x" * 40) == "x" * 40
+    assert short_button_label("x" * 12, limit=10) == "x" * 9 + "…"
+
+
+def test_elided_label_takes_a_separate_accessible_name(qtbot: QtBot) -> None:
+    label = ElidedLabel()
+    qtbot.addWidget(label)
+    label.setText("Inbox on Oct 6, up to 09:14", "Covers messages received on 2026-10-06 …")
+    assert label.text() == "Inbox on Oct 6, up to 09:14"
+    assert label.accessibleName() == "Covers messages received on 2026-10-06 …"

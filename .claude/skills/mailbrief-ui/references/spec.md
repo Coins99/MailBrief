@@ -32,8 +32,8 @@ All read colours from `current_tokens()` at paint time.
   (cosmetic: one device pixel at any scale), inset by `0.5 / devicePixelRatioF()`.
 - `HairlineDivider(QWidget)`: horizontal or vertical, 1 logical px, cosmetic line, no
   antialiasing.
-- `HairlineSplitter(QSplitter)`: `handleWidth(1)`; its handle fills with panel and draws a
-  cosmetic hairline.
+- `HairlineSplitter(QSplitter)`: `handleWidth(5)` so it can be grabbed; its handle fills
+  with panel and draws one cosmetic hairline at its centre.
 
 ## Brief list (`ui/brief_list.py`)
 
@@ -102,8 +102,8 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
   `set_note(text)`.
 - `ThreePaneWorkspace`: objectName `workspace`. HeaderBar, a horizontal divider, then
   SidebarNav, a vertical divider and a `HairlineSplitter` holding the list pane
-  (`BriefListView` and an 11px muted coverage line, margins 12, 10, 12, 10, drawn as one
-  elided line by `ElidedLabel` with the full text as its accessible name) and the
+  (`BriefListView` and an 11px muted coverage footer, margins 12, 10, 12, 10: one elided
+  line of `coverage_short`, with `coverage_line` as its accessible name) and the
   `BriefDetailPane`; stretch 4:5, not collapsible, minimum widths 220 and 280.
   Attributes `header`, `sidebar`, `brief_list`, `coverage`, `detail`. `show_digest`
   builds the rows and `coverage_line`, shows the selected item's links and proposals, and
@@ -118,3 +118,10 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
 - Focus rings in the painted lists show only after the keyboard moves focus
   (`State_KeyboardFocusChange`), not on first show.
 - Suggestion cards: 4px between title and meta, 8px before each button row.
+- Long mail-derived button text ("Add to …", a proposal's effect) goes through
+  `short_button_label` (40 characters, then "…"), with the full text as the button's
+  accessible name; each "Add to" button has its own row.
+- Settings is a `_NavButton` painted like a page row (icon at `_ICON_X`, label at
+  `_LABEL_X`), so it lines up with the pages.
+- `register_fonts()` returns False instead of raising; `apply_theme` then keeps Qt's font
+  and still applies the colours, and `main()` runs unthemed if the theme fails.

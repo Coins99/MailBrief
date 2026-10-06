@@ -67,20 +67,24 @@ class HairlineDivider(QWidget):
 
 
 class _HairlineHandle(QSplitterHandle):
+    """A handle wide enough to grab, drawn as one hairline at its centre."""
+
     def paintEvent(self, event: QPaintEvent) -> None:
         tokens = current_tokens()
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(tokens.panel))
         painter.setPen(hairline_pen(tokens.hairline))
         if self.orientation() is Qt.Orientation.Horizontal:
-            painter.drawLine(QPointF(0, 0), QPointF(0, self.height()))
+            x = self.width() // 2
+            painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
         else:
-            painter.drawLine(QPointF(0, 0), QPointF(self.width(), 0))
+            y = self.height() // 2
+            painter.drawLine(QPointF(0, y), QPointF(self.width(), y))
         painter.end()
 
 
 class HairlineSplitter(QSplitter):
-    """A splitter whose handle is a single hairline."""
+    """A splitter whose handle looks like a single hairline."""
 
     def __init__(
         self,
@@ -88,7 +92,8 @@ class HairlineSplitter(QSplitter):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(orientation, parent)
-        self.setHandleWidth(1)
+        # Five pixels to grab; only the centre one is drawn.
+        self.setHandleWidth(5)
 
     def createHandle(self) -> QSplitterHandle:
         return _HairlineHandle(self.orientation(), self)

@@ -211,3 +211,39 @@ def test_hostile_text_stays_literal_plain_text(pane: BriefDetailPane) -> None:
     for widget in pane.findChildren(QWidget):
         assert "<b>" not in widget.toolTip()
         assert "<b>" not in widget.accessibleDescription()
+
+
+def test_long_titles_shorten_buttons_but_keep_the_full_name(pane: BriefDetailPane) -> None:
+    brief = mockup_digest()
+    long_title = ("Quarterly finance review preparation " * 4)[:120]
+    links = tuple(link.model_copy(update={"title": long_title}) for link in brief.links["priya"])
+    proposal = make_proposal(
+        evidence="Cancelled",
+        action_title=long_title,
+        kind="new_deadline",
+        deadline_text="the first working day after the long weekend in the spring term",
+        deadline_precision=DeadlinePrecision.UNRESOLVED,
+    )
+    pane.show_item(
+        brief.digest.items[0],
+        account_email=ACCOUNT,
+        timezone_name=ZONE,
+        links=links,
+        proposals=(proposal,),
+    )
+    into = [b for b in pane.findChildren(QPushButton) if b.text().startswith("Add to")]
+    assert into
+    for button in into:
+        assert len(button.text().replace("&&", "&")) == 40
+        assert button.text().endswith("…")
+        assert button.accessibleName() == f"Add to “{long_title}”"
+        assert button.toolTip() == ""
+    apply = button_with_prefix(pane, "Set the deadline")
+    assert len(apply.text().replace("&&", "&")) == 40
+    assert apply.accessibleName().startswith("Set the deadline to “the first working day")
+    content = pane.widget()
+    assert content is not None and content.minimumSizeHint().width() < 400
+
+
+def button_with_prefix(pane: QWidget, prefix: str) -> QPushButton:
+    return next(b for b in pane.findChildren(QPushButton) if b.text().startswith(prefix))

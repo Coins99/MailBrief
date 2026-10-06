@@ -7,7 +7,14 @@ from collections.abc import Mapping, Sequence
 from typing import Final
 
 from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QPainter, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (
+    QColor,
+    QKeyEvent,
+    QPainter,
+    QPaintEvent,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -24,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.actions import ActionProposal, ThreadLink
 from mailbrief.domain.digests import DailyDigest, DigestItem
-from mailbrief.services.history import coverage_line
+from mailbrief.services.history import coverage_line, coverage_short
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
 from mailbrief.ui.hairline import HairlineDivider, HairlineSplitter, hairline_pen
@@ -36,7 +43,6 @@ from mailbrief.ui.theme import (
     SMALL_PX,
     TEXT_PX,
     current_tokens,
-    icon,
     icon_pixmap,
     ui_font,
 )
@@ -158,6 +164,40 @@ class _NavList(QListView):
         super().keyPressEvent(event)
 
 
+class _NavButton(QPushButton):
+    """A button painted like a page row, so its icon and label line up with the pages."""
+
+    def __init__(self, text: str, icon_name: str) -> None:
+        super().__init__(button_label(text))
+        self._text = text
+        self._icon_name = icon_name
+        self.setProperty("variant", "nav")
+        self.setAccessibleName(text)
+        self.setAutoDefault(False)
+        self.setFixedHeight(_NAV_ROW)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        tokens = current_tokens()
+        active = self.underMouse() or self.hasFocus() or self.isDown()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        if active:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(tokens.selection))
+            painter.drawRoundedRect(QRectF(rect), RADIUS, RADIUS)
+        color = tokens.text if active else tokens.text_secondary
+        pixmap = icon_pixmap(self._icon_name, color, _ICON_PX, self.devicePixelRatioF())
+        painter.drawPixmap(_ICON_X, (rect.height() - _ICON_PX) // 2, pixmap)
+        painter.setFont(ui_font(TEXT_PX))
+        painter.setPen(QColor(color))
+        label = QRect(_LABEL_X, 0, rect.width() - _LABEL_X, rect.height())
+        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        painter.drawText(label, flags | int(Qt.TextFlag.TextSingleLine), self._text)
+        painter.end()
+
+
 class SidebarNav(QWidget):
     """``page_requested(key)`` on selection and on Return or Enter; ``settings_requested``."""
 
@@ -196,11 +236,7 @@ class SidebarNav(QWidget):
         self.nav.page_activated.connect(self.page_requested)
         layout.addWidget(self.nav)
         layout.addStretch(1)
-        self.settings = QPushButton(button_label("Settings"))
-        self.settings.setProperty("variant", "nav")
-        self.settings.setAutoDefault(False)
-        self.settings.setIcon(icon("settings", current_tokens().text_secondary, _ICON_PX))
-        self.settings.setIconSize(QSize(_ICON_PX, _ICON_PX))
+        self.settings = _NavButton("Settings", "settings")
         self.settings.clicked.connect(self.settings_requested)
         layout.addWidget(self.settings)
         self.note = plain_label("", tone="muted", px=CAPTION_PX)
@@ -289,7 +325,7 @@ class ThreePaneWorkspace(QWidget):
         self._digest = digest
         self._links = links or {}
         self._proposals = proposals or {}
-        self.coverage.setText(coverage_line(digest))
+        self.coverage.setText(coverage_short(digest), coverage_line(digest))
         if not digest.items:
             self.brief_list.show_rows([])
             self.detail.show_empty(EMPTY_BRIEF)
