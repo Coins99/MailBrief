@@ -153,7 +153,8 @@ files are cleaned up during ordinary failure; interrupted processes may leave a
 `.mailbrief-restore-*` staging folder, which is never used automatically.
 
 Restore refuses remaining WAL, shared-memory or journal files rather than allowing
-old pages to be replayed into a new database. Do not delete sidecar files by hand:
+old pages to be replayed into a new database. Nothing is replaced then, so the
+pre-restore copy made for that attempt is removed. Do not delete sidecar files by hand:
 close the clients, preserve the original database and resolve its SQLite state first.
 If the current database is too damaged to snapshot, recovery refuses replacement;
 restore the archive to a new filename while keeping the damaged database and sidecars.

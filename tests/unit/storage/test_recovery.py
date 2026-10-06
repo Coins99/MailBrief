@@ -545,6 +545,29 @@ def test_restore_refuses_leftover_sidecars(archive: Path, tmp_path: Path) -> Non
     assert sidecar.read_bytes() == b"old committed pages"
 
 
+def test_a_sidecar_refusal_leaves_no_pre_restore_copy(
+    archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another client can recreate a sidecar after the current database is preserved."""
+    database = tmp_path / "current.sqlite3"
+    sample_database(database, "keep me")
+    preserve = recovery._preserve_database
+
+    def preserve_then_reopen(current: Path, snapshot: Path) -> None:
+        preserve(current, snapshot)
+        Path(f"{current}-wal").write_bytes(b"another client")
+
+    monkeypatch.setattr(recovery, "_preserve_database", preserve_then_reopen)
+    with pytest.raises(BackupValidationError, match="sidecar"):
+        restore_backup(archive, database, replace=True)
+    monkeypatch.undo()
+
+    assert not list(tmp_path.glob("current.sqlite3.pre-restore-*.sqlite3"))
+    assert not list(tmp_path.glob(".mailbrief-restore-*"))
+    Path(f"{database}-wal").unlink()  # The simulated client's file, not SQLite's.
+    assert query(database, "SELECT body FROM drafts") == [("keep me",)]
+
+
 def test_flush_failure_preserves_database(
     archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

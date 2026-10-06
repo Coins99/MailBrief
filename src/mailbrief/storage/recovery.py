@@ -1,5 +1,6 @@
 """Validate and stage recovery before publishing a database; retain the old copy."""
 
+import contextlib
 import hashlib
 import os
 import sqlite3
@@ -310,10 +311,16 @@ def restore_backup_holding_lock(
                 raise FileExistsError("That database already exists; replacement must be explicit.")
             snapshot = Path(work) / "previous.sqlite3"
             _preserve_database(database, snapshot)
-            previous = database.with_name(f"{database.name}.pre-restore-{uuid4().hex}.sqlite3")
-            publish_exclusively(str(snapshot), previous)
+            candidate = database.with_name(f"{database.name}.pre-restore-{uuid4().hex}.sqlite3")
+            publish_exclusively(str(snapshot), candidate)
+            previous = candidate  # Ours to remove only once published.
             sync_directory(database.parent)
         if any(Path(f"{database}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")):
+            if previous is not None:
+                # Nothing was replaced, so this copy is redundant: don't leave private copies
+                # behind on every refused retry. Later failures keep it, as before.
+                with contextlib.suppress(OSError):
+                    previous.unlink()
             raise BackupValidationError(
                 "Database sidecar files remain. Close all database clients before restoring."
             )
