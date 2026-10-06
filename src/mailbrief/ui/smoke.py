@@ -33,6 +33,7 @@ from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import region_zones
 from mailbrief.ui.runtime import DesktopRuntime
+from mailbrief.ui.theme import FONT_FAMILY, current_tokens, icon_pixmap
 
 SMOKE_ZONE = "America/New_York"
 
@@ -103,6 +104,10 @@ async def check_package(directory: Path) -> None:
     ZoneInfo("America/Toronto")
     if SMOKE_ZONE not in region_zones():
         raise RuntimeError("Time zone list unavailable.")
+    if FONT_FAMILY not in QFontDatabase.families():
+        raise RuntimeError("Bundled font unavailable.")
+    if icon_pixmap("refresh", current_tokens().text, 16).isNull():
+        raise RuntimeError("Bundled icons unavailable.")
     for _ in range(2):
         runtime = DesktopRuntime(directory / "smoke.sqlite3")
         try:

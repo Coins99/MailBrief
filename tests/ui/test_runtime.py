@@ -107,6 +107,7 @@ async def test_generation_cancellation_closes_both_providers(
 @pytest.mark.parametrize("during_run", [False, True])
 def test_real_qasync_loop_closes_window_and_backend(
     qtbot: QtBot,
+    themed: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     quit_via_qt: bool,
@@ -153,6 +154,9 @@ def test_real_qasync_loop_closes_window_and_backend(
                     QApplication.quit()
                 else:
                     widget.close()
+                return
+        # Applying the theme can delay the first show; keep looking until it appears.
+        QTimer.singleShot(10, close_window)
 
     QTimer.singleShot(100, close_window)
     assert app.main([]) == 0
@@ -165,6 +169,7 @@ def test_real_qasync_loop_closes_window_and_backend(
 
 def test_offline_package_mode_never_opens_profile_or_vault(
     qtbot: QtBot,
+    themed: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -192,6 +197,7 @@ def test_offline_package_mode_never_opens_profile_or_vault(
 
 def test_package_failure_reports_type_without_sensitive_exception(
     qtbot: QtBot,
+    themed: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:

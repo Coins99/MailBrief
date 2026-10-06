@@ -16,6 +16,7 @@ from mailbrief.storage.recovery import BackupValidationError, restore_backup_hol
 from mailbrief.ui.diagnostics import configure_logging, log_failure, logger
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
+from mailbrief.ui.theme import ThemeMode, apply_theme
 
 
 def create_application(arguments: Sequence[str] | None = None) -> QApplication:
@@ -111,6 +112,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     options = parser.parse_args(arguments)
     application = create_application([sys.argv[0]])
+    apply_theme(application, ThemeMode.DARK)
     application.setQuitOnLastWindowClosed(False)
     with QEventLoop(application) as loop:
         asyncio.set_event_loop(loop)

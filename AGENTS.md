@@ -110,6 +110,12 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `ui/scheduler.py` (`RefreshScheduler`, the minute tick behind timed refresh) and
   `ui/auto_send_view.py` (the automatic-analysis permission dialog); `services/consent.py`
   reads and sets that permission.
+- `ui/theme/`: design tokens (`tokens.py`, the only place UI colours are defined), the
+  Fusion palette and stylesheet (`style.py`, `apply_theme`), bundled Inter under the SIL
+  OFL (`fonts/`) and Tabler icons under MIT (`icons/`). `ui/labels.py` holds
+  `plain_label` and `button_label`. The three-pane workspace (`hairline.py`,
+  `brief_list.py`, `brief_detail.py`, `workspace.py`) is a preview, not yet used by
+  MainWindow.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -284,6 +290,16 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
   drafts, drafting, preferences, history, threads, proposals, consent and data services.
   `scripts/check_coverage.py` enforces the 90% combined statement/branch service gate.
+
+## UI work
+
+- Use the `/mailbrief-ui` skill (`.claude/skills/mailbrief-ui/`) for any change under
+  `src/mailbrief/ui`.
+- Colours come only from `ui/theme/tokens.py`; mail and AI text only through
+  `plain_label()` or a delegate's `drawText()`; button text through `button_label()`.
+- Render the screenshot gallery with
+  `MAILBRIEF_UI_SHOTS=scratch/ui-shots uv run pytest tests/ui/test_workspace.py -q --no-cov`
+  and compare it with `docs/ui/mockup-three-pane-dark.png`.
 
 ## Dormant Microsoft notes
 

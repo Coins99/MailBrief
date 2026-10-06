@@ -24,6 +24,7 @@ from tests.unit.storage.test_recovery import query, sample_database
 @pytest.mark.parametrize("failure", [None, "no-previous", "archive", "swapped", "shutdown"])
 def test_restore_follows_shutdown_and_holds_lock(
     qtbot: QtBot,
+    themed: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
@@ -90,6 +91,8 @@ def test_restore_follows_shutdown_and_holds_lock(
             if isinstance(widget, MainWindow) and widget.isVisible():
                 widget._request_restore(archive, metadata)
                 return
+        # Applying the theme can delay the first show; keep looking until it appears.
+        QTimer.singleShot(10, request_restore)
 
     QTimer.singleShot(100, request_restore)
     try:

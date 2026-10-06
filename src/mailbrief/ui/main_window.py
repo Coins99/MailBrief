@@ -13,7 +13,6 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
-    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -132,6 +131,7 @@ from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
+from mailbrief.ui.labels import plain_label
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
 from mailbrief.ui.proposals_view import ProposalsDialog
@@ -320,14 +320,6 @@ class _ApprovedGate:
 
     async def request_drafting_consent(self, preview: DraftingPreview) -> bool:
         return self._agreed or not preview.first_use
-
-
-def plain_label(text: str) -> QLabel:
-    """Mail-derived text must never become rich text or an automatic hyperlink."""
-    label = QLabel(text)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setWordWrap(True)
-    return label
 
 
 class DraftWrites:
