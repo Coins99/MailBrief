@@ -21,7 +21,7 @@ from sqlalchemy.dialects.sqlite import dialect
 
 from mailbrief.domain.backup import MAX_DATABASE_BYTES, MAX_METADATA_BYTES, BackupMetadata
 from mailbrief.infra.data_lock import data_directory_lock
-from mailbrief.infra.files import sync_directory
+from mailbrief.infra.files import publish_exclusively, sync_directory
 from mailbrief.storage.migrate import migration_config, upgrade_database
 from mailbrief.storage.tables import Base
 
@@ -326,14 +326,14 @@ def restore_backup_holding_lock(
             snapshot = Path(work) / "previous.sqlite3"
             _preserve_database(database, snapshot)
             previous = database.with_name(f"{database.name}.pre-restore-{uuid4().hex}.sqlite3")
-            os.link(snapshot, previous)
+            publish_exclusively(str(snapshot), previous)
             sync_directory(database.parent)
         if any(Path(f"{database}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")):
             raise BackupValidationError(
                 "Database sidecar files remain. Close all database clients before restoring."
             )
         if previous is None:
-            os.link(staged, database)
+            publish_exclusively(str(staged), database)
         else:
             os.replace(staged, database)
         sync_directory(database.parent)

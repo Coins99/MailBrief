@@ -1,5 +1,6 @@
 """Recovery preserves owner artifacts and refuses unsafe archives before replacement."""
 
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Integer, MetaData,
 from sqlalchemy.dialects.sqlite import dialect
 from sqlalchemy.schema import CreateTable
 
+from mailbrief.infra import files
 from mailbrief.infra.data_lock import DataInUseError, data_directory_lock
 from mailbrief.storage import recovery
 from mailbrief.storage.backup import create_backup
@@ -412,6 +414,35 @@ def test_snapshot_directory_sync_failure_prevents_replacement(
         restore_backup(archive, current, replace=True)
     assert query(current, "SELECT body FROM drafts") == [("keep me",)]
     assert len(list(tmp_path.glob("current.sqlite3.pre-restore-*.sqlite3"))) == 1
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_restore_does_not_require_hard_links(
+    archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace: bool
+) -> None:
+    """exFAT and FAT32 drives have neither hard links nor an exclusive rename."""
+    current = tmp_path / "current.sqlite3"
+    if replace:
+        sample_database(current, "keep me")
+
+    def unsupported(*args: object) -> None:
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    def no_links(*args: object) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+    monkeypatch.setattr(os, "link", no_links)
+    previous = restore_backup(archive, current, replace=replace)
+    monkeypatch.undo()
+
+    assert query(current, "SELECT body FROM drafts") == [("owner writing",)]
+    if replace:
+        assert previous is not None
+        assert query(previous, "SELECT body FROM drafts") == [("keep me",)]
+    else:
+        assert previous is None
+    assert not list(tmp_path.glob(".mailbrief-restore-*"))
 
 
 @pytest.mark.parametrize("revision", ["20260928_0007", "20260929_0009"])

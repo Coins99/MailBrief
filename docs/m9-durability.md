@@ -94,10 +94,15 @@ The command opens the source read-only and uses SQLite's snapshot API, including
 committed WAL pages. It checks database integrity, foreign keys, supported schema and
 unexpected storage objects before publishing
 a finished archive. Existing destinations are refused. A failure leaves the source
-and any existing backup intact. Backups and exports work on drives without hard links,
-such as exFAT or FAT32 USB sticks: where the filesystem can't publish atomically, the
-finished file is copied exclusively (never replacing an existing file) and flushed. A
-crash during that copy can leave a partial archive, which fails `--verify`.
+and any existing backup intact. Backups, exports and restores work on drives without hard
+links, such as exFAT or FAT32 USB sticks: where the filesystem can't publish atomically,
+the finished file is copied exclusively (never replacing an existing file) and flushed. A
+crash during that copy can leave a partial archive, which fails `--verify`. A crash while
+restoring to a new database file on such a drive can likewise leave a partial database,
+which nothing checks before it is opened: delete it and restore again. Once flushed,
+the file counts as saved even if its temporary copy can't be deleted (an antivirus scan or
+a drive error can leave a hidden `.mailbrief-` file or folder beside it), and a drive that
+can't sync folders doesn't fail the save.
 
 Format 1 contains exactly `database.sqlite3` and `metadata.json`. Metadata records
 the UTC creation time, schema revisions and SHA-256 of the database. The snapshot
