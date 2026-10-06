@@ -36,7 +36,8 @@ later use after Microsoft Entra access is resolved.
   See [M8 daily operation](docs/m8-daily-operation.md).
 - M9 implemented, awaiting live acceptance: **Data and recovery** provides snapshot
   backup, verification, safe restore on exit, portable writing exports, manual retention
-  previews, safe diagnostics and bundled setup/recovery help.
+  previews, safe diagnostics and bundled setup/recovery help. Diagnostic commands that use
+  the database can't run while the desktop is open: they exit with code 5.
   See [M9 durability](docs/m9-durability.md) and the
   [owner's live-validation checklist](docs/m9-live-validation.md).
 

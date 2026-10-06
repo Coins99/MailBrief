@@ -57,9 +57,11 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   shutdown, portable action/draft/note exports, previewed manual retention, safe
   diagnostics and bundled help. Offline backup/verify/restore is also available through
   `python -m mailbrief.diagnostics.backup`. Restore retains a pre-restore snapshot,
-  clears automatic AI permission and never touches credentials. Diagnostic DB commands
-  share the desktop folder lock. CI enforces the service coverage target and checks
-  native packages at 100%/200% scale with synthetic backup/recovery/export/cleanup.
+  clears automatic AI permission and never touches credentials. Gmail diagnostic
+  database commands hold `desktop.lock` for their whole run: they exit 5 while the desktop
+  is open, and the desktop reports that MailBrief is busy while one runs. CI enforces the
+  service coverage target and checks native packages at 100%/200% scale with synthetic
+  backup/recovery/export/cleanup.
   See `docs/m9-durability.md` and `docs/m9-live-validation.md`. Do not claim M9 accepted
   until the owner completes real-record recovery and the 7–14-day release scenario.
 

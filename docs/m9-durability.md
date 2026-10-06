@@ -94,7 +94,10 @@ The command opens the source read-only and uses SQLite's snapshot API, including
 committed WAL pages. It checks database integrity, foreign keys, supported schema and
 unexpected storage objects before publishing
 a finished archive. Existing destinations are refused. A failure leaves the source
-and any existing backup intact. The destination filesystem must support hard links.
+and any existing backup intact. Backups and exports work on drives without hard links,
+such as exFAT or FAT32 USB sticks: where the filesystem can't publish atomically, the
+finished file is copied exclusively (never replacing an existing file) and flushed. A
+crash during that copy can leave a partial archive, which fails `--verify`.
 
 Format 1 contains exactly `database.sqlite3` and `metadata.json`. Metadata records
 the UTC creation time, schema revisions and SHA-256 of the database. The snapshot
@@ -117,6 +120,13 @@ and exit normally. Other tools using the database must also be closed. Restore a
 the desktop's data-folder lock; Gmail diagnostic database commands now hold that same
 lock for their entire run. A running desktop or diagnostic command refuses recovery.
 
+That shared lock also changes everyday use of `mailbrief-gmail-diagnostic`. A command
+that uses the database (`sync`, `bodies`, `brief`, `actions`, `drafts`, `preferences`
+and the others) exits with code 5 while the desktop is open, and launching the desktop
+while such a command runs reports that MailBrief or a diagnostic command is using its
+data. The lock file is created beside the database, so `--database` must point into a
+folder you can write, even for commands that only read.
+
 The archive must contain exactly two members, with valid format-1 metadata, a UTC
 timestamp, no credentials, a matching SHA-256 and a known schema revision. Unknown
 formats/revisions, extra or duplicate members, invalid SQLite relationships, views
@@ -127,7 +137,8 @@ No member paths are extracted. A checksum establishes integrity, not authenticit
 
 Restore validates in a temporary folder beside the target, upgrades that staged
 database with the bundled migrations, verifies column types, nullability, primary/
-foreign keys and uniqueness against the current schema, and
+foreign keys, uniqueness and indexes against the current schema (an extra or missing
+index is refused), and
 flushes it before publishing. For an existing target, `--replace` is required: a
 consistent snapshot named `<database>.pre-restore-<unique-id>.sqlite3` is kept beside
 it before the atomic replacement. The command prints that retained path. A failed
