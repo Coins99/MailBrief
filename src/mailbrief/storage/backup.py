@@ -21,11 +21,7 @@ def create_backup(database: Path, destination: Path) -> None:
     """Publish a consistent snapshot without replacing an existing file."""
     if destination.exists():
         raise FileExistsError("That file already exists.")
-    # A staging file that can't be deleted (an antivirus scan, a drive error) never turns a
-    # published backup into a failure; at worst the hidden staging folder stays behind.
-    with tempfile.TemporaryDirectory(
-        dir=destination.parent, prefix=".mailbrief-backup-", ignore_cleanup_errors=True
-    ) as work:
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".mailbrief-backup-") as work:
         snapshot = Path(work) / "database.sqlite3"
         with (
             closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as source,
@@ -58,8 +54,7 @@ def create_backup(database: Path, destination: Path) -> None:
         with archive.open("r+b") as archive_file:
             os.chmod(archive, 0o600)
             os.fsync(archive_file.fileno())
-        # Exclusive publication must also refuse files created during the write. It works
-        # without hard links, so backups can go to exFAT and FAT32 drives.
+        # Exclusive publication must also refuse files created during the write.
         publish_exclusively(str(archive), destination)
         # Persist the new entry so a power cut can't lose a backup reported as saved.
         sync_directory(destination.parent)

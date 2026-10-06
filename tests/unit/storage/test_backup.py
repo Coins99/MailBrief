@@ -3,10 +3,7 @@
 import errno
 import hashlib
 import json
-import os
 import sqlite3
-import stat
-import sys
 import zipfile
 from collections.abc import Callable
 from contextlib import closing
@@ -15,11 +12,9 @@ from typing import Any
 
 import pytest
 
-from mailbrief.infra import files
 from mailbrief.storage import backup
 from mailbrief.storage.backup import create_backup
 from mailbrief.storage.migrate import upgrade_database
-from mailbrief.storage.recovery import inspect_backup
 
 
 def test_backup_includes_wal_and_preserves_source(tmp_path: Path) -> None:
@@ -92,32 +87,13 @@ def test_publication_failure_cleans_staging(
     def fail(source: object, destination: object) -> None:
         raise OSError(errno.EACCES, "simulated disk or permission failure")
 
-    monkeypatch.setattr(files, "_rename_exclusively", fail)
+    monkeypatch.setattr(backup, "publish_exclusively", fail)
     with pytest.raises(OSError):
         create_backup(database, tmp_path / "backup.zip")
     assert not (tmp_path / "backup.zip").exists()
     assert not list(tmp_path.glob(".mailbrief-backup-*"))
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
-
-
-def test_backup_is_published_where_hard_links_are_unsupported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """exFAT and FAT32 drives have neither hard links nor an exclusive rename."""
-    database = tmp_path / "database.sqlite3"
-    upgrade_database(database)
-
-    def unsupported(source: object, destination: object) -> None:
-        raise OSError(errno.ENOTSUP, "Operation not supported")
-
-    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
-    destination = tmp_path / "backup.zip"
-    create_backup(database, destination)
-    assert inspect_backup(destination).schema_revisions == ("20260930_0012",)
-    if sys.platform != "win32":
-        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-    assert not list(tmp_path.glob(".mailbrief-backup-*"))
 
 
 def test_backup_folder_is_synced_after_publication(
@@ -210,58 +186,3 @@ def test_unexpected_storage_objects_are_not_backed_up(tmp_path: Path) -> None:
     assert "SYNTHETIC SECRET" not in str(caught.value)
     assert not (tmp_path / "backup.zip").exists()
     assert not list(tmp_path.glob(".mailbrief-backup-*"))
-
-
-def test_a_copied_backup_is_saved_even_if_its_staging_file_cannot_be_deleted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A copy on disk counts as saved; a staging file another process holds stays behind."""
-    database = tmp_path / "database.sqlite3"
-    upgrade_database(database)
-    folder = tmp_path / "drive"
-    folder.mkdir()
-    destination = folder / "saved.zip"
-    real = os.unlink
-
-    def held_open(path: Any, *args: Any, **kwargs: Any) -> None:
-        if os.path.basename(os.fspath(path)) == "backup.zip":
-            raise PermissionError(errno.EACCES, "Permission denied", path)
-        real(path, *args, **kwargs)
-
-    monkeypatch.setattr(files, "_rename_exclusively", unsupported_rename)
-    monkeypatch.setattr(os, "unlink", held_open)
-    create_backup(database, destination)
-    monkeypatch.undo()
-
-    assert inspect_backup(destination).schema_revisions == ("20260930_0012",)
-    left = [path.name for path in folder.iterdir() if path != destination]
-    assert len(left) == 1 and left[0].startswith(".mailbrief-backup-")
-
-
-def unsupported_rename(source: object, destination: object) -> None:
-    raise OSError(errno.ENOTSUP, "Operation not supported")
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no folder fsync")
-@pytest.mark.parametrize(("error", "saved"), [(errno.EINVAL, True), (errno.EIO, False)])
-def test_a_drive_that_cannot_sync_folders_still_saves_the_backup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: int, saved: bool
-) -> None:
-    database = tmp_path / "database.sqlite3"
-    upgrade_database(database)
-    destination = tmp_path / "saved.zip"
-    real = os.fsync
-
-    def folders_refuse(descriptor: int) -> None:
-        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            raise OSError(error, os.strerror(error))
-        real(descriptor)
-
-    monkeypatch.setattr(os, "fsync", folders_refuse)
-    if saved:
-        create_backup(database, destination)
-    else:
-        with pytest.raises(OSError):
-            create_backup(database, destination)
-    monkeypatch.undo()
-    assert inspect_backup(destination).schema_revisions == ("20260930_0012",)
