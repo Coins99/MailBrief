@@ -1,9 +1,11 @@
 """Snapshot consistency and failure preservation, using synthetic data only."""
 
+import errno
 import hashlib
 import json
-import os
 import sqlite3
+import stat
+import sys
 import zipfile
 from collections.abc import Callable
 from contextlib import closing
@@ -12,9 +14,11 @@ from typing import Any
 
 import pytest
 
+from mailbrief.infra import files
 from mailbrief.storage import backup
 from mailbrief.storage.backup import create_backup
 from mailbrief.storage.migrate import upgrade_database
+from mailbrief.storage.recovery import inspect_backup
 
 
 def test_backup_includes_wal_and_preserves_source(tmp_path: Path) -> None:
@@ -85,15 +89,49 @@ def test_publication_failure_cleans_staging(
     upgrade_database(database)
 
     def fail(source: object, destination: object) -> None:
-        raise OSError("simulated disk or permission failure")
+        raise OSError(errno.EACCES, "simulated disk or permission failure")
 
-    monkeypatch.setattr(os, "link", fail)
+    monkeypatch.setattr(files, "_rename_exclusively", fail)
     with pytest.raises(OSError):
         create_backup(database, tmp_path / "backup.zip")
     assert not (tmp_path / "backup.zip").exists()
     assert not list(tmp_path.glob(".mailbrief-backup-*"))
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+
+
+def test_backup_is_published_where_hard_links_are_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exFAT and FAT32 drives have neither hard links nor an exclusive rename."""
+    database = tmp_path / "database.sqlite3"
+    upgrade_database(database)
+
+    def unsupported(source: object, destination: object) -> None:
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+    destination = tmp_path / "backup.zip"
+    create_backup(database, destination)
+    assert inspect_backup(destination).schema_revisions == ("20260930_0012",)
+    if sys.platform != "win32":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert not list(tmp_path.glob(".mailbrief-backup-*"))
+
+
+def test_backup_folder_is_synced_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "database.sqlite3"
+    upgrade_database(database)
+    destination = tmp_path / "backups" / "backup.zip"
+    destination.parent.mkdir()
+    synced: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        backup, "sync_directory", lambda path: synced.append((path, destination.exists()))
+    )
+    create_backup(database, destination)
+    assert synced == [(destination.parent, True)]
 
 
 def test_oversized_snapshot_refused_before_publication(

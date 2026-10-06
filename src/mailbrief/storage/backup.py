@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mailbrief.domain.backup import MAX_DATABASE_BYTES
+from mailbrief.infra.files import publish_exclusively, sync_directory
 from mailbrief.storage.recovery import validate_snapshot
 
 FORMAT_VERSION = 1
@@ -53,5 +54,8 @@ def create_backup(database: Path, destination: Path) -> None:
         with archive.open("r+b") as archive_file:
             os.chmod(archive, 0o600)
             os.fsync(archive_file.fileno())
-        # Exclusive publication must also refuse files created during the write.
-        os.link(archive, destination)
+        # Exclusive publication must also refuse files created during the write. It works
+        # without hard links, so backups can go to exFAT and FAT32 drives.
+        publish_exclusively(str(archive), destination)
+        # Persist the new entry so a power cut can't lose a backup reported as saved.
+        sync_directory(destination.parent)

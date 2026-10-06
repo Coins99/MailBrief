@@ -3,6 +3,8 @@
 import ctypes
 import errno
 import os
+import shutil
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from mailbrief.infra import files
-from mailbrief.infra.files import sync_directory, write_text_atomically
+from mailbrief.infra.files import publish_exclusively, sync_directory, write_text_atomically
 
 
 def test_writes_utf8_with_line_breaks_as_given(tmp_path: Path) -> None:
@@ -123,4 +125,88 @@ def test_darwin_publication_error_preserves_destination_and_cleans_staging(
         write_text_atomically(target, "mine", overwrite=False)
     assert caught.value.errno == error
     assert target.read_text() == "theirs"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def unsupported(source: object, destination: object) -> None:
+    raise OSError(errno.ENOTSUP, "Operation not supported")
+
+
+def test_publication_copies_where_the_filesystem_cannot_rename_exclusively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "staged.tmp"
+    source.write_bytes(b"owner writing\r\n")
+    target = tmp_path / "export.txt"
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+
+    publish_exclusively(str(source), target)
+
+    assert target.read_bytes() == b"owner writing\r\n"
+    assert not source.exists()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("fast_path", ["refuses", "unsupported"])
+def test_publication_never_replaces_an_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_path: str
+) -> None:
+    source = tmp_path / "staged.tmp"
+    source.write_bytes(b"mine")
+    target = tmp_path / "export.txt"
+    target.write_bytes(b"theirs")
+    if fast_path == "unsupported":
+        monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+
+    with pytest.raises(FileExistsError):
+        publish_exclusively(str(source), target)
+
+    assert target.read_bytes() == b"theirs"
+    assert source.read_bytes() == b"mine"
+
+
+def test_a_failed_fallback_copy_leaves_no_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "staged.tmp"
+    source.write_bytes(b"mine")
+    target = tmp_path / "export.txt"
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+
+    def full(*args: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copyfileobj", full)
+    with pytest.raises(OSError) as caught:
+        publish_exclusively(str(source), target)
+
+    assert caught.value.errno == errno.ENOSPC
+    assert not target.exists()
+    assert source.read_bytes() == b"mine"
+
+
+@pytest.mark.parametrize("error", [errno.EEXIST, errno.EACCES])
+def test_other_publication_errors_never_fall_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: int
+) -> None:
+    def fail(source: object, destination: object) -> None:
+        raise OSError(error, os.strerror(error))
+
+    monkeypatch.setattr(files, "_rename_exclusively", fail)
+    monkeypatch.setattr(files, "_copy_exclusively", Mock(side_effect=AssertionError))
+    with pytest.raises(OSError) as caught:
+        publish_exclusively(str(tmp_path / "staged.tmp"), tmp_path / "export.txt")
+    assert caught.value.errno == error
+
+
+def test_export_falls_back_on_a_filesystem_without_exclusive_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(files, "_rename_exclusively", unsupported)
+    target = tmp_path / "draft.txt"
+
+    write_text_atomically(target, "owner writing", overwrite=False)
+
+    assert target.read_text(encoding="utf-8") == "owner writing"
     assert list(tmp_path.iterdir()) == [target]
