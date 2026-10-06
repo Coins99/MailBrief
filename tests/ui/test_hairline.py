@@ -45,7 +45,11 @@ def test_card_divider_and_splitter_paint_hairlines(
     splitter.show()
     assert splitter.handleWidth() == 5  # Wide enough to grab.
     handle = splitter.handle(1).grab().toImage()
-    assert handle.width() == 5
-    assert handle.pixelColor(2, 10) == QColor(DARK.hairline)  # One line at the centre.
-    assert handle.pixelColor(0, 10) == QColor(DARK.panel)
-    assert handle.pixelColor(4, 10) == QColor(DARK.panel)
+    # Grabs are in device pixels: 5 at 1x, 10 on a 2x screen.
+    pixels = round(5 * handle.devicePixelRatio())
+    assert handle.width() == pixels
+    row = [handle.pixelColor(x, 10) for x in range(pixels)]
+    # One device-pixel line at the centre, panel colour either side.
+    assert row.count(QColor(DARK.hairline)) == 1
+    assert row[(pixels - 1) // 2] == QColor(DARK.hairline)
+    assert row[0] == row[-1] == QColor(DARK.panel)

@@ -6,7 +6,7 @@ import string
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
-from mailbrief.ui.theme.assets import icon_pixmap, register_fonts, ui_font
+from mailbrief.ui.theme.assets import register_fonts, release_icon_cache, ui_font
 from mailbrief.ui.theme.tokens import DARK, TEXT_PX, ThemeMode, Tokens, tokens_for
 
 QSS = """\
@@ -91,6 +91,6 @@ def apply_theme(app: QApplication, mode: ThemeMode = ThemeMode.DARK) -> Tokens:
     global _cache_hooked
     if not _cache_hooked:
         # Release the cached icon pixmaps while Qt can still free them.
-        app.aboutToQuit.connect(icon_pixmap.cache_clear)
+        app.aboutToQuit.connect(release_icon_cache)
         _cache_hooked = True
     return tokens

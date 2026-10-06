@@ -13,7 +13,12 @@ from pytestqt.qtbot import QtBot
 from mailbrief.domain.actions import ProposalState, SuggestionState, SuggestionView
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.messages import EmailContact
-from mailbrief.ui.brief_detail import BriefDetailPane, item_deadline_text, suggestion_meta
+from mailbrief.ui.brief_detail import (
+    BriefDetailPane,
+    item_deadline_text,
+    outline_button,
+    suggestion_meta,
+)
 from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS
 from tests.factories import make_digest_item, make_proposal, make_suggestion
 from tests.ui.workspace_fixtures import ACCOUNT, DECK_ACTION, FINANCE_ACTION, ZONE, mockup_digest
@@ -242,7 +247,13 @@ def test_long_titles_shorten_buttons_but_keep_the_full_name(pane: BriefDetailPan
     assert len(apply.text().replace("&&", "&")) == 40
     assert apply.accessibleName().startswith("Set the deadline to “the first working day")
     content = pane.widget()
-    assert content is not None and content.minimumSizeHint().width() < 400
+    assert content is not None
+    narrowest = content.minimumSizeHint().width()
+    # Font metrics differ by platform, so compare with a button built the same way: one
+    # showing the whole title would be wider than all of the pane's content.
+    whole = outline_button(f"Add to “{long_title}”")
+    whole.setParent(content)
+    assert narrowest < whole.minimumSizeHint().width()
 
 
 def button_with_prefix(pane: QWidget, prefix: str) -> QPushButton:

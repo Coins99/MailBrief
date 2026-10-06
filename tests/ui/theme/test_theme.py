@@ -4,6 +4,7 @@ import dataclasses
 import re
 
 import pytest
+from PySide6.QtCore import QMetaMethod
 from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -130,9 +131,11 @@ def test_missing_fonts_still_apply_the_colours(
     assert qapp.styleSheet() == build_stylesheet(DARK)
 
 
-def test_quitting_clears_the_icon_cache(qapp: QApplication, themed: None) -> None:
+def test_releasing_the_icon_cache_empties_it(qapp: QApplication, themed: None) -> None:
     apply_theme(qapp)
     icon_pixmap("sun", DARK.text, 16)
     assert icon_pixmap.cache_info().currsize > 0
-    qapp.aboutToQuit.emit()
+    assets.release_icon_cache()
     assert icon_pixmap.cache_info().currsize == 0
+    # apply_theme runs it on aboutToQuit; tests never emit the shared app's signals.
+    assert qapp.isSignalConnected(QMetaMethod.fromSignal(qapp.aboutToQuit))

@@ -68,6 +68,12 @@ def icon_pixmap(name: str, color: str, px: int, dpr: float = 1.0) -> QPixmap:
     return pixmap
 
 
+def release_icon_cache() -> None:
+    """Drop the cached icon pixmaps; ``apply_theme`` runs this when the app is about to quit,
+    while Qt can still free them."""
+    icon_pixmap.cache_clear()
+
+
 def icon(name: str, color: str, px: int = 16) -> QIcon:
     result = QIcon()
     for dpr in (1.0, 2.0):
