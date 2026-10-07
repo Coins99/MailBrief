@@ -79,7 +79,9 @@ the whole text the accessible name; no tooltip, no links.
 email". Signals: `suggestion_requested(str, int)` (ACCEPT or DISMISS, from this module),
 `accept_into_requested(int, str, int)`, `proposal_requested(str, int, int)` (APPLY or
 DISMISS), `reply_requested(str, str)` and `source_requested(str)`; it never opens URLs
-itself.
+itself. `rebuilt()` follows each `show_item` and `show_empty`, and `buttons()` lists the
+content's buttons in display order. The pane has `ClickFocus`: Tab goes from the brief
+list straight to its buttons, and a click still lets the arrow keys scroll it.
 Its content is at most 720 px wide (`DETAIL_MAX_WIDTH`) and stays at the left on wide
 windows. Content margins 16, 14, 16, 14, spacing 8, in order (every mail- or AI-derived
 line is a `WrapLabel`):
@@ -101,7 +103,9 @@ line is a `WrapLabel`):
 9. Footer: "Draft a reply" (pencil) and, only for https links on mail.google.com,
    "Open in Gmail" (external-link).
 10. A stretch.
-Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
+Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`, and an
+objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton`,
+`dismissProposalButton`, `replyButton` and `openInGmailButton`.
 
 ## Workspace (`ui/workspace.py`)
 
@@ -175,6 +179,18 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
   is being confirmed there, and reloads Briefs when it ends.
 - Drafts: with no drafts the list is hidden and `draftsEmpty`, a muted, centred, wrapping
   message, fills the page; with drafts the list shows and the message hides.
+- Shortcuts: `QShortcut`s on the window, Ctrl+1 to Ctrl+5 (Cmd on macOS), call
+  `_request_page` with today, actions, waiting, drafts and briefs (`PAGE_SHORTCUTS`,
+  `page_shortcuts`), so Briefs refuses as the sidebar does.
+- Tab order (`_link_tab_order`, at startup and on each `rebuilt`): Sync and review,
+  Cancel, the sidebar's page list, Saved mail, Data, Settings, Connect or Disconnect, then
+  the page (on Today: Back to latest, Retry, the brief list and the detail's buttons in
+  display order), then Undo and back to Sync and review; hidden and disabled widgets are
+  skipped. The chain is linked from Undo, so other pages' controls, in their own order,
+  fall between Today's last button and Undo. Never walk the focus chain from Python
+  (`nextInFocusChain()`, `previousInFocusChain()`): PySide re-parents the returned
+  wrapper under the widget it was called on, and deleting that widget later invalidates
+  the wrapper and all its children.
 
 ## Run page (`ui/run_view.py`, `ui/main_window.py`)
 

@@ -256,7 +256,7 @@ def test_long_titles_shorten_buttons_but_keep_the_full_name(pane: BriefDetailPan
     narrowest = content.minimumSizeHint().width()
     # Font metrics differ by platform, so compare with a button built the same way: one
     # showing the whole title would be wider than all of the pane's content.
-    whole = outline_button(f"Add to “{long_title}”")
+    whole = outline_button(f"Add to “{long_title}”", "addToButton")
     whole.setParent(content)
     assert narrowest < whole.minimumSizeHint().width()
 

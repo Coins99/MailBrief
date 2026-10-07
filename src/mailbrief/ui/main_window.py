@@ -2,14 +2,16 @@
 
 import asyncio
 import contextlib
+import itertools
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Protocol, assert_never
 
 from pydantic import SecretStr
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QCloseEvent, QDesktopServices
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -339,6 +341,8 @@ def _outline(button: QPushButton) -> None:
 
 
 _RUN_WIDTH = 760
+# Ctrl+1 to Ctrl+5 (Cmd on macOS) show the sidebar's pages, in its order.
+PAGE_SHORTCUTS = ("today", "actions", "waiting", "drafts", "briefs")
 
 
 def _step_heading(layout: QVBoxLayout, step: str, title: str) -> None:
@@ -710,7 +714,43 @@ class MainWindow(QMainWindow):
         self.review_button.clicked.connect(self._accept_review)
         self.approve_button.clicked.connect(lambda: self._answer_consent(True))
         self.decline_button.clicked.connect(lambda: self._answer_consent(False))
+        self.page_shortcuts: dict[str, QShortcut] = {}
+        for number, key in enumerate(PAGE_SHORTCUTS, start=1):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{number}"), self)
+            shortcut.activated.connect(partial(self._request_page, key))
+            self.page_shortcuts[key] = shortcut
+        # Each email's detail has new buttons; they join the Tab order after the list.
+        workspace.detail.rebuilt.connect(self._link_tab_order)
+        self._link_tab_order()
         self._set_busy(False)
+
+    def _link_tab_order(self) -> None:
+        """Tab runs from Sync and review through Cancel, the sidebar's pages, Saved mail,
+        Data, Settings, Connect or Disconnect, the page shown, then Undo and back to the
+        start. Hidden and disabled widgets are skipped.
+
+        The chain starts at Undo, so every widget not named here (the other pages', in
+        their own order) falls between Today's last button and Undo. Never walk the focus
+        chain from Python: PySide re-parents each wrapper ``nextInFocusChain()`` returns
+        under the widget it was called on, and deleting that widget then invalidates it."""
+        workspace = self.workspace
+        chain: list[QWidget] = [
+            self.undo_button,
+            self.generate_button,
+            self.cancel_button,
+            workspace.sidebar.nav,
+            self.cached_button,
+            self.data_button,
+            self.settings_button,
+            self.connect_button,
+            self.disconnect_button,
+            self.latest_button,
+            self.retry_button,
+            workspace.brief_list,
+            *workspace.detail.buttons(),
+        ]
+        for first, second in itertools.pairwise(chain):
+            QWidget.setTabOrder(first, second)
 
     def _set_account(self, email: str | None) -> None:
         """The connected Gmail account, or None; Connect shows only without one and

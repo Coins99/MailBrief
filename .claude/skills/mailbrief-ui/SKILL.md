@@ -28,6 +28,9 @@ Read AGENTS.md first; its invariants win. Component specs and the token table ar
 - Keep MainWindow's attribute names; tests and other modules use them.
 - Every new widget gets an `objectName` and an accessible name. Rows a keyboard must skip
   (section headers) have `NoItemFlags`; Return and Enter activate a row once.
+- Keep the Tab order in `MainWindow._link_tab_order` (see the spec), and never call
+  `nextInFocusChain()` or `previousInFocusChain()` from Python: PySide re-parents the
+  returned wrapper under the caller, and deleting the caller later invalidates it.
 - No blocking network or database work on the Qt main thread. Add no dependencies.
 - Bundled files resolve through `Path(__file__)` and are listed in
   `scripts/build_desktop.py`; `ui/smoke.py` checks they load in the package.
