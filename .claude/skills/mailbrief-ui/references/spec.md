@@ -59,13 +59,26 @@ All read colours from `current_tokens()` at paint time.
   ScrollPerPixel, SingleSelection; `item_selected(DigestItem)`; `show_rows(rows)` selects
   the first item row; Return and Enter emit `activated` once and are consumed.
 
+## Wrapping labels (`ui/labels.py`)
+
+`WrapLabel(QLabel)`, made with `wrap_label(text, *, tone=None, px=None, medium=False)`
+(like `plain_label`): plain text laid out with `QTextLayout` and
+`WrapAtWordBoundaryOrAnywhere`, so an unbroken token (an address, a link, a long word)
+wraps instead of widening its container. Line breaks in the text are kept.
+`hasHeightForWidth()` is True and `heightForWidth(w)` includes the contents margins;
+`sizeHint()` is at most 40 average characters wide with its matching height;
+`minimumSizeHint()` is 0 wide and one line high. It paints in the palette's
+`WindowText`, so the stylesheet's `tone` colours apply. `setText` keeps `text()` and makes
+the whole text the accessible name; no tooltip, no links.
+
 ## Detail pane (`ui/brief_detail.py`)
 
 `BriefDetailPane(QScrollArea)`, objectName `briefDetail`, accessible name "Selected
 email". Signals mirror `DigestView`: `suggestion_requested(str, int)`,
 `accept_into_requested(int, str, int)`, `proposal_requested(str, int, int)`,
 `reply_requested(str, str)`, plus `source_requested(str)`; it never opens URLs itself.
-Content margins 16, 14, 16, 14, spacing 8, in order:
+Content margins 16, 14, 16, 14, spacing 8, in order (every mail- or AI-derived line is
+a `WrapLabel`):
 1. Subject (or "(no subject)"), 15px Medium.
 2. Sender, secondary. No received time is invented.
 3. Summary.
@@ -132,13 +145,18 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
 ## Main window (`ui/main_window.py`)
 
 - Central widget: the workspace (stretch), a horizontal `HairlineDivider`, then
-  `statusStrip` (margins 12, 6, 12, 6): the status (12px secondary, wraps) and an
+  `statusStrip` (margins 12, 6, 12, 6): the status (a 12px secondary `WrapLabel`) and an
   outline Undo. No outer scroll area; the window opens at 1100 × 720 and its minimum
   width stays at most 900 px with the theme applied.
 - Header: "Checked Gmail at HH:MM" in the owner's zone after a run whose Inbox sync was
   complete or partial, then outline Sync and review and Cancel.
 - Sidebar footer, top to bottom: Saved mail, Data, Settings, then the Gmail and AI lines
-  (11px muted), then outline Connect Gmail and Disconnect (12px), which fit the sidebar.
+  (11px muted `WrapLabel`s, inset 10 px to line up with the row icons, read by their
+  text), then outline Connect Gmail or Disconnect (12px): Connect shows only without a
+  connected account, Disconnect only with one. Rows and outline buttons are muted while
+  disabled.
+- Cancel shows in the header only while an operation runs. `ThemeStyle`, Fusion behind a
+  `QProxyStyle`, never underlines mnemonics; Alt and the letter still work.
 - Pages: `today` (the "Viewing the brief for …" banner and the retry row in `today_top`),
   `run` (`runPage`, a scroll area: the review and consent panels, margins 16, 14, 16,
   14), `actions` and `drafts` (the panels, margins 12). Today shows `run` while the review

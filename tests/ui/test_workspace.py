@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestStatus
+from mailbrief.domain.messages import EmailContact
 from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
 from mailbrief.ui.workspace import (
     DIALOG_PAGES,
@@ -339,3 +340,35 @@ def test_nav_buttons_are_muted_while_disabled(qtbot: QtBot) -> None:
     assert row._color() == tokens.text_muted
     assert not row._active()  # No fill while disabled.
     assert not row.grab().isNull()
+
+
+def test_unbroken_mail_text_never_widens_the_workspace(
+    qtbot: QtBot, qapp: QApplication, themed: None
+) -> None:
+    apply_theme(qapp)
+    token = "y" * 150
+    brief = mockup_digest()
+    first = brief.digest.items[0]
+    long_item = first.model_copy(
+        update={
+            "subject": f"Subject {token}",
+            "summary": f"Summary {token}",
+            "sender": EmailContact(name=None, address=f"{token}@example.com"),
+        }
+    )
+    hostile = brief.digest.model_copy(update={"items": (long_item, *brief.digest.items[1:])})
+
+    def narrowest(digest: DailyDigest) -> int:
+        workspace = ThreePaneWorkspace()
+        qtbot.addWidget(workspace)
+        workspace.show_digest(
+            digest, links=brief.links, proposals=brief.proposals, owner_zone=OWNER_ZONE
+        )
+        workspace.resize(*SIZES["mockup"])
+        show(qtbot, workspace)
+        content = workspace.detail.widget()
+        assert content is not None
+        assert content.width() <= workspace.detail.viewport().width()
+        return workspace.minimumSizeHint().width()
+
+    assert narrowest(hostile) == narrowest(brief.digest)

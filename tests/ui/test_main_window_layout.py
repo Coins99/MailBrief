@@ -26,7 +26,7 @@ from mailbrief.ui.actions_view import ActionsPanel
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.hairline import HairlineDivider, HairlineFrame
 from mailbrief.ui.main_window import MainWindow
-from mailbrief.ui.theme import TITLE_PX, ThemeMode, apply_theme
+from mailbrief.ui.theme import SIDEBAR_WIDTH, TITLE_PX, ThemeMode, apply_theme
 from tests.factories import make_action
 from tests.ui.brief_view import detail, select_item
 from tests.ui.test_workflow import FakeBackend
@@ -487,3 +487,31 @@ async def test_pages_render(
     save_shot(window.grab(), f"page-run-{mode.value}")
     window.cancel()
     await finish(window)
+
+
+async def test_long_account_and_status_wrap_inside_the_window(
+    qtbot: QtBot, qapp: QApplication, themed: None
+) -> None:
+    apply_theme(qapp)
+    window = MainWindow(mockup_backend())
+    window.now = lambda: NOW
+    qtbot.addWidget(window)
+    window.start(window.initialize)
+    await finish(window)
+    window.resize(1100, 720)
+    show(qtbot, window)
+    narrow = window.minimumSizeHint().width()
+    email = f"{'z' * 48}@example.com"
+    assert len(email) == 60
+    window._set_account(email)
+    window.connection.setText(f"Gmail: connected as {email}")
+    window.status.setText("s" * 200)
+    lines = (window.connection, window.ai, window.status)
+    # A new height reaches each enclosing layout in turn, over a few event-loop passes.
+    qtbot.waitUntil(
+        lambda: all(line.height() >= line.heightForWidth(line.width()) for line in lines),
+        timeout=2000,
+    )  # Nothing is clipped.
+    assert window.minimumSizeHint().width() == narrow
+    assert window.workspace.sidebar.width() == SIDEBAR_WIDTH
+    assert window.connection.contentsMargins().left() == 10

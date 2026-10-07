@@ -133,7 +133,7 @@ from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.hairline import HairlineDivider
 from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
-from mailbrief.ui.labels import plain_label
+from mailbrief.ui.labels import plain_label, wrap_label
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
 from mailbrief.ui.proposals_view import ProposalsDialog
@@ -521,18 +521,19 @@ class MainWindow(QMainWindow):
         self.cached_button = sidebar.saved_mail
         self.data_button = sidebar.data
         self.data_button.clicked.connect(lambda: self.start(self._open_data, cancellable=False))
-        self.connection = plain_label("Gmail: checking saved session…", tone="muted", px=CAPTION_PX)
+        # Wrapping labels, read by their whole text.
+        self.connection = wrap_label("Gmail: checking saved session…", tone="muted", px=CAPTION_PX)
         self.connection.setObjectName("connectionStatus")
-        self.connection.setAccessibleName("Gmail connection")
-        self.ai = plain_label("AI: checking configuration…", tone="muted", px=CAPTION_PX)
+        self.ai = wrap_label("AI: checking configuration…", tone="muted", px=CAPTION_PX)
         self.ai.setObjectName("aiStatus")
-        self.ai.setAccessibleName("AI configuration")
         self.connect_button = _outline_button(
             "&Connect Gmail", "connectButton", px=SMALL_PX, accessible_name="Connect Gmail"
         )
         self.disconnect_button = _outline_button(
             "&Disconnect", "disconnectButton", px=SMALL_PX, accessible_name="Disconnect Gmail"
         )
+        for line in (self.connection, self.ai):
+            line.setContentsMargins(10, 0, 0, 0)  # In line with the rows' icons.
         for widget in (self.connection, self.ai, self.connect_button, self.disconnect_button):
             sidebar.footer.addWidget(widget)
         # Today: the banner for a past brief and the retry row, above the brief.
@@ -542,7 +543,7 @@ class MainWindow(QMainWindow):
         viewing = QHBoxLayout(self.viewing)
         viewing.setContentsMargins(12, 8, 12, 8)
         viewing.setSpacing(8)
-        self.viewing_label = plain_label("", tone="secondary", px=SMALL_PX)
+        self.viewing_label = wrap_label("", tone="secondary", px=SMALL_PX)
         self.viewing_label.setObjectName("viewingLabel")
         self.latest_button = _outline_button("Back to &latest", "latestButton")
         viewing.addWidget(self.viewing_label, 1)
@@ -623,7 +624,7 @@ class MainWindow(QMainWindow):
         strip_layout = QHBoxLayout(strip)
         strip_layout.setContentsMargins(12, 6, 12, 6)
         strip_layout.setSpacing(8)
-        self.status = plain_label("Loading saved brief…", tone="secondary", px=SMALL_PX)
+        self.status = wrap_label("Loading saved brief…", tone="secondary", px=SMALL_PX)
         self.status.setObjectName("statusText")
         strip_layout.addWidget(self.status, 1)
         self.undo_button = _outline_button("&Undo", "undoButton")

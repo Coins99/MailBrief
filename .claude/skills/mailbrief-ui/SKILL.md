@@ -12,8 +12,10 @@ Read AGENTS.md first; its invariants win. Component specs and the token table ar
 - Colours come only from `ui/theme/tokens.py`. Widgets read `current_tokens()` at paint
   time; never hard-code a hex colour anywhere else under `src/mailbrief/ui`.
 - Mail and AI text reaches the screen only through `plain_label()` (`ui/labels.py`, plain
-  text, word wrap) or a delegate's `drawText()`. Never put it in a tooltip, and never use
-  rich text or automatic links for it.
+  text, word wrap), `wrap_label()` (plain text that also wraps inside a long unbroken
+  token) or a delegate's `drawText()`. Never put it in a tooltip, and never use rich text
+  or automatic links for it. Use `wrap_label()` wherever an address, link or long word
+  could otherwise widen the layout.
 - All button text goes through `button_label()`, which escapes `&` as `&&`.
 - Fonts are bundled Inter (`ui_font(px, medium=...)`); sizes are in pixels, never points.
   Metrics: `TEXT_PX` 13, `SMALL_PX` 12, `CAPTION_PX` 11, `TITLE_PX` 15, `RADIUS` 8,

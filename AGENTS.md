@@ -113,7 +113,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `ui/theme/`: design tokens (`tokens.py`, the only place UI colours are defined), the
   Fusion palette and stylesheet (`style.py`, `apply_theme`), bundled Inter under the SIL
   OFL (`fonts/`) and Tabler icons under MIT (`icons/`). `ui/labels.py` holds
-  `plain_label` and `button_label`. MainWindow hosts the three-pane workspace
+  `plain_label`, `wrap_label` (`WrapLabel`) and `button_label`. MainWindow hosts the three-pane workspace
   (`workspace.py`, with `hairline.py`, `brief_list.py` and `brief_detail.py`): the header
   (when Gmail was last checked, Sync and review, Cancel), the sidebar's pages and footer
   (Saved mail, Data, Settings, the Gmail and AI lines, Connect and Disconnect), the Today,
@@ -299,7 +299,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Use the `/mailbrief-ui` skill (`.claude/skills/mailbrief-ui/`) for any change under
   `src/mailbrief/ui`.
 - Colours come only from `ui/theme/tokens.py`; mail and AI text only through
-  `plain_label()` or a delegate's `drawText()`; button text through `button_label()`.
+  `plain_label()`, `wrap_label()` or a delegate's `drawText()`; button text through
+  `button_label()`.
 - Render the screenshot gallery with
   `MAILBRIEF_UI_SHOTS=scratch/ui-shots uv run pytest tests/ui/test_workspace.py -q --no-cov`
   and compare it with `docs/ui/mockup-three-pane-dark.png`.

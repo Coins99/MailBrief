@@ -34,7 +34,7 @@ from mailbrief.ui.brief_list import NO_SUBJECT, sender_text
 from mailbrief.ui.deadline_text import deadline_text
 from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS
 from mailbrief.ui.hairline import HairlineFrame
-from mailbrief.ui.labels import button_label, plain_label, short_button_label
+from mailbrief.ui.labels import button_label, plain_label, short_button_label, wrap_label
 from mailbrief.ui.proposals_view import effect_text
 from mailbrief.ui.theme import SMALL_PX, TEXT_PX, TITLE_PX, current_tokens, icon, icon_pixmap
 
@@ -138,26 +138,26 @@ class BriefDetailPane(QScrollArea):
     ) -> None:
         zone = ZoneInfo(timezone_name)
         layout = self._fresh()
-        self.title = plain_label(item.subject or NO_SUBJECT, px=TITLE_PX, medium=True)
+        self.title = wrap_label(item.subject or NO_SUBJECT, px=TITLE_PX, medium=True)
         layout.addWidget(self.title)
-        layout.addWidget(plain_label(sender_text(item.sender), tone="secondary", px=TEXT_PX))
-        layout.addWidget(plain_label(item.summary, px=TEXT_PX))
+        layout.addWidget(wrap_label(sender_text(item.sender), tone="secondary", px=TEXT_PX))
+        layout.addWidget(wrap_label(item.summary, px=TEXT_PX))
         if item.action_text and item.action_text != item.summary:
-            layout.addWidget(plain_label(item.action_text, tone="secondary", px=TEXT_PX))
+            layout.addWidget(wrap_label(item.action_text, tone="secondary", px=TEXT_PX))
         due = item_deadline_text(item, zone)
         if due is not None:
             layout.addLayout(self._deadline_row(due))
         for link in links:
             if not link.is_source:
                 layout.addWidget(
-                    plain_label(f"Continues: “{link.title}”", tone="secondary", px=TEXT_PX)
+                    wrap_label(f"Continues: “{link.title}”", tone="secondary", px=TEXT_PX)
                 )
         for view in item.suggestions:
             if view.state is SuggestionState.PENDING:
                 layout.addWidget(self._suggestion_card(view, links, zone))
             elif view.state is SuggestionState.ACCEPTED:
                 layout.addWidget(
-                    plain_label(f"Accepted: {view.suggestion.title}", tone="secondary", px=TEXT_PX)
+                    wrap_label(f"Accepted: {view.suggestion.title}", tone="secondary", px=TEXT_PX)
                 )
         for proposal in proposals:
             if proposal.state is ProposalState.PENDING:
@@ -172,7 +172,7 @@ class BriefDetailPane(QScrollArea):
         clock.setPixmap(icon_pixmap("clock", current_tokens().warning_fg, _ICON_PX, 2.0))
         clock.setAccessibleName("Deadline")
         row.addWidget(clock)
-        row.addWidget(plain_label(text, tone="warning", px=TEXT_PX), 1)
+        row.addWidget(wrap_label(text, tone="warning", px=TEXT_PX), 1)
         return row
 
     def _suggestion_card(
@@ -184,8 +184,8 @@ class BriefDetailPane(QScrollArea):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        layout.addWidget(plain_label(view.suggestion.title, px=TEXT_PX, medium=True))
-        layout.addWidget(plain_label(suggestion_meta(view, zone), tone="secondary", px=SMALL_PX))
+        layout.addWidget(wrap_label(view.suggestion.title, px=TEXT_PX, medium=True))
+        layout.addWidget(wrap_label(suggestion_meta(view, zone), tone="secondary", px=SMALL_PX))
         layout.addSpacing(4)
         decisions = QHBoxLayout()
         decisions.setSpacing(8)
@@ -228,9 +228,7 @@ class BriefDetailPane(QScrollArea):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(
-            plain_label(
-                f"Proposes for “{proposal.action_title}”: “{proposal.evidence}”", px=TEXT_PX
-            )
+            wrap_label(f"Proposes for “{proposal.action_title}”: “{proposal.evidence}”", px=TEXT_PX)
         )
         row = QHBoxLayout()
         row.setSpacing(8)
