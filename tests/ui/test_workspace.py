@@ -10,16 +10,19 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestStatus
 from mailbrief.domain.messages import EmailContact
+from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
 from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
 from mailbrief.ui.workspace import (
     EMPTY_BRIEF,
+    KEY_ROLE,
     ThreePaneWorkspace,
     brief_meta,
     brief_title,
@@ -112,6 +115,33 @@ def test_empty_brief_says_so(qtbot: QtBot) -> None:
     assert workspace.detail.title is None
     texts = [label.text() for label in workspace.detail.findChildren(QLabel)]
     assert EMPTY_BRIEF in texts
+
+
+def test_sidebar_rows_are_read_with_their_counts(qtbot: QtBot) -> None:
+    workspace = build(qtbot)  # Counts 5, 2 and 3.
+    sidebar = workspace.sidebar
+
+    def read(key: str) -> str:
+        row = next(
+            number
+            for number in range(sidebar.pages.rowCount())
+            if sidebar.pages.item(number).data(KEY_ROLE) == key
+        )
+        return str(sidebar.pages.item(row).data(Qt.ItemDataRole.AccessibleTextRole))
+
+    assert [read(key) for key in ("today", "actions", "waiting", "drafts", "briefs")] == [
+        "Today",
+        "Actions, 5",
+        "Waiting, 2",
+        "Drafts, 3",
+        "Briefs",
+    ]
+    sidebar.set_counts(None, 0, None)  # No count: the label alone.
+    assert [read(key) for key in ("actions", "waiting", "drafts")] == [
+        "Actions",
+        "Waiting, 0",
+        "Drafts",
+    ]
 
 
 def test_settings_lines_up_with_the_page_rows(qtbot: QtBot) -> None:
@@ -368,14 +398,28 @@ def test_unbroken_mail_text_never_widens_the_workspace(
     assert narrowest(hostile) == narrowest(brief.digest)
 
 
-def test_the_detail_keeps_a_readable_width_on_wide_windows(qtbot: QtBot) -> None:
-    from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
-
+def test_the_detail_content_is_capped_and_at_the_left(qtbot: QtBot) -> None:
     workspace = build(qtbot)
-    workspace.resize(1600, 900)
+    workspace.resize(*SIZES["mockup"])
     show(qtbot, workspace)
     content = workspace.detail.widget()
     assert content is not None
-    assert workspace.detail.viewport().width() > DETAIL_MAX_WIDTH
-    assert 0 < content.width() <= DETAIL_MAX_WIDTH == 720
+    assert content.maximumWidth() == DETAIL_MAX_WIDTH == 720
+    assert content.x() == 0  # Left-aligned.
+
+
+def test_the_detail_keeps_a_readable_width_on_wide_windows(qtbot: QtBot) -> None:
+    workspace = build(qtbot)
+    # As wide as the screen allows: a platform that keeps windows on screen (Cocoa; CI's Mac
+    # has about 1024 × 649) gives less than this, and offscreen gives all of it. The static
+    # lookup, not workspace.screen(): PySide re-parents the shared QScreen wrapper under the
+    # widget it was asked from, and deleting the widget then invalidates it for everyone.
+    screen = QGuiApplication.primaryScreen()
+    workspace.resize(screen.availableGeometry().size().expandedTo(QSize(1600, 900)))
+    show(qtbot, workspace)
+    if workspace.detail.viewport().width() <= DETAIL_MAX_WIDTH:
+        pytest.skip("screen too small for the cap to apply")
+    content = workspace.detail.widget()
+    assert content is not None
+    assert 0 < content.width() <= DETAIL_MAX_WIDTH
     assert content.x() == 0  # Left-aligned.

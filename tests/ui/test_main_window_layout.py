@@ -14,8 +14,8 @@ from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QAccessible, QDesktopServices, QKeySequence, QPixmap
+from PySide6.QtCore import QSize, QUrl
+from PySide6.QtGui import QAccessible, QDesktopServices, QGuiApplication, QKeySequence, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QStyle
 from pytestqt.qtbot import QtBot
 
@@ -104,7 +104,11 @@ async def test_the_central_widget_is_the_workspace_a_hairline_and_the_status_str
     strip = widgets[2]
     assert strip is not None and strip.objectName() == "statusStrip"
     assert window.status.parent() is strip and window.undo_button.parent() is strip
-    assert (window.width(), window.height()) == (1100, 720)
+    # The window asks for 1100 × 720; a small screen may give it less (CI's Mac: about
+    # 1024 × 649), so compare within the screen's available area and the window's maximum.
+    room = QGuiApplication.primaryScreen().availableGeometry().size()
+    room = room.boundedTo(window.maximumSize())
+    assert window.size().boundedTo(room) == QSize(1100, 720).boundedTo(room)
     header = window.workspace.header
     assert window.generate_button.parent() is header
     assert window.cancel_button.parent() is header

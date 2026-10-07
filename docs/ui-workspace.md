@@ -22,9 +22,9 @@ Run each check on Windows and on macOS, and note the date, platform and build.
 
 ## Screen readers
 
-- [ ] VoiceOver on macOS reads the sidebar rows by page name, the brief rows (subject,
-      sender and chips), the selected email in the detail pane and the status line. The
-      sidebar's counts are not read aloud yet.
+- [ ] VoiceOver on macOS reads the sidebar rows with their counts ("Actions, 5"), the
+      brief rows (subject, sender and chips), the selected email in the detail pane and
+      the status line.
 - [ ] Narrator on Windows reads the same four.
 - [ ] Both read the review step's rows by their full text, including "excluded in
       Settings", a tracked reply and a message left out earlier.

@@ -42,6 +42,12 @@ Read AGENTS.md first; its invariants win. Component specs and the token table ar
   stylesheet, font and tokens.
 - On macOS, UI tests need `MACOS_GUI_AVAILABLE=1` (or a real session) and run offscreen
   with `QT_QPA_PLATFORM=offscreen`.
+- Never assert a top-level window's requested size: CI's macOS screen is small (about
+  1024 × 649 available), and Cocoa keeps windows inside it. Derive expectations from the
+  actual geometry (a list shorter than its rows scrolls) or from the screen's available
+  area, and skip a check that needs a wider screen than the one present. Get the screen
+  with `QGuiApplication.primaryScreen()` or `screenAt()`, never `widget.screen()`, which
+  re-parents the shared QScreen wrapper under the widget.
 - Check colours with:
   `git grep -nE "#[0-9a-fA-F]{6}" src/mailbrief/ui ':!src/mailbrief/ui/theme/tokens.py'`
 

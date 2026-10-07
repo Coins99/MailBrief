@@ -43,10 +43,12 @@ FIRST_EMAIL = [
 
 
 def activate(qtbot: QtBot, window: MainWindow) -> None:
-    """Shortcuts and focus need the window shown and active."""
-    show(qtbot, window)
-    window.activateWindow()
-    qtbot.waitActive(window, timeout=2000)
+    """Shortcuts and focus need the window shown and active; this waits until it is, and
+    fails with a timeout when macOS won't activate it (a locked screen, for one)."""
+    with qtbot.waitActive(window, timeout=5000):
+        show(qtbot, window)
+        window.raise_()
+        window.activateWindow()
 
 
 @pytest.fixture

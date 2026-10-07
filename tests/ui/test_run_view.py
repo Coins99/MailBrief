@@ -220,19 +220,21 @@ async def test_a_long_list_fills_the_page_and_scrolls(
     backend.candidates = tuple(f"message-{number}" for number in range(20))
     await reviewing(window)
     QApplication.processEvents()
-    assert window.size().toTuple() == (1100, 720)
+    # Whatever size the screen allowed the window (CI's Mac: about 1024 × 649).
     shortlist = window.shortlist
     assert shortlist.count() == 20
-    assert shortlist.verticalScrollBar().isVisible()  # The list scrolls…
+    content = rows_height(window) + 2 * shortlist.frameWidth()
+    assert shortlist.height() < content  # Shorter than its rows…
+    assert shortlist.verticalScrollBar().isVisible()  # …so the list scrolls…
     page = window.findChild(QScrollArea, "runPage")
     assert page is not None
-    assert page.verticalScrollBar().maximum() == 0  # …and the page doesn't.
-    assert shortlist.height() < shortlist.maximumHeight()
+    assert not page.verticalScrollBar().isVisible()  # …and the page doesn't.
+    assert page.verticalScrollBar().maximum() == 0
     button = window.review_button
     button_bottom = button.mapTo(page.viewport(), QPoint(0, button.height())).y()
     assert page.viewport().height() - button_bottom <= 14  # The list fills the page.
     assert_no_sideways_scrolling(window)
-    window.resize(900, 720)  # Narrower than when the rows were laid out.
+    window.resize(window.width() - 100, window.height())  # Narrower than at layout.
     QApplication.processEvents()
     assert_no_sideways_scrolling(window)
     window.cancel()

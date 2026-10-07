@@ -384,8 +384,14 @@ class SidebarNav(QWidget):
         return str(self.nav.currentIndex().data(KEY_ROLE))
 
     def set_counts(self, actions: int | None, waiting: int | None, drafts: int | None) -> None:
+        """Show each count (None hides it); a screen reader reads "Actions, 5"."""
         for key, count in (("actions", actions), ("waiting", waiting), ("drafts", drafts)):
-            self.pages.item(self._row(key)).setData(count, COUNT_ROLE)
+            item = self.pages.item(self._row(key))
+            item.setData(count, COUNT_ROLE)
+            label = item.text()
+            item.setData(
+                label if count is None else f"{label}, {count}", Qt.ItemDataRole.AccessibleTextRole
+            )
 
     def set_note(self, text: str) -> None:
         self.note.setText(text)

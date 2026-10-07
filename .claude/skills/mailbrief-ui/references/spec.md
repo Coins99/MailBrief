@@ -127,7 +127,8 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   (Settings, settings, "Se&ttings"); an 11px muted note, hidden while empty; then
   `footer`, a QVBoxLayout (spacing 4) for the window's widgets. `page_requested(str)` (on
   selection, a click and Return/Enter; for `DIALOG_PAGES`, only a click or Return),
-  `settings_requested()`, `set_counts(actions, waiting, drafts)` (None hides a count),
+  `settings_requested()`, `set_counts(actions, waiting, drafts)` (None hides a count; a
+  row with a count is read as "{label}, {count}", one without as its label),
   `set_current(key)`, `current_key()`, `set_note(text)`.
 - `NavButton(text, icon_name, *, mnemonic=None, accessible_name=None)`: with a mnemonic
   (app-authored text such as "Se&ttings") Alt and that key press it; it still paints
@@ -256,3 +257,14 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   `_LABEL_X`), so it lines up with the pages.
 - `register_fonts()` returns False instead of raising; `apply_theme` then keeps Qt's font
   and still applies the colours, and `main()` runs unthemed if the theme fails.
+
+## Tests
+
+- Never assert a top-level window's requested size. CI's macOS screen is small (about
+  1024 × 649 available) and Cocoa keeps windows inside it, so a window asked for
+  1100 × 720 or 1600 × 900 gets less there; offscreen gets whatever it asks for. Derive
+  expectations from the actual geometry or from the screen's available area
+  (`QGuiApplication.primaryScreen().availableGeometry()`), and `pytest.skip` a behaviour
+  that needs more room than the screen has. Never call `widget.screen()` in a test: PySide
+  re-parents the shared QScreen wrapper under that widget, and deleting the widget
+  invalidates it.
