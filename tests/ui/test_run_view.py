@@ -2,14 +2,23 @@
 
 The gates themselves are unchanged: the same IDs come back, a blocked row is never
 checkable, the limit holds, Decline starts focused, and automatic runs never show the page.
+The shortlist fits its rows, never scrolls sideways and paints a visible check box. Every
+test here runs with the theme applied.
 """
 
 import asyncio
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QModelIndex, QPoint, QRect, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QStyleOptionViewItem, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QListWidgetItem,
+    QScrollArea,
+    QStyleOptionViewItem,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
@@ -19,11 +28,15 @@ from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.run_view import (
     EXCLUDED,
     LEFT_OUT,
+    NONE,
     ROW_ROLE,
     TRACKED_REPLY,
     ShortlistDelegate,
     ShortlistRow,
+    indicator_colors,
 )
+from mailbrief.ui.theme import DARK, LIGHT, ThemeMode, Tokens, apply_theme
+from tests.ui.test_main_window_layout import save_shot
 from tests.ui.test_workflow import FakeBackend
 
 
@@ -38,7 +51,10 @@ def backend() -> FakeBackend:
 
 
 @pytest.fixture
-async def window(qtbot: QtBot, backend: FakeBackend) -> MainWindow:
+async def window(
+    qtbot: QtBot, qapp: QApplication, themed: None, backend: FakeBackend
+) -> MainWindow:
+    apply_theme(qapp)
     result = MainWindow(backend)
     qtbot.addWidget(result)
     result.start(result.initialize)
@@ -79,16 +95,40 @@ def item(window: MainWindow, key: str) -> QListWidgetItem:
     raise AssertionError(key)
 
 
-def check_centre(window: MainWindow, key: str) -> QPoint:
-    """The centre of the style's check rect for ``key``'s row, in viewport coordinates."""
+def delegate(window: MainWindow) -> ShortlistDelegate:
+    found = window.shortlist.itemDelegate()
+    assert isinstance(found, ShortlistDelegate)
+    return found
+
+
+def row_option(window: MainWindow, key: str) -> tuple[QStyleOptionViewItem, QModelIndex]:
+    """The view's option for ``key``'s row, with its rect, and the row's index."""
     shortlist = window.shortlist
     index = shortlist.indexFromItem(item(window, key))
     option = QStyleOptionViewItem()
     option.initFrom(shortlist.viewport())
     option.rect = shortlist.visualRect(index)
-    delegate = shortlist.itemDelegate()
-    assert isinstance(delegate, ShortlistDelegate)
-    return delegate.check_rect(option, index).center()
+    return option, index
+
+
+def check_rect(window: MainWindow, key: str) -> QRect:
+    """The style's check rect for ``key``'s row, in viewport coordinates."""
+    return delegate(window).check_rect(*row_option(window, key))
+
+
+def check_centre(window: MainWindow, key: str) -> QPoint:
+    return check_rect(window, key).center()
+
+
+def rows_height(window: MainWindow) -> int:
+    shortlist = window.shortlist
+    return sum(shortlist.sizeHintForRow(number) for number in range(shortlist.count()))
+
+
+def assert_no_sideways_scrolling(window: MainWindow) -> None:
+    bar = window.shortlist.horizontalScrollBar()
+    assert not bar.isVisible()
+    assert bar.maximum() == 0  # Not even a hidden range a trackpad could scroll.
 
 
 async def test_each_step_shows_its_heading(window: MainWindow) -> None:
@@ -137,9 +177,7 @@ async def test_clicks_and_space_toggle_only_checkable_rows(window: MainWindow) -
     QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=centre)
     assert plain.checkState() == Qt.CheckState.Unchecked
     # The same place on the blocked row checks nothing: it has no check box.
-    blocked_rect = shortlist.visualRect(shortlist.indexFromItem(blocked))
-    centre.setY(blocked_rect.center().y())
-    QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=centre)
+    QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=check_centre(window, "blocked"))
     assert blocked.data(Qt.ItemDataRole.CheckStateRole) is None
     shortlist.setFocus()
     shortlist.setCurrentItem(plain)
@@ -149,6 +187,93 @@ async def test_clicks_and_space_toggle_only_checkable_rows(window: MainWindow) -
     QTest.keyClick(shortlist, Qt.Key.Key_Space)
     assert blocked.data(Qt.ItemDataRole.CheckStateRole) is None
     assert "blocked" not in window._checked_ids()
+    window.cancel()
+    await finish(window)
+
+
+async def test_a_short_list_is_as_tall_as_its_rows(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    backend.candidates = ("plain", "outside", "declined")
+    await reviewing(window)
+    QApplication.processEvents()
+    shortlist = window.shortlist
+    assert shortlist.count() == 3
+    content = rows_height(window) + 2 * shortlist.frameWidth()
+    assert shortlist.maximumHeight() == content
+    assert shortlist.height() == content  # No empty box below the rows.
+    assert not shortlist.verticalScrollBar().isVisible()
+    assert shortlist.verticalScrollBar().maximum() == 0
+    assert_no_sideways_scrolling(window)
+    # Continue follows the list; the height the list can't use goes below it.
+    list_bottom = shortlist.mapTo(window, QPoint(0, shortlist.height())).y()
+    button_top = window.review_button.mapTo(window, QPoint(0, 0)).y()
+    layout = window.review_panel.layout()
+    assert layout is not None and button_top - list_bottom == layout.spacing()
+    window.cancel()
+    await finish(window)
+
+
+async def test_a_long_list_fills_the_page_and_scrolls(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    backend.candidates = tuple(f"message-{number}" for number in range(20))
+    await reviewing(window)
+    QApplication.processEvents()
+    assert window.size().toTuple() == (1100, 720)
+    shortlist = window.shortlist
+    assert shortlist.count() == 20
+    assert shortlist.verticalScrollBar().isVisible()  # The list scrolls…
+    page = window.findChild(QScrollArea, "runPage")
+    assert page is not None
+    assert page.verticalScrollBar().maximum() == 0  # …and the page doesn't.
+    assert shortlist.height() < shortlist.maximumHeight()
+    button = window.review_button
+    button_bottom = button.mapTo(page.viewport(), QPoint(0, button.height())).y()
+    assert page.viewport().height() - button_bottom <= 14  # The list fills the page.
+    assert_no_sideways_scrolling(window)
+    window.resize(900, 720)  # Narrower than when the rows were laid out.
+    QApplication.processEvents()
+    assert_no_sideways_scrolling(window)
+    window.cancel()
+    await finish(window)
+
+
+async def test_blocked_rows_line_up_with_checkable_ones(window: MainWindow) -> None:
+    await reviewing(window)
+    rows = delegate(window)
+    plain = rows.text_left(*row_option(window, "plain"))
+    assert rows.text_left(*row_option(window, "blocked")) == plain
+    assert plain > check_rect(window, "plain").right()  # After the check box.
+    window.cancel()
+    await finish(window)
+
+
+@pytest.mark.parametrize("tokens", [DARK, LIGHT])
+def test_indicator_colors_follow_the_state_and_theme(tokens: Tokens) -> None:
+    assert indicator_colors(False, tokens) == (tokens.border_strong, NONE, NONE)
+    assert indicator_colors(True, tokens) == (
+        tokens.accent_border,
+        tokens.accent_bg,
+        tokens.accent_fg,
+    )
+
+
+async def test_the_unchecked_box_is_visible_in_dark(window: MainWindow) -> None:
+    await reviewing(window)
+    declined = item(window, "declined")
+    declined.setCheckState(Qt.CheckState.Unchecked)
+    assert window.shortlist.currentItem() is not declined  # Not selected: the plain panel.
+    QApplication.processEvents()
+    image = window.shortlist.viewport().grab().toImage()
+    dpr = image.devicePixelRatio()
+    box = check_rect(window, "declined")
+    y = round(box.center().y() * dpr)
+    # In device pixels: the outline's left edge, and the row inside the box.
+    edge = image.pixelColor(round(box.left() * dpr), y)
+    background = image.pixelColor(round(box.center().x() * dpr), y)
+    assert background.name() == DARK.panel
+    assert edge != background
     window.cancel()
     await finish(window)
 
@@ -205,3 +330,31 @@ async def test_automatic_runs_never_show_the_run_page(
     hold.set()
     await finish(window)
     assert window.workspace.current_page() == "today"
+
+
+@pytest.mark.parametrize("mode", list(ThemeMode))
+async def test_review_step_renders(
+    qtbot: QtBot, qapp: QApplication, themed: None, mode: ThemeMode
+) -> None:
+    """A checked row, an unchecked one, a tracked reply and an excluded row."""
+    apply_theme(qapp, mode)
+    backend = FakeBackend()
+    backend.candidates = ("plain", "declined", "outside", "blocked")
+    backend.outside = frozenset({"outside"})
+    backend.declined = frozenset({"declined"})
+    backend.blocked = frozenset({"blocked"})
+    window = MainWindow(backend)
+    qtbot.addWidget(window)
+    window.start(window.initialize)
+    await finish(window)
+    window.resize(1100, 720)
+    window.show()
+    QApplication.processEvents()
+    await reviewing(window)
+    item(window, "declined").setCheckState(Qt.CheckState.Unchecked)  # As a real review would.
+    QApplication.processEvents()
+    image = window.grab()
+    assert not image.isNull()
+    save_shot(image, f"run-review-{mode.value}")
+    window.cancel()
+    await finish(window)

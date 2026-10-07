@@ -2,16 +2,17 @@
 
 Each shortlist item keeps its text, ID, flags, check state and tooltip; the window adds a
 ``ShortlistRow`` under ``ROW_ROLE`` for painting only. Mail text is drawn with
-``drawText``, never as rich text or in a tooltip. The check indicator is drawn where the
-style places it, so the inherited ``editorEvent`` handles clicks and Space; a blocked row
-has no indicator and can never be checked.
+``drawText``, never as rich text or in a tooltip. MailBrief paints its own check box inside
+the rect the style gives the indicator, so the inherited ``editorEvent`` still handles
+clicks and Space; a blocked row has no check box and can never be checked, but its text
+starts where a checkable row's does.
 """
 
 from dataclasses import dataclass
 from typing import Final
 
 from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QPointF, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -30,7 +31,7 @@ from mailbrief.ui.brief_list import (
     sender_text,
 )
 from mailbrief.ui.hairline import hairline_pen
-from mailbrief.ui.theme import TEXT_PX, current_tokens, ui_font
+from mailbrief.ui.theme import TEXT_PX, Tokens, current_tokens, ui_font
 
 # The item's own ID stays under Qt.UserRole; the row to paint sits beside it.
 ROW_ROLE: Final = Qt.ItemDataRole.UserRole + 1
@@ -43,6 +44,11 @@ _PAD_V: Final = 8
 _PAD_H: Final = 12
 _CHECK_GAP: Final = 10
 _CHIP_GAP: Final = 4
+# The check box: its corner radius and the check mark's stroke (logical px).
+_BOX_RADIUS: Final = 3
+_MARK_WIDTH: Final = 1.5
+# No fill and no mark: an unchecked box is only its outline.
+NONE: Final = "transparent"
 
 _Index = QModelIndex | QPersistentModelIndex
 
@@ -88,18 +94,63 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def indicator_colors(checked: bool, tokens: Tokens) -> tuple[str, str, str]:
+    """The check box's (border, fill, mark): an outlined square when unchecked, an accent
+    square with a check mark when checked."""
+    if checked:
+        return tokens.accent_border, tokens.accent_bg, tokens.accent_fg
+    return tokens.border_strong, NONE, NONE
+
+
+def paint_indicator(painter: QPainter, rect: QRect, *, checked: bool) -> None:
+    """A rounded check box in ``rect`` with a one-device-pixel outline, and a check mark
+    when ``checked``."""
+    border, fill, mark = indicator_colors(checked, current_tokens())
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # Half a device pixel puts the outline on pixel centres, so it stays crisp.
+    inset = 0.5 / painter.device().devicePixelRatioF()
+    box = QRectF(rect).adjusted(inset, inset, -inset, -inset)
+    painter.setPen(hairline_pen(border))
+    painter.setBrush(QColor(fill))
+    painter.drawRoundedRect(box, _BOX_RADIUS, _BOX_RADIUS)
+    if checked:
+        pen = QPen(QColor(mark), _MARK_WIDTH)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        left, top, width, height = box.left(), box.top(), box.width(), box.height()
+        painter.drawPolyline(
+            [
+                QPointF(left + 0.26 * width, top + 0.52 * height),
+                QPointF(left + 0.43 * width, top + 0.69 * height),
+                QPointF(left + 0.75 * width, top + 0.33 * height),
+            ]
+        )
+    painter.restore()
+
+
 class ShortlistDelegate(QStyledItemDelegate):
     """Paints shortlist rows; rows without a ``ShortlistRow`` paint as Qt would."""
 
     def check_rect(self, option: QStyleOptionViewItem, index: _Index) -> QRect:
         """Where the style puts this row's check indicator, which is also where the
-        inherited ``editorEvent`` looks for clicks."""
+        inherited ``editorEvent`` looks for clicks. A blocked row has no indicator, so its
+        rect is computed as if it had one."""
         styled = QStyleOptionViewItem(option)
         self.initStyleOption(styled, index)
+        styled.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
         view = self._view()
         return self._style().subElementRect(
             QStyle.SubElement.SE_ItemViewItemCheckIndicator, styled, view
         )
+
+    def text_left(self, option: QStyleOptionViewItem, index: _Index) -> int:
+        """Where the row's text starts: after the check box, blocked or not."""
+        check = self.check_rect(option, index)
+        rect: QRect = option.rect
+        return check.right() + _CHECK_GAP if check.isValid() else rect.left() + _PAD_H
 
     def _view(self) -> QWidget | None:
         parent = self.parent()
@@ -123,31 +174,15 @@ class ShortlistDelegate(QStyledItemDelegate):
             painter.fillRect(
                 QRect(rect.left(), rect.top(), 2, rect.height()), QColor(tokens.accent_border)
             )
-        check = self.check_rect(option, index)
-        left = rect.left() + _PAD_H
-        if not row.blocked and check.isValid():
-            indicator = QStyleOptionViewItem(option)
-            self.initStyleOption(indicator, index)
-            indicator.rect = check
+        if not row.blocked:
             checked = index.data(Qt.ItemDataRole.CheckStateRole)
-            indicator.state = indicator.state & ~(
-                QStyle.StateFlag.State_On | QStyle.StateFlag.State_Off
-            )
-            indicator.state |= (
-                QStyle.StateFlag.State_On
-                if checked == Qt.CheckState.Checked or checked == Qt.CheckState.Checked.value
-                else QStyle.StateFlag.State_Off
-            )
-            self._style().drawPrimitive(
-                QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
-                indicator,
+            paint_indicator(
                 painter,
-                self._view(),
+                self.check_rect(option, index),
+                checked=checked == Qt.CheckState.Checked or checked == Qt.CheckState.Checked.value,
             )
-            left = check.right() + _CHECK_GAP
-        else:
-            # Blocked rows line up with checkable ones, with nothing to check.
-            left = max(left, check.right() + _CHECK_GAP) if check.isValid() else left
+        # Blocked rows line up with checkable ones, with nothing to check.
+        left = self.text_left(option, index)
         width = max(0, rect.right() - _PAD_H - left)
         top = rect.top() + _PAD_V
         title_font = ui_font(TEXT_PX, medium=True)
@@ -173,9 +208,10 @@ class ShortlistDelegate(QStyledItemDelegate):
         if row.chips:
             paint_chips(painter, row.chips, left, top + _CHIP_GAP)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.setPen(hairline_pen(tokens.hairline))
-        bottom = rect.bottom()
-        painter.drawLine(QPointF(rect.left(), bottom), QPointF(rect.right(), bottom))
+        if index.row() < index.model().rowCount() - 1:  # The list's frame closes the last row.
+            painter.setPen(hairline_pen(tokens.hairline))
+            bottom = rect.bottom()
+            painter.drawLine(QPointF(rect.left(), bottom), QPointF(rect.right(), bottom))
         if state & QStyle.StateFlag.State_HasFocus and (
             state & QStyle.StateFlag.State_KeyboardFocusChange
         ):
@@ -197,4 +233,6 @@ class ShortlistDelegate(QStyledItemDelegate):
         )
         if row.chips:
             height += _CHIP_GAP + chip_height()
-        return QSize(option.rect.width(), height)
+        # No width of its own: in list mode a row takes the viewport's width, so it never
+        # outgrows the viewport when the vertical scroll bar appears.
+        return QSize(0, height)

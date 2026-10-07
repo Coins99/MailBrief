@@ -189,9 +189,25 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
   `ShortlistDelegate` paints it like a brief row: selection fill and 2px `accent_border`
   bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary,
   chips ("Tracked reply" and "Left out earlier" accent, "Excluded in Settings"
-  warning). The check indicator sits at the style's `SE_ItemViewItemCheckIndicator`
-  rect, so the inherited `editorEvent` handles clicks and Space; a blocked row is muted,
-  has no indicator and can never be checked.
+  warning). A cosmetic hairline separates rows; the last row has none, since the list's
+  frame closes it.
+- Height: once `review()` fills the list, its maximum height is its rows' `sizeHintForRow`
+  plus twice the frame width. The shortlist has stretch 1 in `review_panel`, which has
+  stretch 1 in the run column, and a stretch after Continue takes the height the list
+  can't use: a short list shows no empty box, a long one fills the page and scrolls, and
+  the page itself never scrolls at 1100 × 720.
+- No horizontal scroll bar (`ScrollBarAlwaysOff`), and rows have no width of their own,
+  so list mode gives them the viewport's width and no hidden horizontal range exists.
+  Scrolling is per pixel.
+- Check box: MailBrief paints its own inside the style's `SE_ItemViewItemCheckIndicator`
+  rect, so the inherited `editorEvent` still handles clicks and Space. Unchecked: a
+  radius-3 rounded square with a cosmetic 1px `border_strong` outline. Checked:
+  `accent_bg` fill, `accent_border` outline and an antialiased `accent_fg` check mark.
+  `indicator_colors(checked, tokens)` returns (border, fill, mark), with `NONE`
+  ("transparent") for an unchecked box's fill and mark.
+- A blocked row is muted, has no check box and can never be checked. Its check rect is
+  computed as if it had one (`HasCheckIndicator` on a copied option), so its text starts
+  at the same `text_left(option, index)` as a checkable row's.
 - Automatic runs never show the run page.
 
 ## Buttons, lists and tabs

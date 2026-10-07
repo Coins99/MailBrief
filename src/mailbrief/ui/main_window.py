@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFrame,
     QHBoxLayout,
     QListWidget,
@@ -585,13 +586,19 @@ class MainWindow(QMainWindow):
         self.shortlist.setObjectName("shortlist")
         self.shortlist.setAccessibleName("Messages selected for analysis")
         self.shortlist.setItemDelegate(ShortlistDelegate(self.shortlist))
+        # Rows take the viewport's width, so nothing scrolls sideways.
+        self.shortlist.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.shortlist.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.shortlist.itemChanged.connect(self._selection_changed)
-        review_layout.addWidget(self.shortlist)
+        # Up to its rows' height (review() sets it), then it fills the page and scrolls.
+        review_layout.addWidget(self.shortlist, 1)
         self.review_button = QPushButton("Co&ntinue with selected messages")
         self.review_button.setObjectName("reviewButton")
         self.review_button.setProperty("variant", "primary")
         self.review_button.setAutoDefault(False)
         review_layout.addWidget(self.review_button, 0, Qt.AlignmentFlag.AlignLeft)
+        # Height the list can't use goes below Continue, never between the labels.
+        review_layout.addStretch(0)
         self.review_panel.hide()
         self.consent_panel = QWidget()
         self.consent_panel.setObjectName("consentPanel")
@@ -637,9 +644,9 @@ class MainWindow(QMainWindow):
         column.setMaximumWidth(_RUN_WIDTH)
         run_layout = QVBoxLayout(column)
         run_layout.setContentsMargins(0, 0, 0, 0)
-        run_layout.addWidget(self.review_panel)
+        run_layout.addWidget(self.review_panel, 1)
         run_layout.addWidget(self.consent_panel)
-        run_layout.addStretch(1)
+        run_layout.addStretch(0)
         centred.addStretch(1)
         centred.addWidget(column, 1000)
         centred.addStretch(1)
@@ -2137,6 +2144,7 @@ class MainWindow(QMainWindow):
             )
             item.setData(ROW_ROLE, row)
             self.shortlist.addItem(item)
+        self._fit_shortlist()
         self.review_panel.show()
         self.shortlist.setCurrentRow(0)
         self.shortlist.setFocus()
@@ -2147,6 +2155,12 @@ class MainWindow(QMainWindow):
         finally:
             self.review_panel.hide()
             self._leave_run_page()
+
+    def _fit_shortlist(self) -> None:
+        """The shortlist is never taller than its rows, so a short list shows no empty box."""
+        shortlist = self.shortlist
+        rows = sum(shortlist.sizeHintForRow(number) for number in range(shortlist.count()))
+        shortlist.setMaximumHeight(rows + 2 * shortlist.frameWidth())
 
     def _checked_ids(self) -> list[str]:
         """The checked messages; a blocked message never counts, even if checked."""
