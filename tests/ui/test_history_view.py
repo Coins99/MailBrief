@@ -1,4 +1,4 @@
-"""The Briefs dialog, viewing a past brief, and briefing a missed day from the window."""
+"""The Briefs panel, viewing a past brief, and briefing a missed day from the window."""
 
 import asyncio
 from datetime import UTC, date, datetime
@@ -11,7 +11,7 @@ from pytestqt.qtbot import QtBot
 from mailbrief.domain.digests import DigestStatus, SavedBriefSummary
 from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.ui.digest_view import DigestView
-from mailbrief.ui.history_view import BriefHistoryDialog
+from mailbrief.ui.history_view import BriefHistoryPanel
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.brief_view import shown_text
 from tests.ui.test_workflow import FakeBackend, finish
@@ -33,98 +33,98 @@ def summary(day: date, email: str = "owner@example.com", items: int = 2) -> Save
 
 
 @pytest.fixture
-def dialog(qtbot: QtBot) -> BriefHistoryDialog:
-    result = BriefHistoryDialog(None)  # type: ignore[arg-type]
+def panel(qtbot: QtBot) -> BriefHistoryPanel:
+    result = BriefHistoryPanel()
     qtbot.addWidget(result)
     return result
 
 
-def signals(dialog: BriefHistoryDialog) -> tuple[list[tuple[str, date]], list[date]]:
+def signals(panel: BriefHistoryPanel) -> tuple[list[tuple[str, date]], list[date]]:
     opened: list[tuple[str, date]] = []
     briefed: list[date] = []
-    dialog.open_requested.connect(lambda email, day: opened.append((email, day)))
-    dialog.generate_requested.connect(briefed.append)
+    panel.open_requested.connect(lambda email, day: opened.append((email, day)))
+    panel.generate_requested.connect(briefed.append)
     return opened, briefed
 
 
-def test_saved_briefs_and_missed_days_are_listed(dialog: BriefHistoryDialog) -> None:
-    dialog.configure(
+def test_saved_briefs_and_missed_days_are_listed(panel: BriefHistoryPanel) -> None:
+    panel.configure(
         (summary(TODAY), summary(PAST, items=1)),
         (SAVED_DAY, date(2026, 9, 2)),
         "owner@example.com",
         TODAY,
     )
 
-    rows = [dialog.saved.item(row).text() for row in range(dialog.saved.count())]
+    rows = [panel.saved.item(row).text() for row in range(panel.saved.count())]
     assert rows == [
         "2026-09-05 · complete · 2 items · owner@example.com",
         "2026-09-03 · complete · 1 item · owner@example.com",
     ]
-    assert dialog.missed.item(0).text() == "2026-09-04 · no brief"
-    assert dialog.missed_note.isHidden()
-    assert dialog.saved.accessibleName() and dialog.missed.accessibleName()
+    assert panel.missed.item(0).text() == "2026-09-04 · no brief"
+    assert panel.missed_note.isHidden()
+    assert panel.saved.accessibleName() and panel.missed.accessibleName()
     # Today's brief is open-only: today is briefed with Sync and review.
-    assert dialog.open_button.isEnabled() and not dialog.brief_button.isEnabled()
+    assert panel.open_button.isEnabled() and not panel.brief_button.isEnabled()
 
 
-def test_without_a_connection_missed_days_ask_for_one(dialog: BriefHistoryDialog) -> None:
-    opened, briefed = signals(dialog)
-    dialog.configure((summary(PAST),), (), None, TODAY)
+def test_without_a_connection_missed_days_ask_for_one(panel: BriefHistoryPanel) -> None:
+    opened, briefed = signals(panel)
+    panel.configure((summary(PAST),), (), None, TODAY)
 
-    assert dialog.missed_note.text() == "Connect Gmail to brief missed days."
-    dialog.brief_button.click()  # A saved past day is still offered, but needs Gmail.
+    assert panel.missed_note.text() == "Connect Gmail to brief missed days."
+    panel.brief_button.click()  # A saved past day is still offered, but needs Gmail.
 
     assert briefed == []
-    assert dialog.status.text() == "Connect Gmail to brief a past day."
-    dialog.open_button.click()
+    assert panel.status.text() == "Connect Gmail to brief a past day."
+    panel.open_button.click()
     assert opened == [("owner@example.com", PAST)]
 
 
-def test_briefing_a_missed_day_needs_no_confirmation(dialog: BriefHistoryDialog) -> None:
-    _, briefed = signals(dialog)
-    dialog.configure((summary(TODAY),), (SAVED_DAY,), "owner@example.com", TODAY)
+def test_briefing_a_missed_day_needs_no_confirmation(panel: BriefHistoryPanel) -> None:
+    _, briefed = signals(panel)
+    panel.configure((summary(TODAY),), (SAVED_DAY,), "owner@example.com", TODAY)
 
-    dialog.missed.setCurrentRow(0)
-    assert dialog.saved.currentRow() == -1  # One day is chosen at a time.
-    assert not dialog.open_button.isEnabled()
-    dialog.brief_button.click()
+    panel.missed.setCurrentRow(0)
+    assert panel.saved.currentRow() == -1  # One day is chosen at a time.
+    assert not panel.open_button.isEnabled()
+    panel.brief_button.click()
 
     assert briefed == [SAVED_DAY]
 
 
-def test_replacing_a_saved_brief_asks_first(dialog: BriefHistoryDialog) -> None:
-    _, briefed = signals(dialog)
-    dialog.configure((summary(PAST),), (), "owner@example.com", TODAY)
+def test_replacing_a_saved_brief_asks_first(panel: BriefHistoryPanel) -> None:
+    _, briefed = signals(panel)
+    panel.configure((summary(PAST),), (), "owner@example.com", TODAY)
 
-    dialog.brief_button.click()
-    assert dialog.confirm_label.text() == "This replaces the saved brief for 2026-09-03."
+    panel.brief_button.click()
+    assert panel.confirm_label.text() == "This replaces the saved brief for 2026-09-03."
     assert briefed == []
-    dialog.keep_button.click()
-    assert dialog.confirm_panel.isHidden() and briefed == []
+    panel.keep_button.click()
+    assert panel.confirm_panel.isHidden() and briefed == []
 
-    dialog.brief_button.click()
-    dialog.replace_button.click()
+    panel.brief_button.click()
+    panel.replace_button.click()
     assert briefed == [PAST]
 
 
-def test_another_account_s_brief_can_t_be_replaced(dialog: BriefHistoryDialog) -> None:
-    _, briefed = signals(dialog)
-    dialog.configure((summary(PAST, "other@example.com"),), (), "owner@example.com", TODAY)
-    dialog.brief_button.click()
-    assert briefed == [] and "another account" in dialog.status.text()
+def test_another_account_s_brief_can_t_be_replaced(panel: BriefHistoryPanel) -> None:
+    _, briefed = signals(panel)
+    panel.configure((summary(PAST, "other@example.com"),), (), "owner@example.com", TODAY)
+    panel.brief_button.click()
+    assert briefed == [] and "another account" in panel.status.text()
 
 
-def test_days_outside_the_last_seven_can_t_be_briefed(dialog: BriefHistoryDialog) -> None:
-    dialog.configure((summary(date(2026, 8, 28)),), (), "owner@example.com", TODAY)
-    assert not dialog.brief_button.isEnabled()
+def test_days_outside_the_last_seven_can_t_be_briefed(panel: BriefHistoryPanel) -> None:
+    panel.configure((summary(date(2026, 8, 28)),), (), "owner@example.com", TODAY)
+    assert not panel.brief_button.isEnabled()
 
 
-def test_return_opens_a_saved_brief(dialog: BriefHistoryDialog) -> None:
-    opened, _ = signals(dialog)
-    dialog.configure((summary(PAST),), (), "owner@example.com", TODAY)
-    dialog.show()
-    dialog.saved.setFocus()
-    QTest.keyClick(dialog.saved, Qt.Key.Key_Return)
+def test_return_opens_a_saved_brief(panel: BriefHistoryPanel) -> None:
+    opened, _ = signals(panel)
+    panel.configure((summary(PAST),), (), "owner@example.com", TODAY)
+    panel.show()
+    panel.saved.setFocus()
+    QTest.keyClick(panel.saved, Qt.Key.Key_Return)
     assert opened == [("owner@example.com", PAST)]
 
 
@@ -184,21 +184,21 @@ async def review_and_approve(window: MainWindow) -> None:
 async def open_past(window: MainWindow) -> None:
     window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
-    window.history_dialog.saved.setCurrentRow(1)  # 2026-09-04 (latest), then 2026-09-03.
-    window.history_dialog.open_button.click()
+    window.history_panel.saved.setCurrentRow(1)  # 2026-09-04 (latest), then 2026-09-03.
+    window.history_panel.open_button.click()
     await finish(window)
 
 
-async def test_the_dialog_lists_the_connected_account_s_missed_days(
+async def test_the_page_lists_the_connected_account_s_missed_days(
     window: MainWindow,
 ) -> None:
     window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
 
-    assert window.history_dialog.isVisible()
-    assert window.history_dialog.saved.count() == 2
-    assert window.history_dialog.missed.item(0).text() == "2026-09-02 · no brief"
-    window.history_dialog.reject()
+    assert window.workspace.current_page() == "briefs"
+    assert window.history_panel.saved.count() == 2
+    assert window.history_panel.missed.item(0).text() == "2026-09-02 · no brief"
+    window._show_page("today")
 
 
 async def test_opening_a_past_brief_shows_the_banner_until_back_to_latest(
@@ -209,7 +209,7 @@ async def test_opening_a_past_brief_shows_the_banner_until_back_to_latest(
     assert heading(window).startswith("Thu Sep 3")
     assert not window.viewing.isHidden()
     assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
-    assert not window.history_dialog.isVisible()
+    assert window.workspace.current_page() == "today"
 
     window.latest_button.click()
     await finish(window)
@@ -221,7 +221,7 @@ async def test_opening_a_past_brief_shows_the_banner_until_back_to_latest(
 async def test_opening_the_latest_brief_shows_no_banner(window: MainWindow) -> None:
     window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
-    window.history_dialog.open_button.click()  # The first row: the latest brief.
+    window.history_panel.open_button.click()  # The first row: the latest brief.
     await finish(window)
     assert window.viewing.isHidden()
 
@@ -247,8 +247,8 @@ async def test_briefing_a_missed_day_passes_its_date_and_shows_it(
 ) -> None:
     window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
-    window.history_dialog.missed.setCurrentRow(0)
-    window.history_dialog.brief_button.click()
+    window.history_panel.missed.setCurrentRow(0)
+    window.history_panel.brief_button.click()
     await review_and_approve(window)
 
     assert backend.generated_days[-1] == date(2026, 9, 2)
@@ -261,12 +261,12 @@ async def test_briefing_a_saved_day_asks_before_replacing(
 ) -> None:
     window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
-    window.history_dialog.saved.setCurrentRow(1)
-    window.history_dialog.brief_button.click()
+    window.history_panel.saved.setCurrentRow(1)
+    window.history_panel.brief_button.click()
     assert backend.generated_days == []
-    assert "replaces the saved brief for 2026-09-03" in window.history_dialog.confirm_label.text()
+    assert "replaces the saved brief for 2026-09-03" in window.history_panel.confirm_label.text()
 
-    window.history_dialog.replace_button.click()
+    window.history_panel.replace_button.click()
     await review_and_approve(window)
 
     assert backend.generated_days == [PAST]
@@ -280,16 +280,16 @@ async def test_offline_briefing_says_a_connection_is_needed(
     await finish(window)
     window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
-    dialog = window.history_dialog
-    assert dialog.missed.count() == 0 and dialog.missed_note.text().startswith("Connect Gmail")
+    panel = window.history_panel
+    assert panel.missed.count() == 0 and panel.missed_note.text().startswith("Connect Gmail")
 
-    dialog.saved.setCurrentRow(1)
-    dialog.brief_button.click()
-    assert dialog.status.text() == "Connect Gmail to brief a past day."
+    panel.saved.setCurrentRow(1)
+    panel.brief_button.click()
+    assert panel.status.text() == "Connect Gmail to brief a past day."
     window._request_brief_day(PAST)  # Even a direct request can't start without Gmail.
     assert window.task is not None and window.task.done()
     assert backend.generated_days == []
-    dialog.reject()
+    window._show_page("today")
 
 
 async def test_sync_and_review_returns_to_the_latest_brief(

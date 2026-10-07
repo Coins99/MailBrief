@@ -132,7 +132,7 @@ from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.hairline import HairlineDivider
-from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
+from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryPanel
 from mailbrief.ui.labels import plain_label, wrap_label
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
@@ -480,9 +480,9 @@ class MainWindow(QMainWindow):
         self.proposals_dialog.dismiss_requested.connect(
             lambda proposal_id: self._start_from_link(lambda: self._dismiss_proposal(proposal_id))
         )
-        self.history_dialog = BriefHistoryDialog(self)
-        self.history_dialog.open_requested.connect(self._request_open_brief)
-        self.history_dialog.generate_requested.connect(self._request_brief_day)
+        self.history_panel = BriefHistoryPanel()
+        self.history_panel.open_requested.connect(self._request_open_brief)
+        self.history_panel.generate_requested.connect(self._request_brief_day)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
         self.auto_send_dialog = AutoSendDialog(self.settings_dialog)
@@ -614,6 +614,7 @@ class MainWindow(QMainWindow):
         self.drafts_panel = DraftsPanel()
         self.drafts_panel.draft_requested.connect(self._request_draft)
         workspace.add_page("drafts", _page(self.drafts_panel, "draftsPage", "Drafts"))
+        workspace.add_page("briefs", _page(self.history_panel, "briefsPage", "Briefs"))
         # Sidebar counts; each refresh replaces only its own, and a failure keeps them.
         self._counts: dict[str, int | None] = {"actions": None, "waiting": None, "drafts": None}
         # The status strip under the workspace.
@@ -680,7 +681,7 @@ class MainWindow(QMainWindow):
         self.data_button.setEnabled(not busy and self.data_dialog is not None)
         if self.data_dialog is not None:
             self.data_dialog.set_busy(busy)
-        self.history_dialog.set_busy(busy)
+        self.history_panel.set_busy(busy)
         self.latest_button.setEnabled(not busy)
         self.cached_dialog.set_busy(busy)
         self.proposals_dialog.set_busy(busy)
@@ -725,12 +726,12 @@ class MainWindow(QMainWindow):
 
     def _request_page(self, key: str) -> None:
         if key == "briefs":
-            # A dialog, not a page: the sidebar stays on the page shown.
+            # Briefs loads first; the sidebar moves once its page shows.
+            self.workspace.sidebar.set_current(self._sidebar_key())
             if not self._ready:
                 self.status.setText(_BRIEFS_UNAVAILABLE)
             elif not self.start(self._open_history) and not self._closing:
                 self.status.setText(_BUSY)
-            self.workspace.sidebar.set_current(self._sidebar_key())
             return
         self._show_page(key)
 
@@ -797,7 +798,8 @@ class MainWindow(QMainWindow):
         await self._refresh_actions()
         await self._refresh_drafts()
         self.cached_dialog.reject()
-        self.history_dialog.reject()
+        if self.workspace.current_page() == "briefs":
+            await self._load_history()
         self.proposals_dialog.reject()
         if self.data_dialog is not None:
             self.data_dialog.configure(await self.backend.cached_accounts(), available=True)
@@ -1553,8 +1555,6 @@ class MainWindow(QMainWindow):
                 self.cached_dialog.status.setText(self.status.text())
             if self.settings_dialog.isVisible():
                 self.settings_dialog.status.setText(self.status.text())
-            if self.history_dialog.isVisible():
-                self.history_dialog.status.setText(self.status.text())
             self.review_panel.hide()
             self.consent_panel.hide()
             self.shortlist.clear()
@@ -1754,14 +1754,17 @@ class MainWindow(QMainWindow):
     # Saved briefs by day. Opening one needs no connection; briefing a past day is the
     # owner's explicit choice, one day at a time, for the connected account.
 
-    async def _open_history(self) -> None:
+    async def _load_history(self) -> None:
         briefs = await self.backend.list_briefs()
         email = self._account_email
         missed = await self.backend.missed_days(email) if email is not None else ()
         today = self.now().astimezone(self.zone).date()
-        self.history_dialog.configure(briefs, missed, email, today)
+        self.history_panel.configure(briefs, missed, email, today)
+
+    async def _open_history(self) -> None:
+        await self._load_history()
         self.status.setText("Open a saved brief, or brief a missed day.")
-        self.history_dialog.open()
+        self._show_page("briefs")
 
     def _request_open_brief(self, account_email: str, local_date: date) -> None:
         self.start(lambda: self._show_brief(account_email, local_date), cancellable=False)
@@ -1771,8 +1774,7 @@ class MainWindow(QMainWindow):
         if digest is None:
             self.status.setText("That brief is no longer saved.")
             return
-        await self._view(digest)
-        self.history_dialog.accept()
+        await self._view(digest)  # Back on Today.
         self.status.setText(f"Showing the brief for {local_date.isoformat()}.")
 
     async def _view(self, digest: DailyDigest) -> None:
@@ -1792,14 +1794,13 @@ class MainWindow(QMainWindow):
 
     def _request_brief_day(self, local_date: date) -> None:
         if self._account_email is None:
-            self.history_dialog.status.setText(NEEDS_CONNECTION)
+            self.history_panel.status.setText(NEEDS_CONNECTION)
             return
-        self.history_dialog.accept()
         self.start(lambda: self._generate(local_date))
 
     async def _generate(self, local_date: date | None = None) -> None:
-        """Brief today (Sync and review), or a past day chosen in Briefs…. However it ends,
-        the next automatic run is an interval later (ADR 0017)."""
+        """Brief today (Sync and review), or a past day chosen on the Briefs page. However
+        it ends, the next automatic run is an interval later (ADR 0017)."""
         try:
             await self._generate_brief(local_date)
         finally:
@@ -1867,13 +1868,15 @@ class MainWindow(QMainWindow):
     # no review, no consent question and no dialog; everything it says goes to the status line.
 
     def _dialog_open(self) -> bool:
-        """Whether the owner is working in one of the window's dialogs or editors."""
+        """Whether the owner is working in one of the window's dialogs or editors, or on
+        the Briefs page."""
+        if self.workspace.current_page() == "briefs":
+            return True
         return (self.data_dialog is not None and self.data_dialog.isVisible()) or any(
             widget.isVisible()
             for widget in (
                 self.settings_dialog,
                 self.auto_send_dialog,
-                self.history_dialog,
                 self.cached_dialog,
                 self.proposals_dialog,
                 self.action_editor,
@@ -2156,7 +2159,6 @@ class MainWindow(QMainWindow):
         self.auto_send_dialog.reject()
         self.settings_dialog.reject()
         self.cached_dialog.reject()
-        self.history_dialog.reject()
         self.proposals_dialog.reject()
         if self.data_dialog is not None:
             self.data_dialog.reject()

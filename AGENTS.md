@@ -33,7 +33,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
   limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
   See ADR 0014. Brief history and bounded catch-up (Part 3) implemented, awaiting live
-  acceptance: the desktop Briefs… dialog and `brief --date`, `briefs list` and
+  acceptance: the desktop Briefs page and `brief --date`, `briefs list` and
   `briefs show`. Thread tracking backend (Part 4) implemented, awaiting live acceptance:
   the threads of open actions are checked after today's sync (`actions list`,
   `actions seen`). See ADR 0015. Thread activity in the desktop and "Add to" an existing
@@ -104,7 +104,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
   (`drafting_panel.py`), the Settings Preferences tab (`preferences_view.py`) and the
-  Briefs… dialog for saved briefs and missed days (`history_view.py`), the Proposals dialog
+  Briefs page for saved briefs and missed days (`history_view.py`), the Proposals dialog
   for one action and the wording of a proposal's effect (`proposals_view.py`); `lists.py`
   holds `ActivatingList`, where Return or Enter activates a row once on every platform.
 - `ui/scheduler.py` (`RefreshScheduler`, the minute tick behind timed refresh) and

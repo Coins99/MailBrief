@@ -65,9 +65,6 @@ PAGES: Final = (
     ("drafts", "Drafts", "pencil"),
     ("briefs", "Briefs", "calendar"),
 )
-# Pages that open a dialog: moving the selection onto one with the arrow keys requests
-# nothing; a click or Return does.
-DIALOG_PAGES: Final = frozenset({"briefs"})
 EMPTY_BRIEF: Final = "No analyzed messages in this brief."
 
 KEY_ROLE: Final = Qt.ItemDataRole.UserRole + 1
@@ -304,8 +301,7 @@ class NavButton(QPushButton):
 
 
 class SidebarNav(QWidget):
-    """``page_requested(key)`` on selection, a click and Return or Enter;
-    ``settings_requested``. A page in DIALOG_PAGES is requested only by a click or Return.
+    """``page_requested(key)`` on selection and on Return or Enter; ``settings_requested``.
 
     Below the pages: Saved mail, Data, Settings, the note, then ``footer`` for the window's
     own widgets."""
@@ -342,7 +338,6 @@ class SidebarNav(QWidget):
         self.nav.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._quiet = False
         self.nav.selectionModel().currentChanged.connect(self._current_changed)
-        self.nav.clicked.connect(self._clicked)
         self.nav.page_activated.connect(self.page_requested)
         layout.addWidget(self.nav)
         layout.addStretch(1)
@@ -374,16 +369,8 @@ class SidebarNav(QWidget):
         return next(number for number, page in enumerate(PAGES) if page[0] == key)
 
     def _current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
-        if self._quiet or not current.isValid():
-            return
-        key = str(current.data(KEY_ROLE))
-        if key not in DIALOG_PAGES:
-            self.page_requested.emit(key)
-
-    def _clicked(self, index: QModelIndex) -> None:
-        key = str(index.data(KEY_ROLE))
-        if key in DIALOG_PAGES:
-            self.page_requested.emit(key)
+        if not self._quiet and current.isValid():
+            self.page_requested.emit(str(current.data(KEY_ROLE)))
 
     def set_current(self, key: str) -> None:
         """Show ``key`` as the current page without requesting it."""

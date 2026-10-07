@@ -159,10 +159,14 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
   `QProxyStyle`, never underlines mnemonics; Alt and the letter still work.
 - Pages: `today` (the "Viewing the brief for …" banner and the retry row in `today_top`),
   `run` (`runPage`, a scroll area: the review and consent panels, margins 16, 14, 16,
-  14), `actions` and `drafts` (the panels, margins 12). Today shows `run` while the review
-  or consent waits. Actions opens the Open tab and Waiting the Waiting tab; changing the
-  tab moves the sidebar. Briefs opens the saved-briefs dialog and the sidebar stays on the
-  page shown.
+  14), `actions`, `drafts` and `briefs` (the panels, margins 12). Today shows `run` while
+  the review or consent waits. Actions opens the Open tab and Waiting the Waiting tab;
+  changing the tab moves the sidebar. Briefs is a page like the others: choosing it loads
+  the saved briefs and missed days through `start()` (refused with a reason while busy or
+  before local storage loads), then shows `BriefHistoryPanel` (`ui/history_view.py`): a
+  15px Medium "Briefs" heading, the saved and missed lists, outline Open and Brief this
+  day…, and a Replace / Keep it confirmation, each button row ending in a stretch.
+  Opening a saved brief returns to Today. An automatic refresh waits while Briefs shows.
 
 ## Stylesheet additions from the Phase 4 visual pass
 

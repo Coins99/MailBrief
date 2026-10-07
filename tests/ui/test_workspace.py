@@ -19,7 +19,6 @@ from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestStatus
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
 from mailbrief.ui.workspace import (
-    DIALOG_PAGES,
     EMPTY_BRIEF,
     ThreePaneWorkspace,
     brief_meta,
@@ -192,24 +191,19 @@ def test_sidebar_footer_order_and_mnemonics(qtbot: QtBot) -> None:
     assert sidebar.note.isHidden()
 
 
-def test_dialog_pages_open_on_a_click_never_on_the_arrow_keys(qtbot: QtBot) -> None:
+def test_arrow_keys_reach_briefs_like_any_page(qtbot: QtBot) -> None:
     workspace = build(qtbot)
     workspace.resize(*SIZES["mockup"])
     show(qtbot, workspace)
     sidebar = workspace.sidebar
     pages = QSignalSpy(sidebar.page_requested)
-    assert "briefs" in DIALOG_PAGES
     sidebar.set_current("drafts")
     sidebar.nav.setFocus()
     QTest.keyClick(sidebar.nav, Qt.Key.Key_Down)
     assert sidebar.current_key() == "briefs"
-    assert pages.count() == 0
-    QTest.keyClick(sidebar.nav, Qt.Key.Key_Up)
-    assert pages.at(0) == ["drafts"]  # An ordinary page is requested as it is selected.
-    briefs = sidebar.pages.index(4, 0)
-    centre = sidebar.nav.visualRect(briefs).center()
-    QTest.mouseClick(sidebar.nav.viewport(), Qt.MouseButton.LeftButton, pos=centre)
     assert pages.at(pages.count() - 1) == ["briefs"]
+    QTest.keyClick(sidebar.nav, Qt.Key.Key_Up)
+    assert pages.at(pages.count() - 1) == ["drafts"]
 
 
 def brief_with(**updates: object) -> DailyDigest:

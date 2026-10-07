@@ -342,7 +342,6 @@ async def test_a_refresh_waits_a_minute_while_another_operation_runs(
     "name",
     [
         "settings_dialog",
-        "history_dialog",
         "cached_dialog",
         "proposals_dialog",
         "auto_send_dialog",
@@ -365,6 +364,21 @@ async def test_a_refresh_waits_while_the_owner_is_in_a_dialog(
     finally:
         dialog.hide()
 
+    await due(window)
+    assert backend.automatic_calls == 1
+
+
+async def test_a_refresh_waits_while_the_briefs_page_shows(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    window._show_page("briefs")
+    window._refresh_due()
+
+    assert backend.automatic_calls == 0
+    assert due_at(window) == NOW  # Retried at the next tick, not skipped.
+    assert window.task is None or window.task.done()
+    window._show_page("today")
     await due(window)
     assert backend.automatic_calls == 1
 

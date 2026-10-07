@@ -25,6 +25,7 @@ from mailbrief.ports.errors import AuthenticationRequiredError
 from mailbrief.ui.actions_view import ActionsPanel
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.hairline import HairlineDivider, HairlineFrame
+from mailbrief.ui.history_view import NEEDS_CONNECTION
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.theme import SIDEBAR_WIDTH, TITLE_PX, ThemeMode, apply_theme
 from tests.factories import make_action
@@ -163,14 +164,41 @@ async def test_the_sidebar_opens_drafts_and_returns_to_today(window: MainWindow)
     assert window.workspace.sidebar.current_key() == "today"
 
 
-async def test_briefs_opens_the_dialog_and_the_sidebar_stays_put(window: MainWindow) -> None:
+async def test_briefs_loads_then_shows_its_page(window: MainWindow, backend: FakeBackend) -> None:
     window.workspace.sidebar.page_requested.emit("drafts")
     window.workspace.sidebar.page_requested.emit("briefs")
-    await finish(window)
-    assert window.history_dialog.isVisible()
-    assert window.workspace.current_page() == "drafts"
+    # Until it has loaded, the sidebar stays on the page shown.
     assert window.workspace.sidebar.current_key() == "drafts"
-    window.history_dialog.reject()
+    assert window.task is not None
+    await finish(window)
+    assert window.workspace.current_page() == "briefs"
+    assert window.workspace.sidebar.current_key() == "briefs"
+    assert window.history_panel.saved.count() == len(await backend.list_briefs())
+    assert window.status.text() == "Open a saved brief, or brief a missed day."
+
+
+async def test_opening_a_saved_brief_lands_on_today_with_the_banner(
+    qtbot: QtBot, window: MainWindow, backend: FakeBackend
+) -> None:
+    show(qtbot, window)
+    past = backend.saved.model_copy(update={"local_date": backend.saved.local_date.replace(day=5)})
+    backend.briefs[(past.account_id, past.local_date)] = past
+    window.history_panel.open_requested.emit(past.account_id, past.local_date)
+    await finish(window)
+    assert window.workspace.current_page() == "today"
+    assert window.workspace.sidebar.current_key() == "today"
+    assert window.viewing.isVisible()
+
+
+async def test_briefing_a_day_without_gmail_starts_nothing(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    window.start(window._disconnect)
+    await finish(window)
+    done = window.task
+    window.history_panel.generate_requested.emit(backend.saved.local_date.replace(day=5))
+    assert window.history_panel.status.text() == NEEDS_CONNECTION
+    assert window.task is done and backend.generated_days == []
 
 
 async def test_briefs_while_busy_says_so(window: MainWindow) -> None:
@@ -183,7 +211,7 @@ async def test_briefs_while_busy_says_so(window: MainWindow) -> None:
     await asyncio.sleep(0)
     window.workspace.sidebar.page_requested.emit("briefs")
     assert window.status.text() == BUSY
-    assert not window.history_dialog.isVisible()
+    assert window.workspace.current_page() == "today"
     assert window.workspace.sidebar.current_key() == "today"
     release.set()
     await finish(window)
@@ -479,6 +507,11 @@ async def test_pages_render(
         image = window.grab()
         assert not image.isNull()
         save_shot(image, f"page-{key}-{mode.value}")
+    window.workspace.sidebar.page_requested.emit("briefs")  # Loads, then shows the page.
+    await finish(window)
+    assert window.workspace.current_page() == "briefs"
+    QApplication.processEvents()
+    save_shot(window.grab(), f"page-briefs-{mode.value}")
     window.start(window._generate)  # The review shows itself on the run page.
     await settle()
     assert window.workspace.current_page() == "run"
