@@ -41,6 +41,31 @@ later use after Microsoft Entra access is resolved.
   See [M9 durability](docs/m9-durability.md) and the
   [owner's live-validation checklist](docs/m9-live-validation.md).
 
+## The desktop window
+
+![MailBrief in its dark theme: the header, the sidebar, the brief and the selected email](docs/ui/workspace-dark.png)
+
+MailBrief is one window with three panes (PR #21):
+
+- **Header**: when Gmail was last checked, then **Sync and review**, and **Cancel** while
+  something runs.
+- **Sidebar**: the pages **Today**, **Actions**, **Waiting**, **Drafts** and **Briefs**,
+  with counts for actions, waiting actions and drafts. Below them, **Saved mail** (the
+  offline browser of cached metadata), **Data** (backup, exports and recovery) and
+  **Settings**, the Gmail and AI status, and **Connect Gmail** or **Disconnect**.
+- **Today**: the brief's emails by section, and the selected email with its summary,
+  deadline, suggested actions, proposed updates, **Draft a reply** and **Open in Gmail**.
+- **Status strip**: the latest status along the bottom, with **Undo** after a change you
+  can reverse.
+
+**Sync and review** runs in two steps on its own page. Step 1, **Choose what MailBrief
+reads**: only the messages you leave checked have their bodies downloaded. Step 2,
+**Approve sending to Groq**: approve or decline what will be sent; Decline starts focused.
+
+Ctrl+1 to Ctrl+5 (Cmd+1 to Cmd+5 on macOS) open Today, Actions, Waiting, Drafts and
+Briefs. Tab runs from Sync and review through the sidebar and the page to Undo. The theme
+is dark only for now.
+
 ## Start here
 
 - [Scope](docs/mvp-scope.md)

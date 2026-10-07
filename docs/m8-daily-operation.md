@@ -45,8 +45,8 @@ Groq and the desktop. Run them in order; the exit test comes first.
 5. Each view says exactly what it covers:
    - a catch-up brief for yesterday says it covers the messages still in the Inbox when it
      was made;
-   - Briefs… and the offline browser say which days have a brief, which are missed, and that
-     a past day needs a connection;
+   - the Briefs page and Saved mail in the sidebar say which days have a brief, which are
+     missed, and that a past day needs a connection;
    - a partial sync (stop it, or hit a rate limit) is labelled partial in the status line
      and the brief's coverage line, never "complete".
 
@@ -64,7 +64,7 @@ Groq and the desktop. Run them in order; the exit test comes first.
 
 ### History and catch-up (Part 3)
 
-1. Brief today, then yesterday from Briefs…: after a restart, today's brief shows.
+1. Brief today, then yesterday from the Briefs page: after a restart, today's brief shows.
 2. Archive one of yesterday's messages in Gmail and brief yesterday again: the replace
    confirmation appears first, and the archived message is gone.
 3. Accept a suggestion while viewing a past brief, then Undo: the view stays on that brief.
@@ -171,10 +171,10 @@ save happened since Settings opened, the save is refused with "Preferences chang
 they were loaded; reopen Settings."
 
 The window applies your time zone and drafting defaults at startup and after each save or
-reset, and redraws the brief, actions and drafts. Browse saved mail opens on today in your
-time zone, whatever the computer's zone, each time you open it. Changing the time zone changes where
-today starts: today's messages are analyzed again once, because the analysis includes the
-zone, and the change can start a new day's brief.
+reset, and redraws the brief, actions and drafts. Saved mail in the sidebar opens on today
+in your time zone, whatever the computer's zone, each time you open it. Changing the time
+zone changes where today starts: today's messages are analyzed again once, because the
+analysis includes the zone, and the change can start a new day's brief.
 
 If the saved preferences can't be read, the window says so, and briefs and AI drafting
 refuse to run until you reset them in Settings > Preferences. Running with defaults
@@ -282,9 +282,9 @@ Part 3 is implemented and awaits live acceptance. It needs no migration.
 
 ### Desktop
 
-- **Briefs…** opens a dialog with **Saved briefs** (date · status · items · account;
-  Return or a double-click opens one) and **Missed days** for the connected account. Without
-  a connection it reads "Connect Gmail to brief missed days."
+- **Briefs** in the sidebar opens the Briefs page, with **Saved briefs** (date · status ·
+  items · account; Return or a double-click opens one) and **Missed days** for the connected
+  account. Without a connection it reads "Connect Gmail to brief missed days."
 - **Open** shows a saved brief. Unless it is the latest, a banner reads "Viewing the brief
   for <date>." with **Back to latest**. Accept, Dismiss and Undo keep you on that brief.
 - **Brief this day…** is offered for a missed day, or for a saved brief within the last 7
@@ -317,16 +317,16 @@ Part 3 is implemented and awaits live acceptance. It needs no migration.
 
 ### Live acceptance
 
-1. Brief today, then brief yesterday from Briefs…: after a restart, today's brief shows,
-   not yesterday's.
+1. Brief today, then brief yesterday from the Briefs page: after a restart, today's brief
+   shows, not yesterday's.
 2. Yesterday's brief says it covers the messages still in the Inbox when it was made.
 3. Archive one of yesterday's messages in Gmail and brief yesterday again: the replace
    confirmation appears first, and the archived message is gone.
 4. Accept a suggestion while viewing a past brief, then Undo: the view stays on that brief.
 5. `briefs list` shows the same briefs and missed days; `brief --date` for 8 days back exits
    3.
-6. Offline: Briefs… still opens saved briefs, and "Brief this day…" says a connection is
-   needed.
+6. Offline: the Briefs page still opens saved briefs, and "Brief this day…" says a
+   connection is needed.
 
 ### For developers
 
@@ -458,10 +458,10 @@ Part 5 is implemented and awaits live acceptance. It needs no migration. The pol
 - **Mark seen** clears both. It is enabled only when the selected action
   has something new, and makes one revision. **Open source** still opens the thread in
   Gmail.
-- **The status line** after Sync and review, or a brief from Briefs…, adds one sentence when
-  threads were tracked: "Checked 3 tracked threads.", "Checked 3 of 5 tracked threads;
-  2 failed." or "Thread checks stopped early." It never shows an error code, and says
-  nothing when no threads were tracked or the run was cancelled.
+- **The status line** after Sync and review, or a brief from the Briefs page, adds one
+  sentence when threads were tracked: "Checked 3 tracked threads.", "Checked 3 of 5
+  tracked threads; 2 failed." or "Thread checks stopped early." It never shows an error
+  code, and says nothing when no threads were tracked or the run was cancelled.
 - Nothing here is automatic or uses AI: only you add an email to an action or mark
   activity seen.
 

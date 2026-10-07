@@ -28,7 +28,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   autosave, versions, copy and export, and AI drafting with Groq from context the owner
   chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
   ADR 0012 and ADR 0013.
-- M8 implemented, awaiting live acceptance, on `feat/m8-continuity` (PR #17), built in nine parts
+- M8 implemented (merged in PR #17), awaiting live acceptance, built in nine parts
   (`docs/m8-daily-operation.md`); preferences (Parts 1–2) implemented, awaiting live
   acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
   limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
@@ -52,7 +52,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   with one brief per day. The consolidated live acceptance and known limits are in
   `docs/m8-daily-operation.md`.
 
-- M9 implemented on `feat/m9-durability`, awaiting owner live acceptance:
+- M9 implemented (merged in PR #19, review fixes in PR #20), awaiting owner live acceptance:
   Data and recovery provides consistent backup, archive verification, restore after
   shutdown, portable action/draft/note exports, previewed manual retention, safe
   diagnostics and bundled help. Offline backup/verify/restore is also available through
@@ -64,6 +64,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   backup/recovery/export/cleanup.
   See `docs/m9-durability.md` and `docs/m9-live-validation.md`. Do not claim M9 accepted
   until the owner completes real-record recovery and the 7–14-day release scenario.
+- The desktop UI is the three-pane workspace (PR #21); see `.claude/skills/mailbrief-ui/`.
 
 ## Layout (ports and adapters)
 
