@@ -15,7 +15,8 @@ from mailbrief.ui.labels import (
     short_button_label,
     wrap_label,
 )
-from mailbrief.ui.theme import apply_theme
+from mailbrief.ui.theme import CAPTION_PX, SIDEBAR_WIDTH, apply_theme
+from mailbrief.ui.workspace import SidebarNav
 
 HOSTILE = '<b>Win</b> & <a href="x">link</a>'
 
@@ -106,3 +107,40 @@ def test_wrap_label_keeps_line_breaks_and_follows_its_text(qtbot: QtBot) -> None
     label.setText("one\ntwo")
     assert label.heightForWidth(400) > one
     assert label.accessibleName() == "one\ntwo"
+
+
+def laid_out_lines(label: WrapLabel, width: int) -> list[str]:
+    """The lines ``label`` lays out at ``width``, without the soft breaks it adds."""
+    layout, _height, _widest = label._layout(width)
+    text = layout.text()
+    return [
+        text[line.textStart() : line.textStart() + line.textLength()].replace("​", "")
+        for line in (layout.lineAt(number) for number in range(layout.lineCount()))
+    ]
+
+
+def test_an_address_wraps_after_its_at_sign(qtbot: QtBot, qapp: QApplication, themed: None) -> None:
+    apply_theme(qapp)
+    sidebar = SidebarNav()
+    qtbot.addWidget(sidebar)
+    sidebar_layout = sidebar.layout()
+    assert sidebar_layout is not None
+    margins = sidebar_layout.contentsMargins()
+    footer_width = SIDEBAR_WIDTH - margins.left() - margins.right()
+    line = wrap_label("Gmail: connected as owner@example.com", px=CAPTION_PX)
+    qtbot.addWidget(line)
+    line.setContentsMargins(10, 0, 0, 0)  # As in the window's sidebar footer.
+    lines = laid_out_lines(line, footer_width - 10)
+    assert "".join(lines).replace(" ", "") == "Gmail:connectedasowner@example.com"
+    assert any(text.rstrip().endswith("@") for text in lines)  # It breaks after the @...
+    assert any("example.com" in text for text in lines)  # ...never inside the domain.
+    assert "​" not in line.text() and "​" not in line.accessibleName()
+
+
+def test_a_path_wraps_after_its_slashes(qtbot: QtBot) -> None:
+    label = wrap_label("https://mail.google.com/mail/u/0/#inbox/abc")
+    qtbot.addWidget(label)
+    lines = laid_out_lines(label, 120)
+    assert len(lines) > 1
+    assert all(not text or text.endswith("/") for text in lines[:-1])
+    assert "​" not in label.text()

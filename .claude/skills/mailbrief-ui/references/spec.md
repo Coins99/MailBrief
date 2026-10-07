@@ -64,7 +64,9 @@ All read colours from `current_tokens()` at paint time.
 `WrapLabel(QLabel)`, made with `wrap_label(text, *, tone=None, px=None, medium=False)`
 (like `plain_label`): plain text laid out with `QTextLayout` and
 `WrapAtWordBoundaryOrAnywhere`, so an unbroken token (an address, a link, a long word)
-wraps instead of widening its container. Line breaks in the text are kept.
+wraps instead of widening its container. Line breaks in the text are kept, and the layout
+(never `text()` or the accessible name) gets a zero-width space after every `@` and `/`,
+so an address wraps after its `@` and a path after a slash before anywhere else.
 `hasHeightForWidth()` is True and `heightForWidth(w)` includes the contents margins;
 `sizeHint()` is at most 40 average characters wide with its matching height;
 `minimumSizeHint()` is 0 wide and one line high. It paints in the palette's
@@ -168,6 +170,8 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
   15px Medium "Briefs" heading, the saved and missed lists, outline Open and Brief this
   day…, and a Replace / Keep it confirmation, each button row ending in a stretch.
   Opening a saved brief returns to Today. An automatic refresh waits while Briefs shows.
+- Drafts: with no drafts the list is hidden and `draftsEmpty`, a muted, centred, wrapping
+  message, fills the page; with drafts the list shows and the message hides.
 
 ## Stylesheet additions from the Phase 4 visual pass
 

@@ -131,6 +131,9 @@ class WrapLabel(QLabel):
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         # QTextLayout breaks lines at U+2028, not at a newline character.
         text = self.text().replace("\r\n", "\n").replace("\n", "\u2028")
+        # Soft breaks after @ and /, so an address or a path wraps at its parts before
+        # anywhere else; text() and the accessible name keep the text as it is.
+        text = text.replace("@", "@\u200b").replace("/", "/\u200b")
         layout = QTextLayout(text, self.font())
         layout.setTextOption(option)
         layout.beginLayout()

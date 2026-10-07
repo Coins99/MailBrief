@@ -116,3 +116,14 @@ def test_busy_disables_everything(panel: DraftsPanel) -> None:
     )
     panel.set_busy(False)
     assert panel.open_button.isEnabled()
+
+
+def test_without_drafts_a_centred_message_replaces_the_list(panel: DraftsPanel) -> None:
+    assert panel.list.isHidden() and not panel.empty.isHidden()
+    assert panel.empty.property("tone") == "muted"
+    assert panel.empty.alignment() & Qt.AlignmentFlag.AlignCenter
+    assert panel.empty.wordWrap()
+    panel.show_drafts((summary(1),), TORONTO)
+    assert not panel.list.isHidden() and panel.empty.isHidden()
+    panel.show_drafts((), TORONTO)
+    assert panel.list.isHidden() and not panel.empty.isHidden()
