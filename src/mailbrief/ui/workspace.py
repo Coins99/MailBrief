@@ -1,12 +1,20 @@
-"""The three-pane workspace: header, sidebar, brief list and detail pane.
-
-A preview: MainWindow doesn't use it yet.
-"""
+"""The three-pane workspace: header, sidebar, pages, brief list and detail pane."""
 
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from typing import Final
+from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QModelIndex,
+    QPersistentModelIndex,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QKeyEvent,
@@ -22,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListView,
     QPushButton,
+    QStackedWidget,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -30,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from mailbrief.domain.actions import ActionProposal, ThreadLink
-from mailbrief.domain.digests import DailyDigest, DigestItem
+from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus
 from mailbrief.services.history import coverage_line, coverage_short
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
@@ -54,6 +63,9 @@ PAGES: Final = (
     ("drafts", "Drafts", "pencil"),
     ("briefs", "Briefs", "calendar"),
 )
+# Pages that open a dialog: moving the selection onto one with the arrow keys requests
+# nothing; a click or Return does.
+DIALOG_PAGES: Final = frozenset({"briefs"})
 EMPTY_BRIEF: Final = "No analyzed messages in this brief."
 
 KEY_ROLE: Final = Qt.ItemDataRole.UserRole + 1
@@ -74,6 +86,56 @@ def _styled(widget: QWidget, name: str) -> None:
     widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
 
+def brief_title(digest: DailyDigest) -> str:
+    """The brief's day, such as "Tue Oct 6", and whether it is partial or empty."""
+    day = digest.local_date
+    title = f"{day:%a %b} {day.day}"
+    if digest.status is DigestStatus.PARTIAL:
+        return f"{title} · Partial"
+    if digest.status is DigestStatus.EMPTY:
+        return f"{title} · Empty"
+    return title
+
+
+def brief_meta(digest: DailyDigest, zone: ZoneInfo) -> tuple[str, str]:
+    """The brief's account, save time and coverage: a short line to show, and the full
+    sentence for its accessible name."""
+    saved = digest.generated_at_utc.astimezone(zone)
+    if saved.date() > digest.local_date:
+        when = f"{saved:%b} {saved.day} {saved:%H:%M}"
+    else:
+        when = f"{saved:%H:%M}"
+    short = [f"{digest.account_id} · saved {when}"]
+    full = f"{digest.account_id}. Saved {saved.isoformat(timespec='minutes')}."
+    coverage = digest.coverage
+    if coverage is not None:
+        if coverage.failed:
+            short.append(f"{coverage.failed} failed")
+        if coverage.deferred:
+            short.append(f"{coverage.deferred} deferred")
+        if not coverage.sync_complete:
+            short.append("Inbox sync incomplete")
+        counts = (
+            f"{coverage.analyzed} analyzed, {coverage.reused} reused, "
+            f"{coverage.failed} failed, {coverage.skipped} skipped"
+        )
+        if coverage.deferred:
+            counts += f", {coverage.deferred} deferred"
+        sync = "complete" if coverage.sync_complete else "incomplete"
+        full = f"{full} {counts}. Inbox sync {sync}."
+    return " · ".join(short), full
+
+
+class _StatusLabel(ElidedLabel):
+    """Asks for its whole text's width, but can shrink to nothing: a long status elides
+    instead of widening the window."""
+
+    def sizeHint(self) -> QSize:
+        margins = self.contentsMargins()
+        width = self.fontMetrics().horizontalAdvance(" ".join(self.text().split()))
+        return QSize(width + margins.left() + margins.right(), super().sizeHint().height())
+
+
 class HeaderBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -90,15 +152,32 @@ class HeaderBar(QWidget):
         self.refresh_icon.setPixmap(
             icon_pixmap("refresh", current_tokens().text_secondary, _ICON_PX, 2.0)
         )
+        self.refresh_icon.setObjectName("headerRefreshIcon")
         self.refresh_icon.setAccessibleName("Refresh status")
+        # Hidden without a status, but keeping its place, so the status never moves the
+        # header's minimum width.
+        policy = self.refresh_icon.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.refresh_icon.setSizePolicy(policy)
         layout.addWidget(self.refresh_icon)
-        self.status = plain_label("", tone="secondary", px=SMALL_PX)
-        self.status.setWordWrap(False)
-        self.status.setAccessibleName("Status")
+        self.status = _StatusLabel(tone="secondary", px=SMALL_PX)
+        self.status.setObjectName("headerStatus")
         layout.addWidget(self.status)
+        # Widgets the window adds, right of the status: 2 + the layout's 6 makes 8.
+        self._slots = QHBoxLayout()
+        self._slots.setContentsMargins(2, 0, 0, 0)
+        self._slots.setSpacing(8)
+        layout.addLayout(self._slots)
+        self.set_status("")
 
     def set_status(self, text: str) -> None:
+        """Show ``text``; the refresh icon shows only beside a status."""
         self.status.setText(text)
+        self.refresh_icon.setVisible(bool(text))
+
+    def add_widget(self, widget: QWidget) -> None:
+        """Append ``widget`` right of the status."""
+        self._slots.addWidget(widget)
 
 
 class _NavDelegate(QStyledItemDelegate):
@@ -164,15 +243,26 @@ class _NavList(QListView):
         super().keyPressEvent(event)
 
 
-class _NavButton(QPushButton):
-    """A button painted like a page row, so its icon and label line up with the pages."""
+class NavButton(QPushButton):
+    """A button painted like a page row, so its icon and label line up with the pages.
 
-    def __init__(self, text: str, icon_name: str) -> None:
-        super().__init__(button_label(text))
+    ``mnemonic`` is app-authored button text with an ``&`` (such as "Se&ttings") so Alt and
+    that key press it; the row still paints ``text``.
+    """
+
+    def __init__(
+        self,
+        text: str,
+        icon_name: str,
+        *,
+        mnemonic: str | None = None,
+        accessible_name: str | None = None,
+    ) -> None:
+        super().__init__(button_label(text) if mnemonic is None else mnemonic)
         self._text = text
         self._icon_name = icon_name
         self.setProperty("variant", "nav")
-        self.setAccessibleName(text)
+        self.setAccessibleName(text if accessible_name is None else accessible_name)
         self.setAutoDefault(False)
         self.setFixedHeight(_NAV_ROW)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -199,7 +289,11 @@ class _NavButton(QPushButton):
 
 
 class SidebarNav(QWidget):
-    """``page_requested(key)`` on selection and on Return or Enter; ``settings_requested``."""
+    """``page_requested(key)`` on selection, a click and Return or Enter;
+    ``settings_requested``. A page in DIALOG_PAGES is requested only by a click or Return.
+
+    Below the pages: Saved mail, Data, Settings, the note, then ``footer`` for the window's
+    own widgets."""
 
     page_requested = Signal(str)
     settings_requested = Signal()
@@ -233,24 +327,48 @@ class SidebarNav(QWidget):
         self.nav.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._quiet = False
         self.nav.selectionModel().currentChanged.connect(self._current_changed)
+        self.nav.clicked.connect(self._clicked)
         self.nav.page_activated.connect(self.page_requested)
         layout.addWidget(self.nav)
         layout.addStretch(1)
-        self.settings = _NavButton("Settings", "settings")
+        self.saved_mail = NavButton("Saved mail", "mail", mnemonic="Saved &mail")
+        self.saved_mail.setObjectName("savedMailButton")
+        layout.addWidget(self.saved_mail)
+        self.data = NavButton(
+            "Data", "database", mnemonic="&Data", accessible_name="Data and recovery"
+        )
+        self.data.setObjectName("dataButton")
+        layout.addWidget(self.data)
+        self.settings = NavButton("Settings", "settings", mnemonic="Se&ttings")
+        self.settings.setObjectName("settingsButton")
         self.settings.clicked.connect(self.settings_requested)
         layout.addWidget(self.settings)
         self.note = plain_label("", tone="muted", px=CAPTION_PX)
+        self.note.setObjectName("sidebarNote")
         self.note.setAccessibleName("Connection")
         self.note.setContentsMargins(10, 4, 4, 0)
+        self.note.hide()
         layout.addWidget(self.note)
+        self.footer = QVBoxLayout()
+        self.footer.setContentsMargins(0, 0, 0, 0)
+        self.footer.setSpacing(4)
+        layout.addLayout(self.footer)
         self.set_current("today")
 
     def _row(self, key: str) -> int:
         return next(number for number, page in enumerate(PAGES) if page[0] == key)
 
     def _current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
-        if not self._quiet and current.isValid():
-            self.page_requested.emit(str(current.data(KEY_ROLE)))
+        if self._quiet or not current.isValid():
+            return
+        key = str(current.data(KEY_ROLE))
+        if key not in DIALOG_PAGES:
+            self.page_requested.emit(key)
+
+    def _clicked(self, index: QModelIndex) -> None:
+        key = str(index.data(KEY_ROLE))
+        if key in DIALOG_PAGES:
+            self.page_requested.emit(key)
 
     def set_current(self, key: str) -> None:
         """Show ``key`` as the current page without requesting it."""
@@ -260,19 +378,49 @@ class SidebarNav(QWidget):
         finally:
             self._quiet = False
 
+    def current_key(self) -> str:
+        return str(self.nav.currentIndex().data(KEY_ROLE))
+
     def set_counts(self, actions: int | None, waiting: int | None, drafts: int | None) -> None:
         for key, count in (("actions", actions), ("waiting", waiting), ("drafts", drafts)):
             self.pages.item(self._row(key)).setData(count, COUNT_ROLE)
 
     def set_note(self, text: str) -> None:
         self.note.setText(text)
+        self.note.setVisible(bool(text))
 
     def count_text(self, key: str) -> str | None:
         count = self.pages.item(self._row(key)).data(COUNT_ROLE)
         return None if count is None else str(count)
 
 
+class BriefHeading(QWidget):
+    """The shown brief's day above the list, and its account, save time and coverage."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("briefHeading")
+        self.setAccessibleName("Brief")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 4)
+        layout.setSpacing(2)
+        self.title = plain_label("", px=TEXT_PX, medium=True)
+        self.title.setObjectName("briefHeadingTitle")
+        layout.addWidget(self.title)
+        self.meta = ElidedLabel(tone="muted", px=CAPTION_PX)
+        self.meta.setObjectName("briefHeadingMeta")
+        layout.addWidget(self.meta)
+
+    def show_brief(self, digest: DailyDigest, zone: ZoneInfo) -> None:
+        self.title.setText(brief_title(digest))
+        self.meta.setText(*brief_meta(digest, zone))
+        self.show()
+
+
 class ThreePaneWorkspace(QWidget):
+    """Header, sidebar and ``pages``: ``today`` holds ``today_top`` above the brief's list
+    and detail; the window adds its own pages with ``add_page``."""
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         _styled(self, "workspace")
@@ -289,12 +437,28 @@ class ThreePaneWorkspace(QWidget):
         self.sidebar = SidebarNav()
         body.addWidget(self.sidebar)
         body.addWidget(HairlineDivider(Qt.Orientation.Vertical))
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("workspacePages")
+        self._pages: dict[str, QWidget] = {}
+        today = QWidget()
+        today.setObjectName("todayPage")
+        today.setAccessibleName("Today")
+        today_layout = QVBoxLayout(today)
+        today_layout.setContentsMargins(0, 0, 0, 0)
+        today_layout.setSpacing(0)
+        self.today_top = QVBoxLayout()
+        self.today_top.setContentsMargins(0, 0, 0, 0)
+        self.today_top.setSpacing(0)
+        today_layout.addLayout(self.today_top)
         self.splitter = HairlineSplitter(Qt.Orientation.Horizontal)
         list_pane = QWidget()
         list_pane.setObjectName("briefListPane")
         list_layout = QVBoxLayout(list_pane)
         list_layout.setContentsMargins(0, 0, 0, 0)
         list_layout.setSpacing(0)
+        self.heading = BriefHeading()
+        self.heading.hide()
+        list_layout.addWidget(self.heading)
         self.brief_list = BriefListView()
         list_layout.addWidget(self.brief_list, 1)
         self.coverage = ElidedLabel(tone="muted", px=CAPTION_PX)
@@ -308,12 +472,29 @@ class ThreePaneWorkspace(QWidget):
         self.splitter.setStretchFactor(0, 4)
         self.splitter.setStretchFactor(1, 5)
         self.splitter.setChildrenCollapsible(False)
-        body.addWidget(self.splitter, 1)
+        today_layout.addWidget(self.splitter, 1)
+        self.add_page("today", today)
+        body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
         self._digest: DailyDigest | None = None
         self._links: Mapping[str, Sequence[ThreadLink]] = {}
         self._proposals: Mapping[str, Sequence[ActionProposal]] = {}
+        # The detail's scroll position to restore once its new content has a range.
+        self._pending_scroll: int | None = None
         self.brief_list.item_selected.connect(self._show_item)
+        self.detail.verticalScrollBar().rangeChanged.connect(self._restore_scroll)
+
+    def add_page(self, key: str, widget: QWidget) -> None:
+        self._pages[key] = widget
+        self.pages.addWidget(widget)
+
+    def show_page(self, key: str) -> None:
+        """Show page ``key``; an unknown key raises KeyError."""
+        self.pages.setCurrentWidget(self._pages[key])
+
+    def current_page(self) -> str:
+        current = self.pages.currentWidget()
+        return next(key for key, widget in self._pages.items() if widget is current)
 
     def show_digest(
         self,
@@ -321,18 +502,49 @@ class ThreePaneWorkspace(QWidget):
         *,
         links: Mapping[str, Sequence[ThreadLink]] | None = None,
         proposals: Mapping[str, Sequence[ActionProposal]] | None = None,
+        owner_zone: ZoneInfo,
     ) -> None:
+        """Show ``digest``. Showing the same saved brief again keeps the selected email and
+        the detail's scroll position; another brief starts at its first email."""
+        previous = self._digest
+        same = previous is not None and _identity(previous) == _identity(digest)
+        select = self.brief_list.selected_key() if same else None
+        scroll = self.detail.verticalScrollBar().value() if same else 0
         self._digest = digest
         self._links = links or {}
         self._proposals = proposals or {}
+        self.heading.show_brief(digest, owner_zone)
         self.coverage.setText(coverage_short(digest), coverage_line(digest))
         if not digest.items:
             self.brief_list.show_rows([])
             self.detail.show_empty(EMPTY_BRIEF)
             return
-        self.brief_list.show_rows(build_rows(digest, self._proposals))
+        self.brief_list.show_rows(build_rows(digest, self._proposals), select=select)
+        if same and scroll:
+            # The new content gets its scroll range once it is laid out: from the next turn
+            # of the event loop, or when the range changes, whichever has one first.
+            self._pending_scroll = scroll
+            QTimer.singleShot(0, self._restore_scroll)
+
+    def _restore_scroll(self) -> None:
+        bar = self.detail.verticalScrollBar()
+        if self._pending_scroll is not None and bar.maximum() > 0:
+            bar.setValue(min(self._pending_scroll, bar.maximum()))
+            self._pending_scroll = None
+
+    def clear(self, message: str) -> None:
+        """Show no brief, only ``message``."""
+        self._digest = None
+        self._links = {}
+        self._proposals = {}
+        self._pending_scroll = None
+        self.brief_list.show_rows([])
+        self.coverage.setText("")
+        self.heading.hide()
+        self.detail.show_empty(message)
 
     def _show_item(self, item: DigestItem) -> None:
+        self._pending_scroll = None  # Another email starts at the top.
         digest = self._digest
         if digest is None:
             return
@@ -343,3 +555,7 @@ class ThreePaneWorkspace(QWidget):
             links=self._links.get(item.message_key, ()),
             proposals=self._proposals.get(item.message_key, ()),
         )
+
+
+def _identity(digest: DailyDigest) -> tuple[str, date, datetime]:
+    return (digest.account_id, digest.local_date, digest.generated_at_utc)

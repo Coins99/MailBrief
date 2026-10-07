@@ -21,6 +21,8 @@ ICON_NAMES: Final = frozenset(
         "refresh",
         "clock",
         "external-link",
+        "mail",
+        "database",
     }
 )
 

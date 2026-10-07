@@ -328,12 +328,28 @@ class BriefListView(QListView):
         self.setItemDelegate(BriefItemDelegate(self))
         self.selectionModel().currentChanged.connect(self._current_changed)
 
-    def show_rows(self, rows: Sequence[BriefRow]) -> None:
+    def show_rows(self, rows: Sequence[BriefRow], *, select: str | None = None) -> None:
+        """Show ``rows`` and select the email whose ``message_key`` is ``select``, else the
+        first email."""
         self.brief_model.set_rows(rows)
-        for number, row in enumerate(rows):
-            if row.kind == "item":
-                self.setCurrentIndex(self.brief_model.index(number))
-                break
+        items = [number for number, row in enumerate(rows) if row.item is not None]
+        chosen = next(
+            (
+                number
+                for number in items
+                if (item := rows[number].item) is not None and item.message_key == select
+            ),
+            items[0] if items else None,
+        )
+        if chosen is not None:
+            self.setCurrentIndex(self.brief_model.index(chosen))
+
+    def selected_key(self) -> str | None:
+        """The selected email's ``message_key``, or None when no email is selected."""
+        row = self.currentIndex().data(ROW_ROLE)
+        if isinstance(row, BriefRow) and row.item is not None:
+            return row.item.message_key
+        return None
 
     def _current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
         row = current.data(ROW_ROLE)
