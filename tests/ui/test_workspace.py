@@ -366,3 +366,16 @@ def test_unbroken_mail_text_never_widens_the_workspace(
         return workspace.minimumSizeHint().width()
 
     assert narrowest(hostile) == narrowest(brief.digest)
+
+
+def test_the_detail_keeps_a_readable_width_on_wide_windows(qtbot: QtBot) -> None:
+    from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
+
+    workspace = build(qtbot)
+    workspace.resize(1600, 900)
+    show(qtbot, workspace)
+    content = workspace.detail.widget()
+    assert content is not None
+    assert workspace.detail.viewport().width() > DETAIL_MAX_WIDTH
+    assert 0 < content.width() <= DETAIL_MAX_WIDTH == 720
+    assert content.x() == 0  # Left-aligned.

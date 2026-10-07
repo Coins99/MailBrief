@@ -10,7 +10,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DigestStatus, SavedBriefSummary
 from mailbrief.domain.preferences import OwnerPreferences
-from mailbrief.ui.history_view import BriefHistoryPanel
+from mailbrief.ui.history_view import NONE_MISSED, NOT_CONNECTED, BriefHistoryPanel
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.brief_view import shown_text
 from tests.ui.test_workflow import FakeBackend, finish
@@ -293,3 +293,13 @@ async def test_sync_and_review_returns_to_the_latest_brief(
 
     assert backend.generated_days == [None]
     assert window.viewing.isHidden()
+
+
+def test_the_missed_list_hides_when_no_day_was_missed(panel: BriefHistoryPanel) -> None:
+    panel.configure((summary(PAST),), (date(2026, 9, 2),), "owner@example.com", TODAY)
+    assert not panel.missed.isHidden() and panel.missed_note.isHidden()
+    panel.configure((summary(PAST),), (), "owner@example.com", TODAY)
+    assert panel.missed.isHidden()
+    assert not panel.missed_note.isHidden() and panel.missed_note.text() == NONE_MISSED
+    panel.configure((summary(PAST),), (), None, TODAY)
+    assert panel.missed.isHidden() and panel.missed_note.text() == NOT_CONNECTED

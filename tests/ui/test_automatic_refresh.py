@@ -368,19 +368,45 @@ async def test_a_refresh_waits_while_the_owner_is_in_a_dialog(
     assert backend.automatic_calls == 1
 
 
-async def test_a_refresh_waits_while_the_briefs_page_shows(
+async def open_briefs(window: MainWindow) -> None:
+    window.start(window._open_history)
+    assert window.task is not None
+    await window.task
+    assert window.workspace.current_page() == "briefs"
+
+
+async def test_the_briefs_page_holds_a_refresh_only_while_a_replacement_is_confirmed(
     window: MainWindow, backend: FakeBackend
 ) -> None:
     await window.initialize()
-    window._show_page("briefs")
+    await open_briefs(window)
+    window.history_panel.confirm_panel.show()  # "This replaces the saved brief…"
     window._refresh_due()
 
     assert backend.automatic_calls == 0
     assert due_at(window) == NOW  # Retried at the next tick, not skipped.
     assert window.task is None or window.task.done()
-    window._show_page("today")
+    window.history_panel.confirm_panel.hide()
     await due(window)
+    assert backend.automatic_calls == 1  # Only looking at Briefs doesn't hold it.
+
+
+async def test_an_automatic_run_reloads_the_briefs_page(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    await open_briefs(window)
+    before = window.history_panel.saved.count()
+    earlier = backend.saved.model_copy(
+        update={"local_date": backend.saved.local_date - timedelta(days=1)}
+    )
+    backend.briefs[(earlier.account_id, earlier.local_date)] = earlier
+
+    await due(window)
+
     assert backend.automatic_calls == 1
+    assert window.workspace.current_page() == "briefs"
+    assert window.history_panel.saved.count() == before + 1
 
 
 async def test_a_busy_window_keeps_its_status_line_even_if_gmail_is_disconnected(

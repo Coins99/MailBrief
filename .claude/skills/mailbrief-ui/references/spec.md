@@ -80,8 +80,9 @@ email". Signals: `suggestion_requested(str, int)` (ACCEPT or DISMISS, from this 
 `accept_into_requested(int, str, int)`, `proposal_requested(str, int, int)` (APPLY or
 DISMISS), `reply_requested(str, str)` and `source_requested(str)`; it never opens URLs
 itself.
-Content margins 16, 14, 16, 14, spacing 8, in order (every mail- or AI-derived line is
-a `WrapLabel`):
+Its content is at most 720 px wide (`DETAIL_MAX_WIDTH`) and stays at the left on wide
+windows. Content margins 16, 14, 16, 14, spacing 8, in order (every mail- or AI-derived
+line is a `WrapLabel`):
 1. Subject (or "(no subject)"), 15px Medium.
 2. Sender, secondary. No received time is invented.
 3. Summary.
@@ -91,8 +92,9 @@ a `WrapLabel`):
 6. `Continues: “{title}”`, secondary, for each link that isn't a source.
 7. Suggestions. PENDING: a `HairlineFrame` card with the title (13px Medium), a 12px
    secondary meta line ("Yours." or "Waiting for someone.", then the target with its
-   reason, else the deadline, else "No deadline stated."), Accept and Dismiss, and one
-   `Add to “{title}”` button per link. ACCEPTED: `Accepted: {title}`, secondary.
+   reason, else the deadline, else "No deadline stated."), the plan's steps in order
+   (`· {step}`, 12px secondary), Accept and Dismiss, and one `Add to “{title}”` button
+   per link. ACCEPTED: `Accepted: {title}`, secondary, with no plan.
    DISMISSED: nothing.
 8. Each pending proposal: a card with `Proposes for “{action_title}”: “{evidence}”`, an
    `effect_text` button (APPLY) and Dismiss.
@@ -161,17 +163,50 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
 - Cancel shows in the header only while an operation runs. `ThemeStyle`, Fusion behind a
   `QProxyStyle`, never underlines mnemonics; Alt and the letter still work.
 - Pages: `today` (the "Viewing the brief for …" banner and the retry row in `today_top`),
-  `run` (`runPage`, a scroll area: the review and consent panels, margins 16, 14, 16,
-  14), `actions`, `drafts` and `briefs` (the panels, margins 12). Today shows `run` while
+  `run` (`runPage`, a scroll area, margins 16, 14, 16, 14, holding `runColumn`, a centred
+  column at most 760 px wide), `actions`, `drafts` and `briefs` (the panels, margins 12). Today shows `run` while
   the review or consent waits. Actions opens the Open tab and Waiting the Waiting tab;
   changing the tab moves the sidebar. Briefs is a page like the others: choosing it loads
   the saved briefs and missed days through `start()` (refused with a reason while busy or
   before local storage loads), then shows `BriefHistoryPanel` (`ui/history_view.py`): a
   15px Medium "Briefs" heading, the saved and missed lists, outline Open and Brief this
   day…, and a Replace / Keep it confirmation, each button row ending in a stretch.
-  Opening a saved brief returns to Today. An automatic refresh waits while Briefs shows.
+  Opening a saved brief returns to Today. An automatic refresh waits while a replacement
+  is being confirmed there, and reloads Briefs when it ends.
 - Drafts: with no drafts the list is hidden and `draftsEmpty`, a muted, centred, wrapping
   message, fills the page; with drafts the list shows and the message hides.
+
+## Run page (`ui/run_view.py`, `ui/main_window.py`)
+
+- Step 1, `review_panel`: "Step 1 of 2" (11px muted) over "Choose what MailBrief reads"
+  (15px Medium), the hint (a secondary `WrapLabel`), the shortlist and Continue, a
+  `variant="primary"` button left-aligned. Step 2, `consent_panel`: "Step 2 of 2" over
+  "Approve sending to Groq", the disclosure (a `WrapLabel`) in a `HairlineFrame` card,
+  then outline Approve and Decline side by side, Decline focused.
+- The shortlist stays a `QListWidget`: each item keeps its text (what is read aloud), its
+  ID under `UserRole`, flags, check state and app-text tooltip. `review()` adds a
+  `ShortlistRow(subject, sender, chips, blocked)` under `ROW_ROLE`, and
+  `ShortlistDelegate` paints it like a brief row: selection fill and 2px `accent_border`
+  bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary,
+  chips ("Tracked reply" and "Left out earlier" accent, "Excluded in Settings"
+  warning). The check indicator sits at the style's `SE_ItemViewItemCheckIndicator`
+  rect, so the inherited `editorEvent` handles clicks and Space; a blocked row is muted,
+  has no indicator and can never be checked.
+- Automatic runs never show the run page.
+
+## Buttons, lists and tabs
+
+- `QPushButton[variant="primary"]`: `accent_bg` background, `accent_fg` text, 1px
+  `accent_border`, the outline button's radius and padding; `:focus` border `accent_fg`;
+  `:disabled` transparent with `text_muted` text and a `hairline` border, like outline.
+- `QListWidget::item`: padding 4px 8px and a transparent 2px left border, so selected and
+  unselected rows line up; `:selected` (also `:!active`): `selection` background, `text`,
+  2px `accent_border` left border.
+- `QTabWidget::pane`: no border. `QTabBar::tab`: transparent, `text_secondary`, padding
+  6px 12px, no border; `:selected`: `text` with a 2px `accent_border` bottom border.
+- Briefs: the missed-days list hides when there are none; its note says why. An automatic
+  refresh waits only while a replacement is being confirmed there, and reloads the page
+  when it ends while Briefs shows.
 
 ## Stylesheet additions from the Phase 4 visual pass
 

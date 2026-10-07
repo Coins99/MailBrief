@@ -151,6 +151,7 @@ class BriefHistoryPanel(QWidget):
             NOT_CONNECTED if account_email is None else "" if missed else NONE_MISSED
         )
         self.missed_note.setVisible(bool(self.missed_note.text()))
+        self.missed.setVisible(bool(missed))  # The note says why there are none.
         if summaries:
             self.saved.setCurrentRow(0)
         self._update_buttons()

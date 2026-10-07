@@ -1913,9 +1913,12 @@ class MainWindow(QMainWindow):
     # no review, no consent question and no dialog; everything it says goes to the status line.
 
     def _dialog_open(self) -> bool:
-        """Whether the owner is working in one of the window's dialogs or editors, or on
-        the Briefs page."""
-        if self.workspace.current_page() == "briefs":
+        """Whether the owner is working in one of the window's dialogs or editors, or is
+        confirming a replacement on the Briefs page."""
+        if (
+            self.workspace.current_page() == "briefs"
+            and not self.history_panel.confirm_panel.isHidden()
+        ):
             return True
         return (self.data_dialog is not None and self.data_dialog.isVisible()) or any(
             widget.isVisible()
@@ -2019,6 +2022,8 @@ class MainWindow(QMainWindow):
         self.status.setText(text)
         if result.status is not BriefStatus.CANCELLED:
             await self._refresh_actions()  # Thread activity and proposals may have changed.
+        if self.workspace.current_page() == "briefs":
+            await self._load_history()  # Today's brief may be new or changed.
 
     async def _show_auto_send(self) -> None:
         """The automatic-analysis line in Settings, from the connected account's active

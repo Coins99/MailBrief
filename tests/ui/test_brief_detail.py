@@ -24,6 +24,7 @@ from mailbrief.ui.brief_detail import (
     suggestion_meta,
 )
 from mailbrief.ui.hairline import HairlineFrame
+from mailbrief.ui.theme import SMALL_PX
 from tests.factories import make_digest_item, make_proposal, make_suggestion
 from tests.ui.workspace_fixtures import ACCOUNT, DECK_ACTION, FINANCE_ACTION, ZONE, mockup_digest
 
@@ -418,3 +419,42 @@ def test_every_button_can_be_reached_from_the_keyboard(pane: BriefDetailPane) ->
     for reachable in buttons:
         assert reachable.focusPolicy() & Qt.FocusPolicy.TabFocus
         assert not reachable.autoDefault()
+
+
+def plan_suggestion(steps: tuple[str, ...], state: SuggestionState) -> SuggestionView:
+    return SuggestionView(suggestion_id=30, state=state, suggestion=make_suggestion(steps=steps))
+
+
+def test_a_pending_suggestion_shows_its_plan(pane: BriefDetailPane) -> None:
+    steps = ("Read it", "Check totals", "Ask Sam", "Approve", "Tell finance")
+    pane.show_item(
+        make_digest_item(suggestions=(plan_suggestion(steps, SuggestionState.PENDING),)),
+        account_email=ACCOUNT,
+        timezone_name=ZONE,
+    )
+    card = pane.findChild(HairlineFrame, "suggestionCard")
+    assert card is not None
+    lines = [label for label in card.findChildren(QLabel) if label.text().startswith("· ")]
+    assert [label.text() for label in lines] == [f"· {step}" for step in steps]
+    for line in lines:
+        assert line.property("tone") == "secondary" and line.font().pixelSize() == SMALL_PX
+        assert line.textFormat() is Qt.TextFormat.PlainText
+
+
+def test_a_hostile_plan_step_stays_literal(pane: BriefDetailPane) -> None:
+    hostile = plan_suggestion(("<b>Win</b> & <a href=x>go</a>",), SuggestionState.PENDING)
+    pane.show_item(
+        make_digest_item(suggestions=(hostile,)),
+        account_email=ACCOUNT,
+        timezone_name=ZONE,
+    )
+    assert "· <b>Win</b> & <a href=x>go</a>" in label_texts(pane)
+
+
+def test_an_accepted_suggestion_shows_no_plan(pane: BriefDetailPane) -> None:
+    pane.show_item(
+        make_digest_item(suggestions=(plan_suggestion(("Read it",), SuggestionState.ACCEPTED),)),
+        account_email=ACCOUNT,
+        timezone_name=ZONE,
+    )
+    assert "· Read it" not in label_texts(pane)

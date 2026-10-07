@@ -42,6 +42,7 @@ ACCEPT = "accept"
 DISMISS = "dismiss"
 APPLY = "apply"
 EMPTY_TEXT = "Select an email to see its summary and suggestions."
+DETAIL_MAX_WIDTH = 720
 _ICON_PX = 14
 
 
@@ -118,6 +119,8 @@ class BriefDetailPane(QScrollArea):
     def _fresh(self) -> QVBoxLayout:
         content = QWidget()
         content.setObjectName("briefDetailContent")
+        # A readable measure on wide windows; the scroll area keeps it at the left.
+        content.setMaximumWidth(DETAIL_MAX_WIDTH)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
@@ -189,6 +192,8 @@ class BriefDetailPane(QScrollArea):
         layout.setSpacing(4)
         layout.addWidget(wrap_label(view.suggestion.title, px=TEXT_PX, medium=True))
         layout.addWidget(wrap_label(suggestion_meta(view, zone), tone="secondary", px=SMALL_PX))
+        for step in view.suggestion.steps:  # The suggested plan, in order.
+            layout.addWidget(wrap_label(f"· {step}", tone="secondary", px=SMALL_PX))
         layout.addSpacing(4)
         decisions = QHBoxLayout()
         decisions.setSpacing(8)

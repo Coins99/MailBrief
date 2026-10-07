@@ -34,6 +34,11 @@ QPushButton[variant="nav"] { text-align: left; background: transparent; color: $
 QPushButton[variant="nav"]:hover, QPushButton[variant="nav"]:focus { background: $selection; color: $text; }
 QListView#sidebarNav, QListView#briefList { background: $panel; border: none; outline: 0; }
 QScrollArea#briefDetail { background: $panel; border: none; }
+QListWidget::item { padding: 4px 8px; border-left: 2px solid transparent; }
+QListWidget::item:selected, QListWidget::item:selected:!active { background: $selection; color: $text; border-left: 2px solid $accent_border; }
+QTabWidget::pane { border: none; }
+QTabBar::tab { background: transparent; color: $text_secondary; padding: 6px 12px; border: none; }
+QTabBar::tab:selected { color: $text; border-bottom: 2px solid $accent_border; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 1px; }
 QScrollBar:horizontal { background: transparent; height: 8px; margin: 1px 2px; }
 QScrollBar::handle { background: $border_strong; border-radius: 3px; min-height: 24px; min-width: 24px; }
