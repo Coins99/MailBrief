@@ -10,7 +10,12 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DigestStatus, SavedBriefSummary
 from mailbrief.domain.preferences import OwnerPreferences
-from mailbrief.ui.history_view import NONE_MISSED, NOT_CONNECTED, BriefHistoryPanel
+from mailbrief.ui.history_view import (
+    NEEDS_CONNECTION,
+    NONE_MISSED,
+    NOT_CONNECTED,
+    BriefHistoryPanel,
+)
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.brief_view import shown_text
 from tests.ui.test_workflow import FakeBackend, finish
@@ -127,6 +132,36 @@ def test_return_opens_a_saved_brief(panel: BriefHistoryPanel) -> None:
     assert opened == [("owner@example.com", PAST)]
 
 
+def test_disconnecting_shows_the_not_connected_state(panel: BriefHistoryPanel) -> None:
+    panel.configure((summary(PAST),), (date(2026, 9, 2),), "owner@example.com", TODAY)
+    panel.saved.setCurrentRow(0)
+    panel.brief_button.click()
+    assert not panel.confirm_panel.isHidden()  # "This replaces the saved brief…"
+
+    panel.set_account(None)
+
+    assert panel.missed.isHidden() and panel.missed.count() == 0
+    assert not panel.missed_note.isHidden() and panel.missed_note.text() == NOT_CONNECTED
+    assert panel.confirm_panel.isHidden()  # It was for the account that left.
+    opened, briefed = signals(panel)
+    panel.brief_button.click()
+    assert briefed == [] and panel.status.text() == NEEDS_CONNECTION
+
+
+def test_connecting_drops_what_belonged_to_no_account(panel: BriefHistoryPanel) -> None:
+    panel.configure((summary(PAST),), (), None, TODAY)
+    panel.saved.setCurrentRow(0)
+    panel.brief_button.click()
+    assert panel.status.text() == NEEDS_CONNECTION
+
+    panel.set_account("owner@example.com")  # No storage read: the window reloads the page.
+
+    assert panel.status.text() == ""  # That message was about having no account.
+    assert panel.missed_note.isHidden() and panel.missed.isHidden()
+    panel.brief_button.click()
+    assert not panel.confirm_panel.isHidden()  # Now it can replace the saved brief.
+
+
 # The window.
 
 
@@ -186,6 +221,24 @@ async def test_the_page_lists_the_connected_account_s_missed_days(
     assert window.workspace.current_page() == "briefs"
     assert window.history_panel.saved.count() == 2
     assert window.history_panel.missed.item(0).text() == "2026-09-02 · no brief"
+    window._show_page("today")
+
+
+async def test_the_page_follows_disconnect_and_connect(window: MainWindow) -> None:
+    window.workspace.sidebar.page_requested.emit("briefs")
+    await finish(window)
+    panel = window.history_panel
+    assert panel.missed.item(0).text() == "2026-09-02 · no brief"
+
+    window.disconnect_button.click()
+    await finish(window)
+    assert panel.missed.isHidden() and panel.missed_note.text() == NOT_CONNECTED
+
+    window.connect_button.click()  # From the sidebar, with Briefs still showing.
+    await finish(window)
+    assert window.workspace.current_page() == "briefs"
+    assert not panel.missed.isHidden()
+    assert panel.missed.item(0).text() == "2026-09-02 · no brief"
     window._show_page("today")
 
 

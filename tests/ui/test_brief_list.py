@@ -29,6 +29,7 @@ from tests.factories import make_digest_item, make_proposal
 from tests.ui.workspace_fixtures import ZONE, mockup_digest
 
 TORONTO = ZoneInfo(ZONE)
+TODAY = date(2026, 10, 6)  # A Tuesday: the mockup brief's day.
 
 
 def test_rows_add_a_header_whenever_the_section_changes() -> None:
@@ -94,13 +95,45 @@ def test_sender_falls_back_to_the_address() -> None:
     ],
 )
 def test_deadline_chip_text(overrides: dict[str, object], expected: str | None) -> None:
-    chip = deadline_chip(make_digest_item(**overrides), TORONTO)
+    chip = deadline_chip(make_digest_item(**overrides), TORONTO, TODAY)
     if expected is None:
         assert chip is None
     else:
         assert chip == Chip(expected, ChipTone.WARNING)
         if overrides["deadline_precision"] is DeadlinePrecision.UNRESOLVED:
             assert len(expected) <= len("Due ") + 24
+
+
+@pytest.mark.parametrize(
+    ("day", "expected"),
+    [
+        (date(2026, 10, 6), "Due Tue 17:00"),  # Today.
+        (date(2026, 10, 9), "Due Fri 17:00"),  # This week.
+        (date(2026, 10, 12), "Due Mon 17:00"),  # Six days out: still its weekday.
+        (date(2026, 10, 13), "Due Oct 13 17:00"),  # Seven days out: its date.
+        (date(2026, 10, 23), "Due Oct 23 17:00"),
+        (date(2026, 10, 2), "Due Oct 2 17:00"),  # Past: never "Fri", which reads as ahead.
+    ],
+)
+def test_a_timed_deadline_names_its_weekday_only_within_the_week(day: date, expected: str) -> None:
+    due = datetime(day.year, day.month, day.day, 17, tzinfo=TORONTO).astimezone(UTC)
+    item = make_digest_item(
+        deadline_text="by then",
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_date=day,
+        deadline_at_utc=due,
+    )
+    assert deadline_chip(item, TORONTO, TODAY) == Chip(expected, ChipTone.WARNING)
+
+
+def test_a_date_only_deadline_keeps_its_date_however_far() -> None:
+    item = make_digest_item(
+        deadline_text="October 23",
+        deadline_precision=DeadlinePrecision.DATE,
+        deadline_date=date(2026, 10, 23),
+        deadline_at_utc=None,
+    )
+    assert deadline_chip(item, TORONTO, TODAY) == Chip("Due Oct 23", ChipTone.WARNING)
 
 
 @pytest.mark.parametrize(

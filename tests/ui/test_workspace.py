@@ -14,6 +14,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestStatus
@@ -47,10 +48,11 @@ def build(qtbot: QtBot) -> ThreePaneWorkspace:
 
 
 def show(qtbot: QtBot, workspace: ThreePaneWorkspace) -> None:
-    workspace.show()
+    """Show ``workspace`` and wait until it is on screen (waitExposed is a context manager)."""
     try:
-        qtbot.waitExposed(workspace, timeout=2000)
-    except Exception:  # Some offscreen platforms never report exposure.
+        with qtbot.waitExposed(workspace, timeout=2000):
+            workspace.show()
+    except QtTimeoutError:  # Some platforms never report exposure; go on once shown.
         QApplication.processEvents()
     QApplication.processEvents()
 
@@ -293,6 +295,39 @@ def test_the_heading_shows_the_brief(qtbot: QtBot) -> None:
     assert heading.title.text() == "Tue Oct 6"
     assert heading.meta.text() == "owner@example.com · saved 09:14"
     assert heading.meta.accessibleName().startswith("owner@example.com. Saved 2026-10-06T09:14")
+
+
+def short_workspace(qtbot: QtBot) -> ThreePaneWorkspace:
+    """At its minimum height the first email's detail doesn't fit, so it scrolls."""
+    workspace = build(qtbot)
+    workspace.resize(680, workspace.minimumSizeHint().height())
+    show(qtbot, workspace)
+    assert workspace.detail.verticalScrollBar().maximum() > 0
+    return workspace
+
+
+def test_page_down_in_the_list_scrolls_the_selected_email(qtbot: QtBot) -> None:
+    workspace = short_workspace(qtbot)
+    view, bar = workspace.brief_list, workspace.detail.verticalScrollBar()
+    selected = view.selected_key()
+    QTest.keyClick(view, Qt.Key.Key_PageDown)
+    assert bar.value() > 0
+    assert view.selected_key() == selected  # The selection stays put.
+    QTest.keyClick(view, Qt.Key.Key_PageUp)
+    assert bar.value() == 0
+
+
+def test_page_up_from_a_detail_button_scrolls_the_pane(qtbot: QtBot) -> None:
+    workspace = short_workspace(qtbot)
+    bar = workspace.detail.verticalScrollBar()
+    QTest.keyClick(workspace.brief_list, Qt.Key.Key_PageDown)
+    scrolled = bar.value()
+    assert scrolled > 0
+    button = workspace.detail.buttons()[0]
+    button.setFocus()
+    # The button ignores Page Up, so it reaches the scroll area, which pages back.
+    QTest.keyClick(button, Qt.Key.Key_PageUp)
+    assert bar.value() < scrolled
 
 
 def test_showing_the_same_brief_again_keeps_selection_and_scroll(qtbot: QtBot) -> None:

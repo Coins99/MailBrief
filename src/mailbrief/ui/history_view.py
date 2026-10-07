@@ -156,6 +156,25 @@ class BriefHistoryPanel(QWidget):
             self.saved.setCurrentRow(0)
         self._update_buttons()
 
+    def set_account(self, account_email: str | None) -> None:
+        """Follow the connected account without reading storage. Missed days belong to an
+        account, so another account's are dropped (the window reloads them); without one,
+        the page says to connect. A replacement being confirmed is withdrawn."""
+        if account_email == self._account:
+            return
+        self._account = account_email
+        self._missed = ()
+        self.missed.blockSignals(True)
+        self.missed.clear()
+        self.missed.blockSignals(False)
+        self.missed.hide()
+        self.missed_note.setText(NOT_CONNECTED if account_email is None else "")
+        self.missed_note.setVisible(bool(self.missed_note.text()))
+        self.confirm_panel.hide()
+        if self.status.text() in (NEEDS_CONNECTION, OTHER_ACCOUNT):
+            self.status.clear()  # It was about the account that changed.
+        self._update_buttons()
+
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
         self._update_buttons()

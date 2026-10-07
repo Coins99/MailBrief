@@ -17,6 +17,7 @@ import pytest
 from PySide6.QtCore import QSize, QUrl
 from PySide6.QtGui import QAccessible, QDesktopServices, QGuiApplication, QKeySequence, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QStyle
+from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter
@@ -61,10 +62,11 @@ async def settle() -> None:
 
 
 def show(qtbot: QtBot, window: MainWindow) -> None:
-    window.show()
+    """Show ``window`` and wait until it is on screen (waitExposed is a context manager)."""
     try:
-        qtbot.waitExposed(window, timeout=2000)
-    except Exception:  # Some offscreen platforms never report exposure.
+        with qtbot.waitExposed(window, timeout=2000):
+            window.show()
+    except QtTimeoutError:  # Some platforms never report exposure; go on once shown.
         QApplication.processEvents()
     QApplication.processEvents()
 
@@ -291,6 +293,22 @@ async def test_the_header_says_when_gmail_was_checked(
     await finish(window)
     expected = "Checked Gmail at 09:30" if stamped else ""
     assert window.workspace.header.status.text() == expected
+
+
+async def test_the_header_gives_the_time_the_sync_finished(window: MainWindow) -> None:
+    """A review left open from 09:00 to 09:40 still checked Gmail at 09:00."""
+    window.zone = ZoneInfo("UTC")
+    clock = [datetime(2026, 10, 6, 9, 0, tzinfo=UTC)]
+    window.now = lambda: clock[0]
+    window.start(window._generate)
+    await settle()
+    assert not window.review_panel.isHidden()  # The review opened at 09:00.
+    clock[0] = datetime(2026, 10, 6, 9, 40, tzinfo=UTC)
+    window.review_button.click()
+    await settle()
+    window.approve_button.click()
+    await finish(window)
+    assert window.workspace.header.status.text() == "Checked Gmail at 09:00"
 
 
 def last_call(backend: FakeBackend) -> tuple[object, ...]:

@@ -164,20 +164,33 @@ def test_real_qasync_loop_closes_window_and_backend(
     asyncio.set_event_loop(None)
 
 
+@pytest.mark.parametrize("light", [True, False])
 def test_a_theme_failure_never_stops_the_desktop(
     qtbot: QtBot,
     themed: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    light: bool,
 ) -> None:
+    """Unthemed, the painted widgets take the tokens that suit the palette in effect, and
+    desktop.log records the failure."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPalette
     from PySide6.QtWidgets import QApplication
 
     from mailbrief import app
     from mailbrief.paths import AppPaths
+    from mailbrief.ui.theme import DARK, LIGHT, current_tokens
 
     def broken_theme(*args: object) -> None:
         raise RuntimeError("Bundled fonts could not be loaded.")
 
+    qt = QApplication.instance()
+    assert isinstance(qt, QApplication)
+    palette = qt.palette()  # The platform's own, as the theme would have replaced it.
+    window_colour = Qt.GlobalColor.white if light else Qt.GlobalColor.black
+    palette.setColor(QPalette.ColorRole.Window, QColor(window_colour))
+    qt.setPalette(palette)
     backend = FakeBackend()
     monkeypatch.setattr(app, "apply_theme", broken_theme)
     monkeypatch.setattr(app, "DesktopRuntime", lambda path: backend)
@@ -200,6 +213,8 @@ def test_a_theme_failure_never_stops_the_desktop(
     try:
         assert wait.run(lambda: app.main([])) == 0
         assert backend.closed
+        assert current_tokens() is (LIGHT if light else DARK)
+        assert "exception=RuntimeError" in (tmp_path / "desktop.log").read_text("utf-8")
     finally:
         application = QApplication.instance()
         assert isinstance(application, QApplication)

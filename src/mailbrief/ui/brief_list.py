@@ -6,6 +6,7 @@ link, and it never reaches a tooltip.
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, timedelta
 from enum import StrEnum
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo
@@ -25,8 +26,10 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFontMetrics, QKeyEvent, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSlider,
     QFrame,
     QListView,
+    QScrollBar,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -42,6 +45,8 @@ from mailbrief.ui.theme import CAPTION_PX, RADIUS, SMALL_PX, TEXT_PX, current_to
 
 NO_SUBJECT: Final = "(no subject)"
 _UNRESOLVED_CHARS: Final = 24
+# A timed deadline up to this many days after the brief's day is named by its weekday.
+_WEEKDAY_DAYS: Final = 6
 
 # Item rows: padding, the chip row's gap, chip padding and spacing (logical px).
 _PAD_V: Final = 8
@@ -81,12 +86,17 @@ def sender_text(contact: EmailContact) -> str:
     return contact.name or contact.address
 
 
-def deadline_chip(item: DigestItem, zone: ZoneInfo) -> Chip | None:
-    """A short deadline in the digest's zone, or None when the email states none."""
+def deadline_chip(item: DigestItem, zone: ZoneInfo, today: date) -> Chip | None:
+    """A short deadline in the digest's zone, or None when the email states none. A timed
+    deadline within the week from ``today`` gives its weekday; any other, past ones
+    included, its date."""
     text: str | None = None
     if item.deadline_precision is DeadlinePrecision.DATETIME and item.deadline_at_utc:
         local = item.deadline_at_utc.astimezone(zone)
-        text = f"Due {local:%a %H:%M}"
+        if today <= local.date() <= today + timedelta(days=_WEEKDAY_DAYS):
+            text = f"Due {local:%a %H:%M}"
+        else:
+            text = f"Due {local:%b} {local.day} {local:%H:%M}"
     elif item.deadline_precision is DeadlinePrecision.DATE and item.deadline_date:
         day = item.deadline_date
         text = f"Due {day:%b} {day.day}"
@@ -125,7 +135,7 @@ def build_rows(
         chips = tuple(
             chip
             for chip in (
-                deadline_chip(item, zone),
+                deadline_chip(item, zone, digest.local_date),
                 proposal_chip(proposals.get(item.message_key, ())),
             )
             if chip is not None
@@ -312,7 +322,8 @@ def _flat(text: str) -> str:
 
 
 class BriefListView(QListView):
-    """``item_selected(DigestItem)`` reports the selected email."""
+    """``item_selected(DigestItem)`` reports the selected email. With ``set_page_scroll``,
+    Page Up and Page Down scroll the selected email's detail instead of the selection."""
 
     item_selected = Signal(object)
 
@@ -329,6 +340,11 @@ class BriefListView(QListView):
         self.setModel(self.brief_model)
         self.setItemDelegate(BriefItemDelegate(self))
         self.selectionModel().currentChanged.connect(self._current_changed)
+        self._page_scroll: QScrollBar | None = None
+
+    def set_page_scroll(self, bar: QScrollBar | None) -> None:
+        """Page Up and Page Down scroll ``bar`` by a page (None: they move the selection)."""
+        self._page_scroll = bar
 
     def show_rows(self, rows: Sequence[BriefRow], *, select: str | None = None) -> None:
         """Show ``rows`` and select the email whose ``message_key`` is ``select``, else the
@@ -360,6 +376,21 @@ class BriefListView(QListView):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         index = self.currentIndex()
+        bar = self._page_scroll
+        modifiers = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if (
+            bar is not None
+            and event.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)
+            and modifiers == Qt.KeyboardModifier.NoModifier
+        ):
+            # The list fits on screen; the email being read is what needs paging.
+            bar.triggerAction(
+                QAbstractSlider.SliderAction.SliderPageStepSub
+                if event.key() == Qt.Key.Key_PageUp
+                else QAbstractSlider.SliderAction.SliderPageStepAdd
+            )
+            event.accept()
+            return
         if index.isValid() and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             # Activate once and consume the key, as ActivatingList does (ui/lists.py).
             self.activated.emit(index)

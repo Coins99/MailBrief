@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QDialog
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
-from mailbrief.domain.digests import DigestCoverage, SyncStatus
+from mailbrief.domain.digests import DigestCoverage, SavedBriefSummary, SyncStatus
 from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
@@ -407,6 +407,27 @@ async def test_an_automatic_run_reloads_the_briefs_page(
     assert backend.automatic_calls == 1
     assert window.workspace.current_page() == "briefs"
     assert window.history_panel.saved.count() == before + 1
+
+
+async def test_a_briefs_page_that_can_t_be_reloaded_doesn_t_fail_the_run(
+    window: MainWindow, backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await window.initialize()
+    await open_briefs(window)
+    backend.automatic_result = ready(backend, 2)
+
+    async def unreadable() -> tuple[SavedBriefSummary, ...]:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(backend, "list_briefs", unreadable)
+    await due(window)
+
+    assert backend.automatic_calls == 1
+    text = window.status.text()
+    assert text.startswith("Checked Gmail at 10:02. 2 new messages are ready to review.")
+    assert text.endswith("The view could not be refreshed; restart MailBrief to see the latest.")
+    assert "failed" not in text  # The run itself succeeded.
+    assert window.workspace.current_page() == "briefs"
 
 
 async def test_a_busy_window_keeps_its_status_line_even_if_gmail_is_disconnected(

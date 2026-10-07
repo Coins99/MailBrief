@@ -480,6 +480,9 @@ class MainWindow(QMainWindow):
         # Whether the running operation is an automatic refresh (ADR 0017): its failures are
         # reported as such, and it never opens a panel or dialog.
         self._automatic_active = False
+        # When the running sync finished, once its review opens: the header's "Checked
+        # Gmail at" time, which the review and consent may follow by many minutes.
+        self._checked_at: datetime | None = None
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
@@ -754,10 +757,11 @@ class MainWindow(QMainWindow):
 
     def _set_account(self, email: str | None) -> None:
         """The connected Gmail account, or None; Connect shows only without one and
-        Disconnect only with one."""
+        Disconnect only with one, and the Briefs page follows it."""
         self._account_email = email
         self.connect_button.setVisible(email is None)
         self.disconnect_button.setVisible(email is not None)
+        self.history_panel.set_account(email)
 
     def _set_busy(self, busy: bool) -> None:
         self.retry_button.setVisible(not self._ready)
@@ -837,9 +841,9 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(url))
 
     def _stamp_checked(self) -> None:
-        self.workspace.header.set_status(
-            f"Checked Gmail at {self.now().astimezone(self.zone):%H:%M}"
-        )
+        """When the run's sync finished: when its review opened, else (no review) now."""
+        checked = self.now() if self._checked_at is None else self._checked_at
+        self.workspace.header.set_status(f"Checked Gmail at {checked.astimezone(self.zone):%H:%M}")
 
     def _set_counts(self, **counts: int | None) -> None:
         self._counts.update(counts)
@@ -890,8 +894,7 @@ class MainWindow(QMainWindow):
         await self._refresh_actions()
         await self._refresh_drafts()
         self.cached_dialog.reject()
-        if self.workspace.current_page() == "briefs":
-            await self._load_history()
+        await self._reload_history()
         self.proposals_dialog.reject()
         if self.data_dialog is not None:
             self.data_dialog.configure(await self.backend.cached_accounts(), available=True)
@@ -1834,6 +1837,7 @@ class MainWindow(QMainWindow):
         self.connection.setText(f"Gmail: connected as {email}")
         self.status.setText("Connected. Sync to review today's messages.")
         await self._show_auto_send()  # The permission shown is the connected account's.
+        await self._reload_history()  # The new account's missed days.
         self._launch_soon()  # Only the first connection of a start counts as the launch.
 
     async def _disconnect(self) -> None:
@@ -1853,35 +1857,57 @@ class MainWindow(QMainWindow):
         today = self.now().astimezone(self.zone).date()
         self.history_panel.configure(briefs, missed, email, today)
 
+    async def _reload_history(self) -> None:
+        """Reload the Briefs page when it shows. The page is only a view: when it can't be
+        read, it stays as it was and the status line says so."""
+        if self.workspace.current_page() != "briefs":
+            return
+        try:
+            await self._load_history()
+        except Exception as exc:
+            self._note_not_refreshed(exc)
+
+    def _show_page_unless_moved(self, origin: str, key: str) -> None:
+        """Show ``key`` once a load finishes, unless the owner moved from ``origin``, the
+        page shown when it was requested, in the meantime."""
+        if self.workspace.current_page() == origin:
+            self._show_page(key)
+
     async def _open_history(self) -> None:
+        origin = self.workspace.current_page()
         await self._load_history()
-        self.status.setText("Open a saved brief, or brief a missed day.")
-        self._show_page("briefs")
+        if self.workspace.current_page() == origin:
+            self.status.setText("Open a saved brief, or brief a missed day.")
+            self._show_page("briefs")
 
     def _request_open_brief(self, account_email: str, local_date: date) -> None:
         self.start(lambda: self._show_brief(account_email, local_date), cancellable=False)
 
     async def _show_brief(self, account_email: str, local_date: date) -> None:
+        origin = self.workspace.current_page()
         digest = await self.backend.load_brief(account_email, local_date)
         if digest is None:
             self.status.setText("That brief is no longer saved.")
             return
-        await self._view(digest)  # Back on Today.
+        await self._view(digest, origin)  # Back on Today.
         self.status.setText(f"Showing the brief for {local_date.isoformat()}.")
 
-    async def _view(self, digest: DailyDigest) -> None:
-        """Show a brief; the banner appears unless it is the latest."""
+    async def _view(self, digest: DailyDigest, origin: str | None = None) -> None:
+        """Show a brief; the banner appears unless it is the latest. Today shows it unless
+        the owner moved from ``origin`` (by default, the page shown now) while it loaded."""
+        origin = self.workspace.current_page() if origin is None else origin
         latest = await self.backend.load_saved()
         identity = (digest.account_id, digest.local_date)
         is_latest = latest is not None and (latest.account_id, latest.local_date) == identity
         self._set_shown(None if is_latest else identity)
         await self._show_digest(digest)
-        self._show_page("today")
+        self._show_page_unless_moved(origin, "today")
 
     async def _back_to_latest(self) -> None:
+        origin = self.workspace.current_page()
         self._set_shown(None)
         await self._reload_brief()
-        self._show_page("today")
+        self._show_page_unless_moved(origin, "today")
         self.status.setText("Showing the latest brief.")
 
     def _request_brief_day(self, local_date: date) -> None:
@@ -1893,6 +1919,7 @@ class MainWindow(QMainWindow):
     async def _generate(self, local_date: date | None = None) -> None:
         """Brief today (Sync and review), or a past day chosen on the Briefs page. However
         it ends, the next automatic run is an interval later (ADR 0017)."""
+        self._checked_at = None  # Until this run's review opens.
         try:
             await self._generate_brief(local_date)
         finally:
@@ -2000,6 +2027,7 @@ class MainWindow(QMainWindow):
     async def _automatic_refresh(self) -> None:
         """One automatic run. However it ends, the next is an interval later."""
         self._automatic_active = True
+        self._checked_at = None  # No review: its sync has just finished when it returns.
         self.status.setText(_AUTOMATIC + "checking Gmail…")
         try:
             result = await self.backend.generate_automatic(self._cancel, self._progress)
@@ -2069,8 +2097,7 @@ class MainWindow(QMainWindow):
         self.status.setText(text)
         if result.status is not BriefStatus.CANCELLED:
             await self._refresh_actions()  # Thread activity and proposals may have changed.
-        if self.workspace.current_page() == "briefs":
-            await self._load_history()  # Today's brief may be new or changed.
+        await self._reload_history()  # Today's brief may be new or changed.
 
     async def _show_auto_send(self) -> None:
         """The automatic-analysis line in Settings, from the connected account's active
@@ -2139,6 +2166,7 @@ class MainWindow(QMainWindow):
         Replies in tracked threads that aren't in today's Inbox (``outside_ids``) are labelled
         as such and are otherwise like any other message. Messages the owner left out of an
         earlier review (``declined_ids``) start unchecked, with "you left this out earlier"."""
+        self._checked_at = self.now()  # The sync has finished; the owner may take a while.
         if not candidates:
             return ()
         self._review = asyncio.get_running_loop().create_future()

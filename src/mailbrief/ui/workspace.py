@@ -475,6 +475,8 @@ class ThreePaneWorkspace(QWidget):
         list_pane.setMinimumWidth(220)
         self.detail = BriefDetailPane()
         self.detail.setMinimumWidth(280)
+        # Page Up and Page Down in the list page through the selected email.
+        self.brief_list.set_page_scroll(self.detail.verticalScrollBar())
         self.splitter.addWidget(list_pane)
         self.splitter.addWidget(self.detail)
         self.splitter.setStretchFactor(0, 4)

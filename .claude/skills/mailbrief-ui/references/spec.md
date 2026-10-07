@@ -40,9 +40,11 @@ All read colours from `current_tokens()` at paint time.
 - Rows: a header row (from `SECTION_TITLES`) whenever the digest section changes, then
   item rows in digest order. `BriefRow(kind, title, item, sender, chips)`.
 - Sender: the contact's name, else its address.
-- Deadline chip (WARNING), in the digest's zone: DATETIME `Due {local:%a %H:%M}`; DATE
-  `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters with "…"; NONE
-  no chip.
+- Deadline chip (WARNING), in the digest's zone, `deadline_chip(item, zone, today)` with
+  the digest's `local_date` as today: DATETIME from today to today + 6 days
+  `Due {local:%a %H:%M}`, any other DATETIME (past ones too) `Due {%b} {day} {%H:%M}`;
+  DATE `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters with "…";
+  NONE no chip.
 - Proposal chip (ACCENT), from the first pending proposal: NEW_DEADLINE "Proposes a new
   deadline"; CANCELLED or DELIVERED "Proposes completing an action".
 - Model: `KIND_ROLE = UserRole + 1`, `ROW_ROLE = UserRole + 2`. Display is the header
@@ -58,6 +60,8 @@ All read colours from `current_tokens()` at paint time.
 - View: objectName `briefList`, accessible name "Brief items", NoFrame,
   ScrollPerPixel, SingleSelection; `item_selected(DigestItem)`; `show_rows(rows)` selects
   the first item row; Return and Enter emit `activated` once and are consumed.
+  Page Up and Page Down (no modifier) scroll the detail pane by a page
+  (`set_page_scroll`, set by the workspace) instead of moving the selection.
 
 ## Wrapping labels (`ui/labels.py`)
 

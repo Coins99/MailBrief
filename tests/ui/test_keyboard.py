@@ -5,6 +5,7 @@ The theme is applied first: under Fusion, buttons take focus by Tab on every pla
 """
 
 import asyncio
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter
+from mailbrief.domain.digests import DailyDigest, SavedBriefSummary
 from mailbrief.ui.main_window import PAGE_SHORTCUTS, MainWindow
 from mailbrief.ui.theme import apply_theme
 from tests.ui.test_main_window_layout import BUSY, NOW, finish, mockup_backend, show
@@ -157,6 +159,50 @@ async def test_the_briefs_shortcut_waits_for_local_storage(
         "Saved briefs open once local storage loads. Choose Retry loading saved data."
     )
     assert window.workspace.current_page() == "today"
+
+
+async def test_a_page_that_loads_late_never_overrides_where_the_owner_went(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = asyncio.Event()
+    load = window.backend.list_briefs
+
+    async def slow() -> tuple[SavedBriefSummary, ...]:
+        await release.wait()
+        return await load()
+
+    monkeypatch.setattr(window.backend, "list_briefs", slow)
+    press(window, 5)  # Briefs starts loading…
+    await asyncio.sleep(0)
+    assert window.task is not None and not window.task.done()
+    press(window, 4)  # …and the owner moves to Drafts before it has.
+    assert window.workspace.current_page() == "drafts"
+    release.set()
+    await finish(window)
+    assert window.workspace.current_page() == "drafts"
+    assert window.workspace.sidebar.current_key() == "drafts"
+
+
+async def test_a_brief_that_opens_late_leaves_the_owner_where_they_went(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    press(window, 5)
+    await finish(window)
+    release = asyncio.Event()
+    load = window.backend.load_brief
+
+    async def slow(account_email: str, local_date: date) -> DailyDigest | None:
+        await release.wait()
+        return await load(account_email, local_date)
+
+    monkeypatch.setattr(window.backend, "load_brief", slow)
+    window.history_panel.saved.setCurrentRow(0)
+    window.history_panel.open_button.click()
+    await asyncio.sleep(0)
+    press(window, 4)
+    release.set()
+    await finish(window)
+    assert window.workspace.current_page() == "drafts"  # Today has the brief, unshown.
 
 
 async def test_tab_runs_header_sidebar_brief_then_detail(window: MainWindow) -> None:
