@@ -5,7 +5,7 @@ import sys
 from collections.abc import Iterator
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QProxyStyle
 
 from mailbrief.ui.theme import DARK, set_current_tokens
 
@@ -26,7 +26,9 @@ def themed(qapp: QApplication) -> Iterator[None]:
     test ever sees Fusion, the palette, the stylesheet or the bundled font."""
     stylesheet = qapp.styleSheet()
     qapp.setStyleSheet("")  # A stylesheet's proxy style hides the real style's name.
-    style = qapp.style().name()
+    current = qapp.style()
+    # The theme's own proxy style has no name; its base style does.
+    style = (current.baseStyle() if isinstance(current, QProxyStyle) else current).name()
     palette = qapp.palette()
     font = qapp.font()
     qapp.setStyleSheet(stylesheet)

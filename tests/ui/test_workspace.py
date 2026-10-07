@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestStatus
-from mailbrief.ui.theme import ThemeMode, apply_theme
+from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
 from mailbrief.ui.workspace import (
     DIALOG_PAGES,
     EMPTY_BRIEF,
@@ -324,3 +324,18 @@ def test_clear_shows_only_the_message(qtbot: QtBot) -> None:
     assert workspace.heading.isHidden()
     texts = [label.text() for label in workspace.detail.findChildren(QLabel)]
     assert texts == ["Saved brief unavailable."]
+
+
+def test_nav_buttons_are_muted_while_disabled(qtbot: QtBot) -> None:
+    from mailbrief.ui.workspace import NavButton
+
+    tokens = current_tokens()
+    row = NavButton("Data", "database")
+    qtbot.addWidget(row)
+    assert row._color() == tokens.text_secondary
+    row.setDown(True)
+    assert row._color() == tokens.text
+    row.setEnabled(False)
+    assert row._color() == tokens.text_muted
+    assert not row._active()  # No fill while disabled.
+    assert not row.grab().isNull()

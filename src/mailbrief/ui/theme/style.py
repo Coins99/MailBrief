@@ -4,7 +4,15 @@ import dataclasses
 import string
 
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import (
+    QApplication,
+    QProxyStyle,
+    QStyle,
+    QStyleFactory,
+    QStyleHintReturn,
+    QStyleOption,
+    QWidget,
+)
 
 from mailbrief.ui.theme.assets import register_fonts, release_icon_cache, ui_font
 from mailbrief.ui.theme.tokens import DARK, TEXT_PX, ThemeMode, Tokens, tokens_for
@@ -18,6 +26,7 @@ QLabel[tone="warning"] { color: $warning_fg; }
 QPushButton[variant="outline"] { background: transparent; color: $text; border: 1px solid $border_strong; border-radius: 8px; padding: 5px 14px; }
 QPushButton[variant="outline"]:hover { background: $selection; }
 QPushButton[variant="outline"]:focus { border-color: $accent_fg; }
+QPushButton[variant="outline"]:disabled { color: $text_muted; border-color: $hairline; }
 QPushButton[variant="nav"] { text-align: left; background: transparent; color: $text_secondary; border: none; border-radius: 8px; padding: 6px 10px; }
 QPushButton[variant="nav"]:hover, QPushButton[variant="nav"]:focus { background: $selection; color: $text; }
 QListView#sidebarNav, QListView#briefList { background: $panel; border: none; outline: 0; }
@@ -73,16 +82,40 @@ def build_stylesheet(t: Tokens) -> str:
     return string.Template(QSS).substitute(dataclasses.asdict(t))
 
 
+class ThemeStyle(QProxyStyle):
+    """Fusion without mnemonic underlines: Alt and the letter still press a button, but no
+    letter is underlined, as on macOS."""
+
+    def styleHint(
+        self,
+        hint: QStyle.StyleHint,
+        option: QStyleOption | None = None,
+        widget: QWidget | None = None,
+        returnData: QStyleHintReturn | None = None,
+    ) -> int:
+        if hint == QStyle.StyleHint.SH_UnderlineShortcut:
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+
+# The application owns its style; this reference keeps the Python object, and so its
+# override, alive for as long as it is the application's style.
+_style: ThemeStyle | None = None
+
+
 def apply_theme(app: QApplication, mode: ThemeMode = ThemeMode.DARK) -> Tokens:
-    """Apply Fusion, the bundled font, the palette and the stylesheet for ``mode``.
+    """Apply Fusion (as ThemeStyle), the bundled font, the palette and the stylesheet for
+    ``mode``.
 
     Without the bundled font the app keeps Qt's font; the colours still apply.
     """
     tokens = tokens_for(mode)
     # A stylesheet wraps the style in a proxy that hides its name; clear it first.
     app.setStyleSheet("")
-    if app.style().name().lower() != "fusion":
-        app.setStyle("Fusion")
+    global _style
+    if not isinstance(app.style(), ThemeStyle):
+        _style = ThemeStyle(QStyleFactory.create("Fusion"))
+        app.setStyle(_style)
     if register_fonts():
         app.setFont(ui_font(TEXT_PX))
     app.setPalette(build_palette(tokens))

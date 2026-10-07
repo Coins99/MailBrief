@@ -272,17 +272,27 @@ class NavButton(QPushButton):
         self.setFixedHeight(_NAV_ROW)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def _active(self) -> bool:
+        return self.isEnabled() and (self.underMouse() or self.hasFocus() or self.isDown())
+
+    def _color(self) -> str:
+        """The icon and label colour: muted while disabled, full while hovered, focused or
+        pressed, else secondary."""
+        tokens = current_tokens()
+        if not self.isEnabled():
+            return tokens.text_muted
+        return tokens.text if self._active() else tokens.text_secondary
+
     def paintEvent(self, event: QPaintEvent) -> None:
         tokens = current_tokens()
-        active = self.underMouse() or self.hasFocus() or self.isDown()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
-        if active:
+        if self._active():  # Never while disabled.
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(tokens.selection))
             painter.drawRoundedRect(QRectF(rect), RADIUS, RADIUS)
-        color = tokens.text if active else tokens.text_secondary
+        color = self._color()
         pixmap = icon_pixmap(self._icon_name, color, _ICON_PX, self.devicePixelRatioF())
         painter.drawPixmap(_ICON_X, (rect.height() - _ICON_PX) // 2, pixmap)
         painter.setFont(ui_font(TEXT_PX))

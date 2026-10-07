@@ -254,6 +254,7 @@ _DRAFT_STALE = (DraftConflictError, DraftNotFoundError)
 _PICK_ONE = "Select at least one message to analyze, or Cancel."
 _NOT_REFRESHED = "The view could not be refreshed; restart MailBrief to see the latest."
 _BUSY = "MailBrief is busy; try again in a moment."
+_BRIEFS_UNAVAILABLE = "Saved briefs open once local storage loads. Choose Retry loading saved data."
 _EDITOR_STALE = (
     "This action changed since you opened it. Your edits are still here — copy what you "
     "need, then Cancel and reopen the action."
@@ -319,15 +320,21 @@ def _ready_text(ready: int) -> str:
 def _outline_button(
     text: str, name: str, *, px: int | None = None, accessible_name: str | None = None
 ) -> QPushButton:
-    """An app-authored outline button; ``text`` may carry its ``&`` mnemonic."""
+    """An app-authored outline button; ``text`` may carry its ``&`` mnemonic. Without
+    ``accessible_name``, Qt reads the button's text, so a label that changes stays read."""
     button = QPushButton(text)
     button.setObjectName(name)
-    button.setProperty("variant", "outline")
-    button.setAccessibleName(accessible_name or text.replace("&", ""))
-    button.setAutoDefault(False)
+    _outline(button)
+    if accessible_name is not None:
+        button.setAccessibleName(accessible_name)
     if px is not None:
         button.setFont(ui_font(px))
     return button
+
+
+def _outline(button: QPushButton) -> None:
+    button.setProperty("variant", "outline")
+    button.setAutoDefault(False)
 
 
 def _page(widget: QWidget, name: str, accessible_name: str) -> QWidget:
@@ -562,7 +569,7 @@ class MainWindow(QMainWindow):
         self.shortlist.itemChanged.connect(self._selection_changed)
         review_layout.addWidget(self.shortlist)
         self.review_button = QPushButton("Co&ntinue with selected messages")
-        review_layout.addWidget(self.review_button)
+        review_layout.addWidget(self.review_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.review_panel.hide()
         self.consent_panel = QWidget()
         self.consent_panel.setObjectName("consentPanel")
@@ -573,8 +580,10 @@ class MainWindow(QMainWindow):
         consent_layout.addWidget(self.disclosure)
         self.approve_button = QPushButton("&Approve transmission to Groq")
         self.decline_button = QPushButton("&Decline")
-        consent_layout.addWidget(self.approve_button)
-        consent_layout.addWidget(self.decline_button)
+        consent_layout.addWidget(self.approve_button, 0, Qt.AlignmentFlag.AlignLeft)
+        consent_layout.addWidget(self.decline_button, 0, Qt.AlignmentFlag.AlignLeft)
+        for run_button in (self.review_button, self.approve_button, self.decline_button):
+            _outline(run_button)
         self.consent_panel.hide()
         run_page = QScrollArea()
         run_page.setObjectName("runPage")
@@ -632,6 +641,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(strip)
         self.setCentralWidget(central)
         sidebar.page_requested.connect(self._request_page)
+        self._set_account(None)
         sidebar.settings_requested.connect(lambda: self.start(self._open_settings))
         self.connect_button.clicked.connect(lambda: self.start(self._connect))
         self.disconnect_button.clicked.connect(
@@ -648,6 +658,13 @@ class MainWindow(QMainWindow):
         self.decline_button.clicked.connect(lambda: self._answer_consent(False))
         self._set_busy(False)
 
+    def _set_account(self, email: str | None) -> None:
+        """The connected Gmail account, or None; Connect shows only without one and
+        Disconnect only with one."""
+        self._account_email = email
+        self.connect_button.setVisible(email is None)
+        self.disconnect_button.setVisible(email is not None)
+
     def _set_busy(self, busy: bool) -> None:
         self.retry_button.setVisible(not self._ready)
         self.retry_button.setEnabled(not busy)
@@ -655,6 +672,7 @@ class MainWindow(QMainWindow):
         self.disconnect_button.setEnabled(not busy)
         self.generate_button.setEnabled(not busy and self._ready)
         self.cancel_button.setEnabled(busy and self._cancellable)
+        self.cancel_button.setVisible(busy)
         self.settings_button.setEnabled(not busy)
         self.settings_dialog.set_busy(busy)
         self.cached_button.setEnabled(not busy and self._ready)
@@ -707,7 +725,9 @@ class MainWindow(QMainWindow):
     def _request_page(self, key: str) -> None:
         if key == "briefs":
             # A dialog, not a page: the sidebar stays on the page shown.
-            if not self.start(self._open_history) and not self._closing:
+            if not self._ready:
+                self.status.setText(_BRIEFS_UNAVAILABLE)
+            elif not self.start(self._open_history) and not self._closing:
                 self.status.setText(_BUSY)
             self.workspace.sidebar.set_current(self._sidebar_key())
             return
@@ -1507,7 +1527,7 @@ class MainWindow(QMainWindow):
             self.status.setText("Cancelled. The displayed saved brief is unchanged.")
         except AuthenticationRequiredError as exc:
             log_failure(exc)
-            self._account_email = None
+            self._set_account(None)
             self.connection.setText("Gmail: session expired or missing. Connect Gmail to continue.")
             self.status.setText("Sign in to Gmail, then retry. The saved brief is still available.")
         except ConfigurationError as exc:
@@ -1704,7 +1724,7 @@ class MainWindow(QMainWindow):
             log_failure(exc)
             self.connection.setText("Gmail: offline or unavailable. Saved brief available locally.")
         else:
-            self._account_email = email
+            self._set_account(email)
             self.connection.setText(f"Gmail: connected as {email}")
             self._launch_soon()
 
@@ -1717,7 +1737,7 @@ class MainWindow(QMainWindow):
     async def _connect(self) -> None:
         self.status.setText("Connecting to Gmail. Complete sign-in in your browser.")
         email = await self.backend.connect(silent_only=False)
-        self._account_email = email
+        self._set_account(email)
         self.connection.setText(f"Gmail: connected as {email}")
         self.status.setText("Connected. Sync to review today's messages.")
         await self._show_auto_send()  # The permission shown is the connected account's.
@@ -1725,7 +1745,7 @@ class MainWindow(QMainWindow):
 
     async def _disconnect(self) -> None:
         await self.backend.disconnect()
-        self._account_email = None
+        self._set_account(None)
         self.connection.setText("Gmail: disconnected")
         self.status.setText("Local credentials removed. Saved briefs remain on this device.")
         await self._show_auto_send()
@@ -1945,7 +1965,7 @@ class MainWindow(QMainWindow):
                     if code.startswith("AI_"):
                         self.ai.setText("AI: " + guidance)
             if "AUTH_REQUIRED" in (result.error_code, result.sync.error_code):
-                self._account_email = None  # Nothing more runs until the owner signs in again.
+                self._set_account(None)  # Nothing more runs until the owner signs in again.
                 self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
         self.status.setText(text)
         if result.status is not BriefStatus.CANCELLED:

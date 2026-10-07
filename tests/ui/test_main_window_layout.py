@@ -7,6 +7,7 @@ With MAILBRIEF_UI_SHOTS set to a folder, the window is also saved there as
 
 import asyncio
 import os
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -14,15 +15,18 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea
+from PySide6.QtGui import QAccessible, QDesktopServices, QKeySequence, QPixmap
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QStyle
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import SyncStatus
+from mailbrief.ports.errors import AuthenticationRequiredError
+from mailbrief.ui.actions_view import ActionsPanel
+from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.hairline import HairlineDivider, HairlineFrame
 from mailbrief.ui.main_window import MainWindow
-from mailbrief.ui.theme import ThemeMode, apply_theme
+from mailbrief.ui.theme import TITLE_PX, ThemeMode, apply_theme
 from tests.factories import make_action
 from tests.ui.brief_view import detail, select_item
 from tests.ui.test_workflow import FakeBackend
@@ -344,3 +348,142 @@ def save_shot(image: QPixmap, name: str) -> None:
     if folder:
         Path(folder).mkdir(parents=True, exist_ok=True)
         assert image.save(str(Path(folder) / f"{name}-{image.devicePixelRatio():g}x.png"))
+
+
+@pytest.mark.parametrize(
+    ("panel_type", "title"),
+    [(ActionsPanel, "Your actions"), (DraftsPanel, "Your drafts and notes")],
+)
+def test_page_headings_use_the_title_size(
+    qtbot: QtBot,
+    qapp: QApplication,
+    themed: None,
+    panel_type: type[ActionsPanel] | type[DraftsPanel],
+    title: str,
+) -> None:
+    apply_theme(qapp)
+    panel = panel_type()
+    qtbot.addWidget(panel)
+    heading = next(label for label in panel.findChildren(QLabel) if label.text() == title)
+    assert heading.font().pixelSize() == TITLE_PX
+    for page_button in panel.findChildren(QPushButton):
+        assert page_button.property("variant") == "outline"
+        assert not page_button.autoDefault()
+
+
+async def test_mnemonics_are_never_underlined(
+    qtbot: QtBot, qapp: QApplication, themed: None
+) -> None:
+    apply_theme(qapp)
+    window = MainWindow(FakeBackend())
+    qtbot.addWidget(window)
+    assert qapp.style().styleHint(QStyle.StyleHint.SH_UnderlineShortcut) == 0
+    assert window.generate_button.text() == "&Sync and review"
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="Qt turns mnemonics off on macOS")
+async def test_mnemonics_still_press_buttons(
+    qtbot: QtBot, qapp: QApplication, themed: None
+) -> None:
+    apply_theme(qapp)
+    window = MainWindow(FakeBackend())
+    qtbot.addWidget(window)
+    assert window.generate_button.shortcut() == QKeySequence("Alt+S")
+
+
+async def test_cancel_shows_only_while_busy(window: MainWindow) -> None:
+    assert window.cancel_button.isHidden()
+    release = asyncio.Event()
+
+    async def hold() -> None:
+        await release.wait()
+
+    window.start(hold)
+    assert not window.cancel_button.isHidden()
+    release.set()
+    await finish(window)
+    assert window.cancel_button.isHidden()
+
+
+def accounts(window: MainWindow) -> tuple[bool, bool]:
+    """Whether Connect and Disconnect are shown."""
+    return (not window.connect_button.isHidden(), not window.disconnect_button.isHidden())
+
+
+async def test_connect_and_disconnect_follow_the_account(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    assert accounts(window) == (False, True)  # Connected silently on startup.
+    window.start(window._disconnect)
+    await finish(window)
+    assert accounts(window) == (True, False)
+    window.start(window._connect)
+    await finish(window)
+    assert accounts(window) == (False, True)
+    backend.fail = AuthenticationRequiredError("expired")
+    window.start(window._generate)
+    await finish(window)
+    assert accounts(window) == (True, False)
+
+
+async def test_startup_without_a_session_offers_connect(qtbot: QtBot) -> None:
+    backend = FakeBackend()
+    backend.connect_fail = AuthenticationRequiredError("none")
+    window = MainWindow(backend)
+    qtbot.addWidget(window)
+    assert accounts(window) == (True, False)
+    window.start(window.initialize)
+    await finish(window)
+    assert accounts(window) == (True, False)
+
+
+async def test_briefs_waits_for_local_storage(qtbot: QtBot) -> None:
+    window = MainWindow(FakeBackend())
+    qtbot.addWidget(window)
+    window.workspace.sidebar.page_requested.emit("briefs")
+    assert window.task is None
+    assert window.status.text() == (
+        "Saved briefs open once local storage loads. Choose Retry loading saved data."
+    )
+    assert window.workspace.sidebar.current_key() == "today"
+
+
+async def test_undo_is_read_by_its_text(window: MainWindow) -> None:
+    async def nothing() -> None:
+        pass
+
+    window._offer_undo("Undo accept", nothing)
+    assert window.undo_button.accessibleName() == ""  # Qt derives it from the text.
+    accessible = QAccessible.queryAccessibleInterface(window.undo_button)
+    assert accessible is not None
+    assert accessible.text(QAccessible.Text.Name) == "Undo accept"
+
+
+@pytest.mark.parametrize("mode", list(ThemeMode))
+async def test_pages_render(
+    qtbot: QtBot, qapp: QApplication, themed: None, mode: ThemeMode
+) -> None:
+    apply_theme(qapp, mode)
+    backend = mockup_backend()
+    backend.candidates = ("message-1", "message-2", "message-3")
+    window = MainWindow(backend)
+    window.now = lambda: NOW
+    qtbot.addWidget(window)
+    window.start(window.initialize)
+    await finish(window)
+    window.resize(1100, 720)
+    show(qtbot, window)
+    for key in ("actions", "drafts"):
+        window._show_page(key)
+        QApplication.processEvents()
+        image = window.grab()
+        assert not image.isNull()
+        save_shot(image, f"page-{key}-{mode.value}")
+    window.start(window._generate)  # The review shows itself on the run page.
+    await settle()
+    assert window.workspace.current_page() == "run"
+    assert window.shortlist.count() == 3
+    QApplication.processEvents()
+    save_shot(window.grab(), f"page-run-{mode.value}")
+    window.cancel()
+    await finish(window)

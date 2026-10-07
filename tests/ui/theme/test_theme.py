@@ -6,7 +6,7 @@ import re
 import pytest
 from PySide6.QtCore import QMetaMethod
 from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyle
 
 from mailbrief.ui.theme import (
     DARK,
@@ -21,6 +21,7 @@ from mailbrief.ui.theme import (
     tokens_for,
     ui_font,
 )
+from mailbrief.ui.theme.style import ThemeStyle
 
 
 def luminance(color: str) -> float:
@@ -83,7 +84,8 @@ def test_apply_theme_sets_style_palette_and_tokens(
     assert palette.color(QPalette.ColorRole.ToolTipBase).name() == tokens.canvas
     assert current_tokens() == tokens_for(mode)
     qapp.setStyleSheet("")  # The stylesheet's proxy hides the base style's name.
-    assert qapp.style().name() == "fusion"
+    style = qapp.style()
+    assert isinstance(style, ThemeStyle) and style.baseStyle().name() == "fusion"
 
 
 def test_themed_fixture_restores_dark_tokens() -> None:
@@ -139,3 +141,27 @@ def test_releasing_the_icon_cache_empties_it(qapp: QApplication, themed: None) -
     assert icon_pixmap.cache_info().currsize == 0
     # apply_theme runs it on aboutToQuit; tests never emit the shared app's signals.
     assert qapp.isSignalConnected(QMetaMethod.fromSignal(qapp.aboutToQuit))
+
+
+def test_disabled_outline_buttons_are_muted() -> None:
+    sheet = build_stylesheet(DARK)
+    assert (
+        'QPushButton[variant="outline"]:disabled '
+        f"{{ color: {DARK.text_muted}; border-color: {DARK.hairline}; }}"
+    ) in sheet
+
+
+def test_the_theme_style_never_underlines_mnemonics(qapp: QApplication, themed: None) -> None:
+    apply_theme(qapp)
+    hint = QStyle.StyleHint.SH_UnderlineShortcut
+    assert qapp.style().styleHint(hint) == 0
+    qapp.setStyleSheet("")
+    style = qapp.style()
+    assert isinstance(style, ThemeStyle)
+    # Every other hint is Fusion's own.
+    fusion = style.baseStyle()
+    other = QStyle.StyleHint.SH_DialogButtonBox_ButtonsHaveIcons
+    assert style.styleHint(other) == fusion.styleHint(other)
+    apply_theme(qapp)  # Applying again keeps the same style.
+    qapp.setStyleSheet("")
+    assert qapp.style() is style

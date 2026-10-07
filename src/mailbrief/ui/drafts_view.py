@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.drafts import KIND_NAMES, DraftKind, DraftSummary
 from mailbrief.ui.lists import ActivatingList
+from mailbrief.ui.theme import TITLE_PX, ui_font
 
 NEW = "new"
 OPEN = "open"
@@ -55,9 +56,7 @@ class DraftsPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         heading = QLabel("Your drafts and notes")
         heading.setTextFormat(Qt.TextFormat.PlainText)
-        font = heading.font()
-        font.setPointSize(font.pointSize() + 3)
-        heading.setFont(font)
+        heading.setFont(ui_font(TITLE_PX, medium=True))
         layout.addWidget(heading)
         self.list = ActivatingList()
         self.list.setAccessibleName("Drafts and notes")
@@ -80,7 +79,10 @@ class DraftsPanel(QWidget):
         self.open_button = QPushButton("&Open")
         self.delete_button = QPushButton("Delete draf&t")
         for button in (self.new_button, self.open_button, self.delete_button):
+            button.setProperty("variant", "outline")
+            button.setAutoDefault(False)
             buttons.addWidget(button)
+        buttons.addStretch(1)  # Buttons keep their own width.
         layout.addLayout(buttons)
         self.open_button.clicked.connect(lambda: self._request(OPEN))
         self.delete_button.clicked.connect(lambda: self._request(DELETE))
