@@ -188,8 +188,33 @@ def _metrics(px: int, *, medium: bool = False) -> QFontMetrics:
     return QFontMetrics(ui_font(px, medium=medium))
 
 
-def _chip_height() -> int:
+def chip_height() -> int:
     return _metrics(CAPTION_PX).height() + 2 * _CHIP_PAD_V
+
+
+def paint_chips(painter: QPainter, chips: Sequence[Chip], left: int, top: int) -> None:
+    """Rounded chips in a row from ``left``: warning or accent colours, caption text."""
+    tokens = current_tokens()
+    font = ui_font(CAPTION_PX)
+    metrics = QFontMetrics(font)
+    height = chip_height()
+    radius = min(RADIUS, height / 2)
+    painter.setFont(font)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    x = left
+    for chip in chips:
+        width = metrics.horizontalAdvance(chip.text) + 2 * _CHIP_PAD_H
+        warning = chip.tone is ChipTone.WARNING
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(tokens.warning_bg if warning else tokens.accent_bg))
+        painter.drawRoundedRect(QRectF(x, top, width, height), radius, radius)
+        painter.setPen(QColor(tokens.warning_fg if warning else tokens.accent_fg))
+        painter.drawText(
+            QRect(x, top, width, height),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine,
+            chip.text,
+        )
+        x += width + _CHIP_SPACING
 
 
 class BriefItemDelegate(QStyledItemDelegate):
@@ -243,7 +268,7 @@ class BriefItemDelegate(QStyledItemDelegate):
         top += sender_metrics.height()
         if row.chips:
             top += _CHIP_GAP
-            self._paint_chips(painter, row.chips, left, top)
+            paint_chips(painter, row.chips, left, top)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setPen(hairline_pen(tokens.hairline))
         bottom = rect.bottom()
@@ -255,29 +280,6 @@ class BriefItemDelegate(QStyledItemDelegate):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(rect).adjusted(1, 1, -1, -1))
         painter.restore()
-
-    def _paint_chips(self, painter: QPainter, chips: Sequence[Chip], left: int, top: int) -> None:
-        tokens = current_tokens()
-        font = ui_font(CAPTION_PX)
-        metrics = QFontMetrics(font)
-        height = _chip_height()
-        radius = min(RADIUS, height / 2)
-        painter.setFont(font)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        x = left
-        for chip in chips:
-            width = metrics.horizontalAdvance(chip.text) + 2 * _CHIP_PAD_H
-            warning = chip.tone is ChipTone.WARNING
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(tokens.warning_bg if warning else tokens.accent_bg))
-            painter.drawRoundedRect(QRectF(x, top, width, height), radius, radius)
-            painter.setPen(QColor(tokens.warning_fg if warning else tokens.accent_fg))
-            painter.drawText(
-                QRect(x, top, width, height),
-                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine,
-                chip.text,
-            )
-            x += width + _CHIP_SPACING
 
     def sizeHint(self, option: QStyleOptionViewItem, index: _Index) -> QSize:
         row = index.data(ROW_ROLE)
@@ -294,7 +296,7 @@ class BriefItemDelegate(QStyledItemDelegate):
             + 1  # The hairline.
         )
         if row.chips:
-            height += _CHIP_GAP + _chip_height()
+            height += _CHIP_GAP + chip_height()
         return QSize(width, height)
 
 

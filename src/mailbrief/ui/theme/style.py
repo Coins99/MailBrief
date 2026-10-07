@@ -27,6 +27,9 @@ QPushButton[variant="outline"] { background: transparent; color: $text; border: 
 QPushButton[variant="outline"]:hover { background: $selection; }
 QPushButton[variant="outline"]:focus { border-color: $accent_fg; }
 QPushButton[variant="outline"]:disabled { color: $text_muted; border-color: $hairline; }
+QPushButton[variant="primary"] { background: $accent_bg; color: $accent_fg; border: 1px solid $accent_border; border-radius: 8px; padding: 5px 14px; }
+QPushButton[variant="primary"]:focus { border-color: $accent_fg; }
+QPushButton[variant="primary"]:disabled { background: transparent; color: $text_muted; border-color: $hairline; }
 QPushButton[variant="nav"] { text-align: left; background: transparent; color: $text_secondary; border: none; border-radius: 8px; padding: 6px 10px; }
 QPushButton[variant="nav"]:hover, QPushButton[variant="nav"]:focus { background: $selection; color: $text; }
 QListView#sidebarNav, QListView#briefList { background: $panel; border: none; outline: 0; }

@@ -130,15 +130,16 @@ from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
 from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
-from mailbrief.ui.hairline import HairlineDivider
+from mailbrief.ui.hairline import HairlineDivider, HairlineFrame
 from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryPanel
 from mailbrief.ui.labels import plain_label, wrap_label
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
 from mailbrief.ui.proposals_view import ProposalsDialog
+from mailbrief.ui.run_view import ROW_ROLE, ShortlistDelegate, shortlist_row
 from mailbrief.ui.scheduler import RefreshScheduler
 from mailbrief.ui.settings_view import SettingsDialog
-from mailbrief.ui.theme import CAPTION_PX, SMALL_PX, ui_font
+from mailbrief.ui.theme import CAPTION_PX, SMALL_PX, TITLE_PX, ui_font
 from mailbrief.ui.workspace import ThreePaneWorkspace
 
 
@@ -334,6 +335,19 @@ def _outline_button(
 def _outline(button: QPushButton) -> None:
     button.setProperty("variant", "outline")
     button.setAutoDefault(False)
+
+
+_RUN_WIDTH = 760
+
+
+def _step_heading(layout: QVBoxLayout, step: str, title: str) -> None:
+    """A run step's caption ("Step 1 of 2") above its title."""
+    caption = plain_label(step, tone="muted", px=CAPTION_PX)
+    caption.setObjectName("stepCaption")
+    layout.addWidget(caption)
+    heading = plain_label(title, px=TITLE_PX, medium=True)
+    heading.setObjectName("stepTitle")
+    layout.addWidget(heading)
 
 
 def _page(widget: QWidget, name: str, accessible_name: str) -> QWidget:
@@ -556,19 +570,27 @@ class MainWindow(QMainWindow):
         retry.addWidget(self.retry_button)
         retry.addStretch(1)
         workspace.today_top.addLayout(retry)
-        # The run page: the shortlist review, then the consent to send.
+        # The run page: step 1 reviews the shortlist, step 2 approves sending.
         self.review_panel = QWidget()
         self.review_panel.setObjectName("reviewPanel")
         self.review_panel.setAccessibleName("Review the shortlist")
         review_layout = QVBoxLayout(self.review_panel)
         review_layout.setContentsMargins(0, 0, 0, 0)
-        self.review_hint = plain_label(_review_hint(MAX_SHORTLIST_SIZE))
+        review_layout.setSpacing(8)
+        _step_heading(review_layout, "Step 1 of 2", "Choose what MailBrief reads")
+        self.review_hint = wrap_label(_review_hint(MAX_SHORTLIST_SIZE), tone="secondary")
+        self.review_hint.setObjectName("reviewHint")
         review_layout.addWidget(self.review_hint)
         self.shortlist = QListWidget()
+        self.shortlist.setObjectName("shortlist")
         self.shortlist.setAccessibleName("Messages selected for analysis")
+        self.shortlist.setItemDelegate(ShortlistDelegate(self.shortlist))
         self.shortlist.itemChanged.connect(self._selection_changed)
         review_layout.addWidget(self.shortlist)
         self.review_button = QPushButton("Co&ntinue with selected messages")
+        self.review_button.setObjectName("reviewButton")
+        self.review_button.setProperty("variant", "primary")
+        self.review_button.setAutoDefault(False)
         review_layout.addWidget(self.review_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.review_panel.hide()
         self.consent_panel = QWidget()
@@ -576,14 +598,29 @@ class MainWindow(QMainWindow):
         self.consent_panel.setAccessibleName("Consent to send")
         consent_layout = QVBoxLayout(self.consent_panel)
         consent_layout.setContentsMargins(0, 0, 0, 0)
-        self.disclosure = plain_label("")
-        consent_layout.addWidget(self.disclosure)
+        consent_layout.setSpacing(8)
+        _step_heading(consent_layout, "Step 2 of 2", "Approve sending to Groq")
+        disclosure_card = HairlineFrame()
+        disclosure_card.setObjectName("disclosureCard")
+        disclosure_card.setAccessibleName("What will be sent")
+        QVBoxLayout(disclosure_card).setContentsMargins(0, 0, 0, 0)
+        self.disclosure = wrap_label("")
+        self.disclosure.setObjectName("disclosure")
+        card_layout = disclosure_card.layout()
+        assert card_layout is not None
+        card_layout.addWidget(self.disclosure)
+        consent_layout.addWidget(disclosure_card)
         self.approve_button = QPushButton("&Approve transmission to Groq")
+        self.approve_button.setObjectName("approveButton")
         self.decline_button = QPushButton("&Decline")
-        consent_layout.addWidget(self.approve_button, 0, Qt.AlignmentFlag.AlignLeft)
-        consent_layout.addWidget(self.decline_button, 0, Qt.AlignmentFlag.AlignLeft)
-        for run_button in (self.review_button, self.approve_button, self.decline_button):
-            _outline(run_button)
+        self.decline_button.setObjectName("declineButton")
+        answers = QHBoxLayout()
+        answers.setSpacing(8)
+        for answer in (self.approve_button, self.decline_button):
+            _outline(answer)
+            answers.addWidget(answer)
+        answers.addStretch(1)
+        consent_layout.addLayout(answers)
         self.consent_panel.hide()
         run_page = QScrollArea()
         run_page.setObjectName("runPage")
@@ -592,11 +629,20 @@ class MainWindow(QMainWindow):
         run_page.setFrameShape(QFrame.Shape.NoFrame)
         run_content = QWidget()
         run_content.setObjectName("runContent")
-        run_layout = QVBoxLayout(run_content)
-        run_layout.setContentsMargins(16, 14, 16, 14)
+        # A centred column, at most _RUN_WIDTH wide.
+        centred = QHBoxLayout(run_content)
+        centred.setContentsMargins(16, 14, 16, 14)
+        column = QWidget()
+        column.setObjectName("runColumn")
+        column.setMaximumWidth(_RUN_WIDTH)
+        run_layout = QVBoxLayout(column)
+        run_layout.setContentsMargins(0, 0, 0, 0)
         run_layout.addWidget(self.review_panel)
         run_layout.addWidget(self.consent_panel)
         run_layout.addStretch(1)
+        centred.addStretch(1)
+        centred.addWidget(column, 1000)
+        centred.addStretch(1)
         run_page.setWidget(run_content)
         workspace.add_page("run", run_page)
         self.cached_dialog.zone = self.zone
@@ -1557,7 +1603,7 @@ class MainWindow(QMainWindow):
             self.review_panel.hide()
             self.consent_panel.hide()
             self.shortlist.clear()
-            self.disclosure.clear()
+            self.disclosure.setText("")
             self._review = None
             self._consent = None
             self._leave_run_page()
@@ -2051,6 +2097,13 @@ class MainWindow(QMainWindow):
         for ranked in candidates:
             message = ranked.message
             label = f"{message.sender.address} — {message.subject}"
+            # What the shortlist's delegate paints; the item's text stays what is read.
+            row = shortlist_row(
+                ranked,
+                blocked=message.provider_message_id in blocked_ids,
+                outside=message.provider_message_id in outside_ids,
+                declined=message.provider_message_id in declined_ids,
+            )
             if message.provider_message_id in blocked_ids:
                 # Not user-checkable and never given a check box, so neither a click nor
                 # Space can select it.
@@ -2058,6 +2111,7 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 item.setToolTip(_EXCLUDED_TIP)
+                item.setData(ROW_ROLE, row)
                 self.shortlist.addItem(item)
                 continue
             if message.provider_message_id in outside_ids:
@@ -2076,6 +2130,7 @@ class MainWindow(QMainWindow):
                 if message.provider_message_id in selected_ids
                 else Qt.CheckState.Unchecked
             )
+            item.setData(ROW_ROLE, row)
             self.shortlist.addItem(item)
         self.review_panel.show()
         self.shortlist.setCurrentRow(0)

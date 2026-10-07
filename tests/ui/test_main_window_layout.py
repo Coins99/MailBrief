@@ -518,7 +518,12 @@ async def test_pages_render(
     assert window.shortlist.count() == 3
     QApplication.processEvents()
     save_shot(window.grab(), f"page-run-{mode.value}")
-    window.cancel()
+    window.review_button.click()  # Step 2: the consent.
+    await settle()
+    assert window.consent_panel.isVisible()
+    QApplication.processEvents()
+    save_shot(window.grab(), f"page-consent-{mode.value}")
+    window.decline_button.click()
     await finish(window)
 
 
