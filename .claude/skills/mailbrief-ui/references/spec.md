@@ -74,9 +74,10 @@ the whole text the accessible name; no tooltip, no links.
 ## Detail pane (`ui/brief_detail.py`)
 
 `BriefDetailPane(QScrollArea)`, objectName `briefDetail`, accessible name "Selected
-email". Signals mirror `DigestView`: `suggestion_requested(str, int)`,
-`accept_into_requested(int, str, int)`, `proposal_requested(str, int, int)`,
-`reply_requested(str, str)`, plus `source_requested(str)`; it never opens URLs itself.
+email". Signals: `suggestion_requested(str, int)` (ACCEPT or DISMISS, from this module),
+`accept_into_requested(int, str, int)`, `proposal_requested(str, int, int)` (APPLY or
+DISMISS), `reply_requested(str, str)` and `source_requested(str)`; it never opens URLs
+itself.
 Content margins 16, 14, 16, 14, spacing 8, in order (every mail- or AI-derived line is
 a `WrapLabel`):
 1. Subject (or "(no subject)"), 15px Medium.

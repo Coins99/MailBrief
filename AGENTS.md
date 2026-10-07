@@ -117,8 +117,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   (`workspace.py`, with `hairline.py`, `brief_list.py` and `brief_detail.py`): the header
   (when Gmail was last checked, Sync and review, Cancel), the sidebar's pages and footer
   (Saved mail, Data, Settings, the Gmail and AI lines, Connect and Disconnect), the Today,
-  run (review and consent), Actions and Drafts pages, and a status strip with Undo.
-  `digest_view.py` is no longer in the window and keeps its own tests.
+  run (review and consent), Actions, Drafts and Briefs pages, and a status strip with
+  Undo.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.

@@ -1,8 +1,8 @@
 """The selected email's summary, deadline, suggestions and proposals.
 
-Buttons only emit requests; the window decides what happens, as with ``DigestView``. Mail
-and AI text appears only in plain-text labels and escaped button text, never in a tooltip,
-and the pane never opens a URL itself.
+Buttons only emit requests, with the IDs and revisions shown; the window decides what
+happens. Mail and AI text appears only in plain-text labels and escaped button text, never
+in a tooltip, and the pane never opens a URL itself.
 """
 
 from collections.abc import Callable, Sequence
@@ -32,12 +32,15 @@ from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.digests import DigestItem
 from mailbrief.ui.brief_list import NO_SUBJECT, sender_text
 from mailbrief.ui.deadline_text import deadline_text
-from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS
 from mailbrief.ui.hairline import HairlineFrame
 from mailbrief.ui.labels import button_label, plain_label, short_button_label, wrap_label
 from mailbrief.ui.proposals_view import effect_text
 from mailbrief.ui.theme import SMALL_PX, TEXT_PX, TITLE_PX, current_tokens, icon, icon_pixmap
 
+# What a suggestion or proposal request asks for.
+ACCEPT = "accept"
+DISMISS = "dismiss"
+APPLY = "apply"
 EMPTY_TEXT = "Select an email to see its summary and suggestions."
 _ICON_PX = 14
 

@@ -11,7 +11,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ProposalState
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind
-from mailbrief.domain.digests import DigestItem
+from mailbrief.domain.digests import SECTION_TITLES, DigestItem
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ui.brief_list import (
     KIND_ROLE,
@@ -199,3 +199,18 @@ def test_empty_subject_reads_no_subject() -> None:
     )
     rows = build_rows(blank, {})
     assert rows[1].title == "(no subject)"
+
+
+def test_every_section_uses_the_shared_titles() -> None:
+    sections = tuple(SECTION_TITLES)
+    digest = mockup_digest().digest.model_copy(
+        update={
+            "items": tuple(
+                make_digest_item(message_key=f"m{index}", position=index, section=section)
+                for index, section in enumerate(sections)
+            )
+        }
+    )
+    headers = [row.title for row in build_rows(digest, {}) if row.kind == "header"]
+    assert headers == [SECTION_TITLES[section] for section in sections]
+    assert "Decisions" in headers and "Replies in threads you track" in headers

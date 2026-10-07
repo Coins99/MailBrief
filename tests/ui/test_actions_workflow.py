@@ -16,7 +16,7 @@ from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, ActionSta
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.services.actions import ActionConflictError
-from mailbrief.ui.digest_view import ACCEPT, DISMISS
+from mailbrief.ui.brief_detail import ACCEPT, DISMISS
 from mailbrief.ui.main_window import MainWindow
 from tests.factories import make_action
 from tests.ui.brief_view import detail

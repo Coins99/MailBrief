@@ -10,7 +10,6 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DigestStatus, SavedBriefSummary
 from mailbrief.domain.preferences import OwnerPreferences
-from mailbrief.ui.digest_view import DigestView
 from mailbrief.ui.history_view import BriefHistoryPanel
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.brief_view import shown_text
@@ -126,17 +125,6 @@ def test_return_opens_a_saved_brief(panel: BriefHistoryPanel) -> None:
     panel.saved.setFocus()
     QTest.keyClick(panel.saved, Qt.Key.Key_Return)
     assert opened == [("owner@example.com", PAST)]
-
-
-def test_the_brief_says_what_it_covers(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    backend = FakeBackend()
-    view.show_digest(backend.saved)
-    assert (
-        "Covers messages received on 2026-09-04 up to 12:00 (UTC) that were in your Inbox "
-        "then." in view.toPlainText()
-    )
 
 
 # The window.

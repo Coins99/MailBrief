@@ -5,21 +5,25 @@ from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+import shiboken6
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.actions import ProposalState, SuggestionState, SuggestionView
-from mailbrief.domain.analysis import DeadlinePrecision
+from mailbrief.domain.actions import ProposalState, SuggestionState, SuggestionView, ThreadLink
+from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, FollowUpKind
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ui.brief_detail import (
+    ACCEPT,
+    APPLY,
+    DISMISS,
     BriefDetailPane,
     item_deadline_text,
     outline_button,
     suggestion_meta,
 )
-from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS
+from mailbrief.ui.hairline import HairlineFrame
 from tests.factories import make_digest_item, make_proposal, make_suggestion
 from tests.ui.workspace_fixtures import ACCOUNT, DECK_ACTION, FINANCE_ACTION, ZONE, mockup_digest
 
@@ -258,3 +262,159 @@ def test_long_titles_shorten_buttons_but_keep_the_full_name(pane: BriefDetailPan
 
 def button_with_prefix(pane: QWidget, prefix: str) -> QPushButton:
     return next(b for b in pane.findChildren(QPushButton) if b.text().startswith(prefix))
+
+
+# Continuations, Add to, proposals and buttons in the pane.
+
+TRACKED = ThreadLink(
+    public_id="22222222-2222-4222-8222-222222222222",
+    title='<a href="https://evil.example">Chase</a> the <b>deck</b>',
+    revision=3,
+    ownership=ActionOwnership.WAITING_FOR,
+    is_source=False,
+)
+OWN = ThreadLink(
+    public_id="33333333-3333-4333-8333-333333333333",
+    title="Book the room",
+    revision=1,
+    ownership=ActionOwnership.MINE,
+    is_source=True,
+)
+PENDING_SUGGESTION = SuggestionView(
+    suggestion_id=7, state=SuggestionState.PENDING, suggestion=make_suggestion()
+)
+
+
+def show_links(pane: BriefDetailPane, *views: SuggestionView) -> None:
+    pane.show_item(
+        make_digest_item(suggestions=views or (PENDING_SUGGESTION,)),
+        account_email=ACCOUNT,
+        timezone_name=ZONE,
+        links=(TRACKED, OWN),
+    )
+
+
+def add_to_buttons(pane: QWidget) -> list[QPushButton]:
+    return [b for b in pane.findChildren(QPushButton) if b.text().startswith("Add to")]
+
+
+def test_continues_names_only_actions_the_email_is_not_a_source_of(
+    pane: BriefDetailPane,
+) -> None:
+    show_links(pane)
+    texts = label_texts(pane)
+    assert f"Continues: “{TRACKED.title}”" in texts  # Its markup stays text.
+    assert "Continues: “Book the room”" not in texts  # The email is already its source.
+    requests = QSignalSpy(pane.accept_into_requested)
+    for into in add_to_buttons(pane):
+        into.click()
+    assert [requests.at(n) for n in range(requests.count())] == [
+        [7, TRACKED.public_id, 3],
+        [7, OWN.public_id, 1],
+    ]
+    for label in pane.findChildren(QLabel):
+        assert label.textFormat() is Qt.TextFormat.PlainText
+        assert not label.openExternalLinks()
+
+
+def test_only_pending_suggestions_offer_add_to(pane: BriefDetailPane) -> None:
+    accepted = PENDING_SUGGESTION.model_copy(
+        update={"state": SuggestionState.ACCEPTED, "action_public_id": OWN.public_id}
+    )
+    show_links(pane, accepted)
+    assert f"Continues: “{TRACKED.title}”" in label_texts(pane)
+    assert add_to_buttons(pane) == []
+
+
+def test_another_email_replaces_the_old_buttons(pane: BriefDetailPane) -> None:
+    show_links(pane)
+    old = add_to_buttons(pane)[0]
+    requests = QSignalSpy(pane.accept_into_requested)
+    show(pane, "lena")  # No suggestions, links or proposals.
+    assert not shiboken6.isValid(old)
+    assert add_to_buttons(pane) == []
+    assert [b.text() for b in pane.findChildren(QPushButton)] == ["Draft a reply", "Open in Gmail"]
+    assert requests.count() == 0
+    show(pane, "marco")
+    assert pane.findChild(HairlineFrame, "proposalCard") is not None
+    pane.show_item(
+        mockup_digest().digest.items[3], account_email=ACCOUNT, timezone_name=ZONE
+    )  # The same email without its proposals.
+    assert pane.findChild(HairlineFrame, "proposalCard") is None
+
+
+def test_pending_proposals_sit_above_the_footer_in_the_brief_s_zone(
+    pane: BriefDetailPane,
+) -> None:
+    exact = make_proposal(
+        id=3,
+        action_revision=4,
+        kind=FollowUpKind.NEW_DEADLINE,
+        deadline_text="Monday 5 PM",
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_date=date(2026, 10, 5),
+        deadline_at_utc=datetime(2026, 10, 5, 21, 0, tzinfo=UTC),
+        deadline_timezone="America/Toronto",
+    )
+    delivered = make_proposal(id=9, action_revision=7, kind=FollowUpKind.DELIVERED)
+    applied = make_proposal(id=4, state=ProposalState.APPLIED, evidence="Quietly dropped")
+    pane.show_item(
+        make_digest_item(),
+        account_email=ACCOUNT,
+        timezone_name="Asia/Tokyo",  # 21:00 UTC is 06:00 the next day there.
+        proposals=(exact, applied, delivered),
+    )
+    cards = pane.findChildren(HairlineFrame, "proposalCard")
+    assert len(cards) == 2  # Only pending proposals.
+    assert "Quietly dropped" not in " ".join(label_texts(pane))
+    buttons = [b.text() for b in pane.findChildren(QPushButton)]
+    assert buttons == [
+        "Set the deadline to 2026-10-06 06:00",
+        "Dismiss",
+        "Complete it (delivered)",
+        "Dismiss",
+        "Draft a reply",
+    ]
+    spy = QSignalSpy(pane.proposal_requested)
+    for proposal_button in pane.findChildren(QPushButton)[:4]:
+        proposal_button.click()
+    assert [spy.at(n) for n in range(spy.count())] == [
+        [APPLY, 3, 4],
+        [DISMISS, 3, 4],
+        [APPLY, 9, 7],
+        [DISMISS, 9, 7],
+    ]
+
+
+def test_a_hostile_proposal_deadline_stays_text(pane: BriefDetailPane) -> None:
+    proposal = make_proposal(
+        kind=FollowUpKind.NEW_DEADLINE,
+        deadline_text=HOSTILE,
+        deadline_precision=DeadlinePrecision.UNRESOLVED,
+    )
+    pane.show_item(
+        make_digest_item(), account_email=ACCOUNT, timezone_name=ZONE, proposals=(proposal,)
+    )
+    effect = pane.findChildren(QPushButton)[0]
+    assert "&&" in effect.text() and "<b>Win</b>" in effect.text()  # No mnemonic, no markup.
+    assert effect.accessibleName().startswith("Set the deadline to “<b>Win</b> & ")
+
+
+def test_an_unresolved_suggestion_deadline_shows_its_words() -> None:
+    soon = SuggestionView(
+        suggestion_id=12,
+        state=SuggestionState.PENDING,
+        suggestion=make_suggestion(
+            deadline_text="<b>soon</b>", deadline_precision=DeadlinePrecision.UNRESOLVED
+        ),
+    )
+    assert suggestion_meta(soon, TORONTO) == "Yours. Due “<b>soon</b>”."
+
+
+def test_every_button_can_be_reached_from_the_keyboard(pane: BriefDetailPane) -> None:
+    show(pane, "priya")
+    buttons = pane.findChildren(QPushButton)
+    assert buttons
+    for reachable in buttons:
+        assert reachable.focusPolicy() & Qt.FocusPolicy.TabFocus
+        assert not reachable.autoDefault()

@@ -2,54 +2,21 @@
 clicks on brief links say why nothing happened."""
 
 import asyncio
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter, ActionStatus, SuggestionState, SuggestionView
-from mailbrief.domain.digests import DailyDigest, DigestStatus
 from mailbrief.ui.actions_view import ActionsPanel
-from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
+from mailbrief.ui.brief_detail import ACCEPT, DISMISS
 from mailbrief.ui.main_window import MainWindow
-from tests.factories import fingerprint_of, make_action, make_digest_item, make_suggestion
+from tests.factories import fingerprint_of, make_action, make_suggestion
 from tests.ui.brief_view import detail
 from tests.ui.test_workflow import FakeBackend
 
 GENERATED = datetime(2026, 9, 28, 12, tzinfo=UTC)
-
-
-def long_brief(generated: datetime = GENERATED) -> DailyDigest:
-    return DailyDigest(
-        account_id="owner@example.com",
-        local_date=date(2026, 9, 28),
-        timezone_name="UTC",
-        generated_at_utc=generated,
-        status=DigestStatus.COMPLETE,
-        items=tuple(
-            make_digest_item(message_key=f"m-{index}", position=index, summary="Line " * 40)
-            for index in range(40)
-        ),
-    )
-
-
-def test_rerendering_the_same_brief_keeps_its_place(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    view.resize(400, 300)
-    view.show()
-    view.show_digest(long_brief())
-    bar = view.verticalScrollBar()
-    assert bar.maximum() > 200
-    bar.setValue(bar.maximum() // 2)
-    middle = bar.value()
-
-    view.show_digest(long_brief())  # As after Accept or Dismiss.
-    assert bar.value() == middle
-
-    view.show_digest(long_brief(GENERATED + timedelta(hours=1)))  # A new brief.
-    assert bar.value() == 0
 
 
 def test_a_capped_tab_says_more_exist(qtbot: QtBot) -> None:

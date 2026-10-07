@@ -2,12 +2,10 @@
 the thread-check status line."""
 
 import asyncio
-import re
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
-from PySide6.QtCore import QUrl
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import (
@@ -21,7 +19,6 @@ from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncResult, SyncStatus
 from mailbrief.services.actions import ActionConflictError, ActionNotFoundError
-from mailbrief.ui.digest_view import DigestView
 from mailbrief.ui.main_window import MainWindow, thread_check_text
 from tests.factories import fingerprint_of, make_action, make_digest_item, make_suggestion
 from tests.ui.brief_view import detail, shown_text
@@ -67,62 +64,6 @@ def brief(local_date: date = date(2026, 9, 4), *views: SuggestionView) -> DailyD
             ),
         ),
     )
-
-
-def anchors(view: DigestView) -> list[str]:
-    return re.findall(r'href="([^"]*)"', view.toHtml())
-
-
-# The brief view
-
-
-def test_continuations_name_only_actions_the_email_does_not_belong_to(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-
-    view.show_digest(brief(), LINKS)
-
-    text = view.toPlainText()
-    assert (
-        'Continues: “<a href="https://evil.example">Chase</a> the <b>deck</b>” (waiting for)'
-        in (text)
-    )
-    assert "Continues: “Book the room”" not in text  # The email is already its source.
-    assert 'Add to “<a href="https://evil.example">Chase</a> the <b>deck</b>”' in text
-    assert "Add to “Book the room”" in text
-    assert "evil.example" not in "".join(anchors(view))  # Titles are text, never links.
-    assert all(link.startswith("mailbrief:") for link in anchors(view))
-
-
-def test_add_to_links_emit_the_suggestion_action_and_revision(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    view.show_digest(brief(), LINKS)
-    requests: list[tuple[int, str, int]] = []
-    view.accept_into_requested.connect(lambda *request: requests.append(request))
-
-    for link in ("mailbrief:into/0", "mailbrief:into/1", "mailbrief:into/2", "mailbrief:into/x"):
-        view.anchorClicked.emit(QUrl(link))
-
-    assert requests == [(7, TRACKED.public_id, 3), (7, OWN.public_id, 1)]
-    view.show_digest(brief())  # Without links: nothing to add to.
-    view.anchorClicked.emit(QUrl("mailbrief:into/0"))
-    assert len(requests) == 2
-    assert "Continues" not in view.toPlainText() and "Add to" not in view.toPlainText()
-
-
-def test_only_pending_suggestions_offer_add_to(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    accepted = PENDING.model_copy(
-        update={"state": SuggestionState.ACCEPTED, "action_public_id": OWN.public_id}
-    )
-
-    view.show_digest(brief(date(2026, 9, 4), accepted), LINKS)
-
-    assert "Continues: “<a" in view.toPlainText()
-    assert "Add to" not in view.toPlainText()
-    assert not [link for link in anchors(view) if link.startswith("mailbrief:into/")]
 
 
 # The window

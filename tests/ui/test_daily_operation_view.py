@@ -1,7 +1,7 @@
 """The refresh settings in the Preferences tab, and the automatic-analysis dialog (ADR 0017)."""
 
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -9,13 +9,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestStatus
 from mailbrief.domain.preferences import REFRESH_INTERVALS, OwnerPreferences, PreferencesEdit
 from mailbrief.services.consent import NO_CONSENT
 from mailbrief.ui.auto_send_view import OFF_TEXT, AutoSendDialog
-from mailbrief.ui.digest_view import DigestView
 from mailbrief.ui.preferences_view import REFRESH_CHOICES, PreferencesPanel
-from tests.factories import make_auto_send, make_digest_item
+from tests.factories import make_auto_send
 
 TORONTO = ZoneInfo("America/Toronto")
 
@@ -274,44 +272,3 @@ def test_everything_shown_is_plain_text_with_accessible_names(dialog: AutoSendDi
         "&Save",
         "&Cancel",
     }
-
-
-# The brief's coverage line
-
-
-def brief_with(**coverage: int) -> DailyDigest:
-    counts = {"analyzed": 0, "reused": 0, "failed": 0, "skipped": 0, "deferred": 0, **coverage}
-    return DailyDigest(
-        account_id="owner@example.com",
-        local_date=date(2026, 9, 30),
-        timezone_name="UTC",
-        generated_at_utc=datetime(2026, 9, 30, 12, tzinfo=UTC),
-        status=DigestStatus.COMPLETE,
-        items=(make_digest_item(),),
-        coverage=DigestCoverage(sync_complete=True, shortlisted=sum(counts.values()), **counts),
-    )
-
-
-def test_a_brief_with_deferred_messages_says_how_many_wait(qtbot: QtBot) -> None:
-    view = DigestView()
-    view.zone = ZoneInfo("UTC")
-    qtbot.addWidget(view)
-
-    view.show_digest(brief_with(analyzed=3, deferred=2))
-
-    assert (
-        "3 analyzed · 0 reused · 0 failed · 0 skipped · 2 deferred · Inbox sync complete"
-        in view.toPlainText()
-    )
-
-
-def test_a_brief_without_any_keeps_its_coverage_line_as_it_was(qtbot: QtBot) -> None:
-    view = DigestView()
-    view.zone = ZoneInfo("UTC")
-    qtbot.addWidget(view)
-
-    view.show_digest(brief_with(analyzed=3, reused=1))
-
-    text = view.toPlainText()
-    assert "3 analyzed · 1 reused · 0 failed · 0 skipped · Inbox sync complete" in text
-    assert "deferred" not in text

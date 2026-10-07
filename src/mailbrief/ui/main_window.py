@@ -116,7 +116,7 @@ from mailbrief.ui.actions_view import (
     ActionsPanel,
 )
 from mailbrief.ui.auto_send_view import AutoSendDialog
-from mailbrief.ui.brief_detail import is_gmail_link
+from mailbrief.ui.brief_detail import ACCEPT, APPLY, DISMISS, is_gmail_link
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.data_view import DataDialog
 from mailbrief.ui.diagnostics import (
@@ -125,7 +125,6 @@ from mailbrief.ui.diagnostics import (
     log_automatic_run,
     log_failure,
 )
-from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS
 from mailbrief.ui.draft_editor import DraftEditor
 from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
 from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
