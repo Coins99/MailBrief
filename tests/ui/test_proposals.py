@@ -27,7 +27,7 @@ from mailbrief.domain.digests import (
 from mailbrief.services.actions import ActionConflictError
 from mailbrief.services.proposals import ProposalNotFoundError
 from mailbrief.ui.actions_view import PROPOSALS, ActionsPanel, describe
-from mailbrief.ui.digest_view import DigestView
+from mailbrief.ui.digest_view import APPLY, DISMISS, DigestView
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.proposals_view import (
     NONE_PENDING,
@@ -36,6 +36,7 @@ from mailbrief.ui.proposals_view import (
     pending_proposals,
 )
 from tests.factories import make_action, make_digest_item, make_proposal
+from tests.ui.brief_view import detail, shown_text
 from tests.ui.test_workflow import FakeBackend
 
 KEY = "reply-1"
@@ -550,7 +551,7 @@ async def test_every_brief_is_shown_with_its_proposals(
     await window.initialize()
 
     assert backend.proposal_calls == [backend.saved]
-    assert "Proposes for “Approve the proposal”" in window.digest.toPlainText()
+    assert "Proposes for “Approve the proposal”" in shown_text(window)
 
 
 async def test_a_brief_whose_proposals_fail_to_load_is_shown_without_them(
@@ -559,8 +560,8 @@ async def test_a_brief_whose_proposals_fail_to_load_is_shown_without_them(
     backend.proposals_fail = RuntimeError("private detail")
     await window.initialize()
 
-    assert "Approval needed by Friday" in window.digest.toPlainText()
-    assert "Proposes for" not in window.digest.toPlainText()
+    assert "Approval needed by Friday" in shown_text(window)
+    assert "Proposes for" not in shown_text(window)
     assert "private detail" not in window.status.text()
 
 
@@ -570,7 +571,7 @@ async def test_applying_from_the_brief_runs_one_operation_then_undo_reverses_it(
     await window.initialize()
     loads, lists = backend.loads, backend.list_calls
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/0"))
+    detail(window).proposal_requested.emit(APPLY, 3, 4)
     await finish(window)
 
     assert backend.action_calls == [("apply_proposal", 3, 4)]  # At the revision it was shown at.
@@ -592,7 +593,7 @@ async def test_dismissing_from_the_brief_then_undo_restores_it(
 ) -> None:
     await window.initialize()
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/1"))
+    detail(window).proposal_requested.emit(DISMISS, 3, 4)
     await finish(window)
 
     assert backend.action_calls == [("dismiss_proposal", 3)]
@@ -606,7 +607,7 @@ async def test_dismissing_from_the_brief_then_undo_restores_it(
     assert window.status.text() == "Undone."
 
 
-@pytest.mark.parametrize("link", ["mailbrief:proposal/0", "mailbrief:proposal/1"])
+@pytest.mark.parametrize("link", [APPLY, DISMISS])
 async def test_a_conflict_shows_its_static_message_and_refreshes(
     window: MainWindow, backend: FakeBackend, link: str
 ) -> None:
@@ -615,7 +616,7 @@ async def test_a_conflict_shows_its_static_message_and_refreshes(
     backend.action_fail = ActionConflictError(message)
     loads, lists = backend.loads, backend.list_calls
 
-    window.digest.anchorClicked.emit(QUrl(link))
+    detail(window).proposal_requested.emit(link, 3, 4)
     await finish(window)
 
     assert window.status.text() == message
@@ -623,14 +624,14 @@ async def test_a_conflict_shows_its_static_message_and_refreshes(
     assert window.undo_button.isHidden()  # Nothing changed, so nothing to undo.
 
 
-@pytest.mark.parametrize("link", ["mailbrief:proposal/0", "mailbrief:proposal/1"])
+@pytest.mark.parametrize("link", [APPLY, DISMISS])
 async def test_a_proposal_that_is_gone_reloads(
     window: MainWindow, backend: FakeBackend, link: str
 ) -> None:
     await window.initialize()
     backend.action_fail = ProposalNotFoundError()
 
-    window.digest.anchorClicked.emit(QUrl(link))
+    detail(window).proposal_requested.emit(link, 3, 4)
     await finish(window)
 
     assert window.status.text() == "That changed or is no longer available; the view was reloaded."
@@ -639,7 +640,7 @@ async def test_a_proposal_that_is_gone_reloads(
 
 async def test_a_refused_undo_explains_itself(window: MainWindow, backend: FakeBackend) -> None:
     await window.initialize()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/0"))
+    detail(window).proposal_requested.emit(APPLY, 3, 4)
     await finish(window)
     backend.action_fail = ActionConflictError("Only an unchanged update can be undone.")
 
@@ -661,7 +662,7 @@ async def test_a_click_while_busy_is_refused_with_a_reason(
     window.start(hold)  # Something else is running.
     await asyncio.sleep(0)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/0"))
+    detail(window).proposal_requested.emit(APPLY, 3, 4)
 
     assert window.status.text() == "MailBrief is busy; try again in a moment."
     assert backend.action_calls == []

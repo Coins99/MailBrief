@@ -14,6 +14,7 @@ from mailbrief.services.preferences import PreferencesUnavailableError
 from mailbrief.ui.drafting_panel import DraftingPanel
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences_view import PreferencesPanel, region_zones
+from tests.ui.brief_view import shown_text
 from tests.ui.test_workflow import FakeBackend, finish
 
 ZONES = ("America/New_York", "America/Toronto", "Asia/Tokyo", "UTC")
@@ -179,9 +180,9 @@ async def test_startup_applies_the_owner_s_zone_and_drafting_defaults(
     await window.initialize()
 
     assert window.zone == ZoneInfo("America/Toronto")
-    assert window.digest.zone == window.cached_dialog.zone == window.zone
+    assert window.cached_dialog.zone == window.zone
     # Generated at 12:00 UTC: 08:00 in Toronto.
-    assert "Saved 2026-09-04T08:00-04:00" in window.digest.toPlainText()
+    assert "Saved 2026-09-04T08:00-04:00" in shown_text(window)
     window.draft_editor.ai_panel.offer(frozenset(), DraftKind.NOTE)
     options = window.draft_editor.ai_panel.options()
     assert options is not None
@@ -198,7 +199,7 @@ async def test_unreadable_preferences_fall_back_to_the_system_zone_for_display(
 
     assert window.zone == ZoneInfo("Asia/Tokyo")
     assert window.status.text() == str(PreferencesUnavailableError())
-    assert "private subject" in window.digest.toPlainText()  # The saved brief still shows.
+    assert "private subject" in shown_text(window)  # The saved brief still shows.
 
 
 async def test_settings_show_the_owner_s_preferences(
@@ -234,7 +235,7 @@ async def test_saving_applies_the_new_zone_and_refreshes_the_views(
     assert window.status.text() == "Preferences saved."
     assert window.settings_dialog.status.text() == "Preferences saved."
     assert backend.loads > loads and backend.list_calls > lists
-    assert "Saved 2026-09-04T21:00+09:00" in window.digest.toPlainText()
+    assert "Saved 2026-09-04T21:00+09:00" in shown_text(window)
 
     panel.save_button.click()  # The panel now holds the new revision.
     await finish(window)

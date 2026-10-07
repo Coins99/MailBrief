@@ -15,6 +15,7 @@ from mailbrief.services.actions import ActionConflictError, SuggestionNotFoundEr
 from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
 from mailbrief.ui.main_window import MainWindow
 from tests.factories import fingerprint_of, make_digest_item, make_suggestion
+from tests.ui.brief_view import detail, shown_text
 from tests.ui.test_workflow import FakeBackend
 
 PENDING = SuggestionView(
@@ -203,7 +204,7 @@ async def test_accepting_then_undoing(window: MainWindow, backend: FakeBackend) 
     await window.initialize()
     loads = backend.loads
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
 
     assert backend.action_calls == [("accept_suggestion", 7)]
@@ -227,7 +228,7 @@ async def test_accepting_then_undoing(window: MainWindow, backend: FakeBackend) 
 async def test_dismissing_then_undoing(window: MainWindow, backend: FakeBackend) -> None:
     await window.initialize()
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:dismiss/7"))
+    detail(window).suggestion_requested.emit(DISMISS, 7)
     await finish(window)
     assert window.undo_button.text() == "&Undo dismiss"
     window.undo_button.click()
@@ -243,7 +244,7 @@ async def test_a_stale_suggestion_reloads_the_brief(
     backend.action_fail = SuggestionNotFoundError("That suggestion was not found.")
     loads = backend.loads
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
 
     assert "no longer available" in window.status.text()
@@ -255,7 +256,7 @@ async def test_undo_explains_a_change_it_cannot_reverse(
     window: MainWindow, backend: FakeBackend
 ) -> None:
     await window.initialize()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
     backend.action_fail = ActionConflictError("changed")
 
@@ -270,7 +271,7 @@ async def test_a_new_brief_withdraws_the_undo_offer(
     window: MainWindow, backend: FakeBackend
 ) -> None:
     await window.initialize()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:dismiss/7"))
+    detail(window).suggestion_requested.emit(DISMISS, 7)
     await finish(window)
     assert not window.undo_button.isHidden()
 
@@ -289,7 +290,7 @@ async def test_suggestion_links_do_nothing_while_another_operation_runs(
     window.start(window._generate)
     await asyncio.sleep(0)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await asyncio.sleep(0)
 
     assert backend.action_calls == []
@@ -314,13 +315,13 @@ async def test_the_brief_stays_on_screen_when_the_reload_after_an_accept_finds_n
     window = MainWindow(backend)
     qtbot.addWidget(window)
     await window.initialize()
-    shown = window.digest.toPlainText()
+    shown = shown_text(window)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
 
     assert backend.loads == 2  # The reload after the accept found nothing...
-    assert window.digest.toPlainText() == shown  # ...so the previous brief stays.
+    assert shown_text(window) == shown  # ...so the previous brief stays.
     assert "Accepted: Approve the budget" in window.status.text()
     assert window.undo_button.text() == "&Undo accept"
 
@@ -346,7 +347,7 @@ async def test_dismissing_a_stale_suggestion_reloads_and_offers_no_undo(
     backend.action_fail = SuggestionNotFoundError("That suggestion was not found.")
     loads = backend.loads
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:dismiss/7"))
+    detail(window).suggestion_requested.emit(DISMISS, 7)
     await finish(window)
 
     assert backend.action_calls == [("dismiss_suggestion", 7)]

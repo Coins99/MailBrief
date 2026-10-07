@@ -199,6 +199,9 @@ class ActionsPanel(QWidget):
     def view(self) -> ActionFilter:
         return list(ActionFilter)[self.tabs.currentIndex()]
 
+    def show_view(self, view: ActionFilter) -> None:
+        self.tabs.setCurrentWidget(self.lists[view])
+
     def selected(self) -> Action | None:
         view = self.view()
         row = self.lists[view].currentRow()

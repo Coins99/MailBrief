@@ -113,9 +113,12 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `ui/theme/`: design tokens (`tokens.py`, the only place UI colours are defined), the
   Fusion palette and stylesheet (`style.py`, `apply_theme`), bundled Inter under the SIL
   OFL (`fonts/`) and Tabler icons under MIT (`icons/`). `ui/labels.py` holds
-  `plain_label` and `button_label`. The three-pane workspace (`hairline.py`,
-  `brief_list.py`, `brief_detail.py`, `workspace.py`) is a preview, not yet used by
-  MainWindow.
+  `plain_label` and `button_label`. MainWindow hosts the three-pane workspace
+  (`workspace.py`, with `hairline.py`, `brief_list.py` and `brief_detail.py`): the header
+  (when Gmail was last checked, Sync and review, Cancel), the sidebar's pages and footer
+  (Saved mail, Data, Settings, the Gmail and AI lines, Connect and Disconnect), the Today,
+  run (review and consent), Actions and Drafts pages, and a status strip with Undo.
+  `digest_view.py` is no longer in the window and keeps its own tests.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.

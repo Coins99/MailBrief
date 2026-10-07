@@ -6,15 +6,15 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from PySide6.QtCore import QUrl
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter, ActionStatus, SuggestionState, SuggestionView
 from mailbrief.domain.digests import DailyDigest, DigestStatus
 from mailbrief.ui.actions_view import ActionsPanel
-from mailbrief.ui.digest_view import DigestView
+from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
 from mailbrief.ui.main_window import MainWindow
 from tests.factories import fingerprint_of, make_action, make_digest_item, make_suggestion
+from tests.ui.brief_view import detail
 from tests.ui.test_workflow import FakeBackend
 
 GENERATED = datetime(2026, 9, 28, 12, tzinfo=UTC)
@@ -86,7 +86,7 @@ async def test_the_window_counts_only_a_full_completed_list(qtbot: QtBot) -> Non
     assert window.actions_panel.tabs.tabText(0) == "Open (1)"
 
 
-@pytest.mark.parametrize("link", ["mailbrief:accept/7", "mailbrief:dismiss/7", "mailbrief:reply/0"])
+@pytest.mark.parametrize("link", [ACCEPT, DISMISS, "reply"])
 async def test_a_busy_click_on_a_brief_link_says_so(qtbot: QtBot, link: str) -> None:
     backend = FakeBackend()
     backend.saved = backend.saved.model_copy(
@@ -112,7 +112,11 @@ async def test_a_busy_click_on_a_brief_link_says_so(qtbot: QtBot, link: str) -> 
     window.start(window._generate)
     await asyncio.sleep(0)
 
-    window.digest.anchorClicked.emit(QUrl(link))
+    item = backend.saved.items[0]
+    if link == "reply":
+        detail(window).reply_requested.emit(backend.saved.account_id, item.message_key)
+    else:
+        detail(window).suggestion_requested.emit(link, 7)
 
     assert window.status.text() == "MailBrief is busy; try again in a moment."
     window.cancel()

@@ -1,5 +1,6 @@
 """The three-pane workspace: header, sidebar, pages, brief list and detail pane."""
 
+import math
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from typing import Final
@@ -17,6 +18,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QFontMetricsF,
     QKeyEvent,
     QPainter,
     QPaintEvent,
@@ -132,7 +134,10 @@ class _StatusLabel(ElidedLabel):
 
     def sizeHint(self) -> QSize:
         margins = self.contentsMargins()
-        width = self.fontMetrics().horizontalAdvance(" ".join(self.text().split()))
+        # Elision measures fractional widths, so round up: a whole-pixel width can fall a
+        # fraction short and elide a status that fits.
+        text = " ".join(self.text().split())
+        width = math.ceil(QFontMetricsF(self.font()).horizontalAdvance(text))
         return QSize(width + margins.left() + margins.right(), super().sizeHint().height())
 
 

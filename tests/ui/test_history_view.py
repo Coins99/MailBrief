@@ -13,6 +13,7 @@ from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.ui.digest_view import DigestView
 from mailbrief.ui.history_view import BriefHistoryDialog
 from mailbrief.ui.main_window import MainWindow
+from tests.ui.brief_view import shown_text
 from tests.ui.test_workflow import FakeBackend, finish
 
 TODAY = date(2026, 9, 5)
@@ -163,7 +164,7 @@ async def window(qtbot: QtBot, backend: FakeBackend) -> MainWindow:
 
 
 def heading(window: MainWindow) -> str:
-    return window.digest.toPlainText().splitlines()[0]
+    return shown_text(window).splitlines()[0]
 
 
 async def settle() -> None:
@@ -181,7 +182,7 @@ async def review_and_approve(window: MainWindow) -> None:
 
 
 async def open_past(window: MainWindow) -> None:
-    window.briefs_button.click()
+    window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
     window.history_dialog.saved.setCurrentRow(1)  # 2026-09-04 (latest), then 2026-09-03.
     window.history_dialog.open_button.click()
@@ -191,7 +192,7 @@ async def open_past(window: MainWindow) -> None:
 async def test_the_dialog_lists_the_connected_account_s_missed_days(
     window: MainWindow,
 ) -> None:
-    window.briefs_button.click()
+    window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
 
     assert window.history_dialog.isVisible()
@@ -205,7 +206,7 @@ async def test_opening_a_past_brief_shows_the_banner_until_back_to_latest(
 ) -> None:
     await open_past(window)
 
-    assert heading(window).startswith("2026-09-03")
+    assert heading(window).startswith("Thu Sep 3")
     assert not window.viewing.isHidden()
     assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
     assert not window.history_dialog.isVisible()
@@ -214,11 +215,11 @@ async def test_opening_a_past_brief_shows_the_banner_until_back_to_latest(
     await finish(window)
 
     assert window.viewing.isHidden()
-    assert heading(window).startswith("2026-09-04")
+    assert heading(window).startswith("Fri Sep 4")
 
 
 async def test_opening_the_latest_brief_shows_no_banner(window: MainWindow) -> None:
-    window.briefs_button.click()
+    window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
     window.history_dialog.open_button.click()  # The first row: the latest brief.
     await finish(window)
@@ -232,33 +233,33 @@ async def test_undo_while_viewing_a_past_brief_keeps_it(
 
     window.start(lambda: window._accept_suggestion(7), cancellable=False)
     await finish(window)
-    assert heading(window).startswith("2026-09-03")
+    assert heading(window).startswith("Thu Sep 3")
     window.undo_button.click()
     await finish(window)
 
     assert [call[0] for call in backend.action_calls] == ["accept_suggestion", "unaccept_action"]
-    assert heading(window).startswith("2026-09-03")
+    assert heading(window).startswith("Thu Sep 3")
     assert not window.viewing.isHidden()
 
 
 async def test_briefing_a_missed_day_passes_its_date_and_shows_it(
     window: MainWindow, backend: FakeBackend
 ) -> None:
-    window.briefs_button.click()
+    window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
     window.history_dialog.missed.setCurrentRow(0)
     window.history_dialog.brief_button.click()
     await review_and_approve(window)
 
     assert backend.generated_days[-1] == date(2026, 9, 2)
-    assert heading(window).startswith("2026-09-02")
+    assert heading(window).startswith("Wed Sep 2")
     assert window.viewing_label.text() == "Viewing the brief for 2026-09-02."
 
 
 async def test_briefing_a_saved_day_asks_before_replacing(
     window: MainWindow, backend: FakeBackend
 ) -> None:
-    window.briefs_button.click()
+    window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
     window.history_dialog.saved.setCurrentRow(1)
     window.history_dialog.brief_button.click()
@@ -277,7 +278,7 @@ async def test_offline_briefing_says_a_connection_is_needed(
 ) -> None:
     window.disconnect_button.click()
     await finish(window)
-    window.briefs_button.click()
+    window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
     dialog = window.history_dialog
     assert dialog.missed.count() == 0 and dialog.missed_note.text().startswith("Connect Gmail")
@@ -299,7 +300,7 @@ async def test_sync_and_review_returns_to_the_latest_brief(
     window.generate_button.click()
     await settle()
     assert window.viewing.isHidden()
-    assert heading(window).startswith("2026-09-04")
+    assert heading(window).startswith("Fri Sep 4")
     await review_and_approve(window)
 
     assert backend.generated_days == [None]

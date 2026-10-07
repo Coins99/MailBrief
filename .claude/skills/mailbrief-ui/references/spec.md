@@ -88,26 +88,63 @@ Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`.
 ## Workspace (`ui/workspace.py`)
 
 - `HeaderBar`: objectName `headerBar`, margins 14, 8, 14, 8; "MailBrief" 13px Medium, a
-  stretch, a 14px refresh icon (text_secondary) and a 12px secondary status label;
-  `set_status(text)`.
+  stretch, a 14px refresh icon (text_secondary), the status and the window's widgets.
+  The status is an `ElidedLabel` (12px, secondary, `headerStatus`): it asks for its text's
+  width but shrinks to nothing, so a long status never widens the header; its accessible
+  name is the whole text. `set_status(text)`; an empty status hides the refresh icon,
+  which keeps its space. `add_widget(widget)` appends widgets right of the status,
+  spacing 8.
 - `SidebarNav`: objectName `sidebar`, fixed width `SIDEBAR_WIDTH`, margins 6, 10, 6, 10,
   spacing 2. A fixed-height `QListView#sidebarNav` with pages today (Today, sun), actions
   (Actions, checkbox), waiting (Waiting, hourglass), drafts (Drafts, pencil) and briefs
   (Briefs, calendar). Rows 31px: selected rows get a rounded selection fill (radius 8);
   a 14px icon at x 10 (text when selected, else text_secondary); a 13px label; the count
-  right-aligned in text_secondary; the brief list's focus ring. Below: a stretch, a
-  "Settings" nav button with the settings icon, and an 11px muted note.
-  `page_requested(str)` (on selection and Return/Enter), `settings_requested()`,
-  `set_counts(actions, waiting, drafts)` (None hides a count), `set_current(key)`,
-  `set_note(text)`.
+  right-aligned in text_secondary; the brief list's focus ring. Below: a stretch, then
+  `NavButton` rows painted like page rows: `saved_mail` (Saved mail, mail, "Saved &mail"),
+  `data` (Data, database, "&Data", accessible name "Data and recovery") and `settings`
+  (Settings, settings, "Se&ttings"); an 11px muted note, hidden while empty; then
+  `footer`, a QVBoxLayout (spacing 4) for the window's widgets. `page_requested(str)` (on
+  selection, a click and Return/Enter; for `DIALOG_PAGES`, only a click or Return),
+  `settings_requested()`, `set_counts(actions, waiting, drafts)` (None hides a count),
+  `set_current(key)`, `current_key()`, `set_note(text)`.
+- `NavButton(text, icon_name, *, mnemonic=None, accessible_name=None)`: with a mnemonic
+  (app-authored text such as "Se&ttings") Alt and that key press it; it still paints
+  `text`.
+- `BriefHeading` (`briefHeading`), at the top of the list pane, margins 12, 10, 12, 4,
+  hidden until a brief is shown: `title` (13px Medium, `brief_title`: "Tue Oct 6", plus
+  " · Partial" or " · Empty") and `meta` (11px muted, elided, `brief_meta`): "{account} ·
+  saved HH:MM" ("saved Oct 7 HH:MM" when saved on a later day), plus " · N failed",
+  " · N deferred" and " · Inbox sync incomplete". Its accessible name is the full
+  sentence: account, save time in the owner's zone, the coverage counts and whether the
+  Inbox sync was complete.
 - `ThreePaneWorkspace`: objectName `workspace`. HeaderBar, a horizontal divider, then
-  SidebarNav, a vertical divider and a `HairlineSplitter` holding the list pane
-  (`BriefListView` and an 11px muted coverage footer, margins 12, 10, 12, 10: one elided
-  line of `coverage_short`, with `coverage_line` as its accessible name) and the
-  `BriefDetailPane`; stretch 4:5, not collapsible, minimum widths 220 and 280.
-  Attributes `header`, `sidebar`, `brief_list`, `coverage`, `detail`. `show_digest`
-  builds the rows and `coverage_line`, shows the selected item's links and proposals, and
-  shows "No analyzed messages in this brief." when empty. MainWindow doesn't use it yet.
+  SidebarNav, a vertical divider and `pages`, a QStackedWidget. Page `today`
+  (`todayPage`): `today_top` (a QVBoxLayout for banners) above a `HairlineSplitter`
+  holding the list pane (the heading, `BriefListView` and an 11px muted coverage footer,
+  margins 12, 10, 12, 10: one elided line of `coverage_short`, with `coverage_line` as
+  its accessible name) and the `BriefDetailPane`; stretch 4:5, not collapsible, minimum
+  widths 220 and 280. `add_page(key, widget)`, `show_page(key)` (KeyError for an unknown
+  key) and `current_page()`. `show_digest(digest, *, links, proposals, owner_zone)`
+  builds the rows, the heading and the coverage, shows "No analyzed messages in this
+  brief." when empty, and, for the same saved brief (account, day and save time), keeps
+  the selected email and the detail's scroll position. `clear(message)` shows no brief.
+
+## Main window (`ui/main_window.py`)
+
+- Central widget: the workspace (stretch), a horizontal `HairlineDivider`, then
+  `statusStrip` (margins 12, 6, 12, 6): the status (12px secondary, wraps) and an
+  outline Undo. No outer scroll area; the window opens at 1100 × 720 and its minimum
+  width stays at most 900 px with the theme applied.
+- Header: "Checked Gmail at HH:MM" in the owner's zone after a run whose Inbox sync was
+  complete or partial, then outline Sync and review and Cancel.
+- Sidebar footer, top to bottom: Saved mail, Data, Settings, then the Gmail and AI lines
+  (11px muted), then outline Connect Gmail and Disconnect (12px), which fit the sidebar.
+- Pages: `today` (the "Viewing the brief for …" banner and the retry row in `today_top`),
+  `run` (`runPage`, a scroll area: the review and consent panels, margins 16, 14, 16,
+  14), `actions` and `drafts` (the panels, margins 12). Today shows `run` while the review
+  or consent waits. Actions opens the Open tab and Waiting the Waiting tab; changing the
+  tab moves the sidebar. Briefs opens the saved-briefs dialog and the sidebar stays on the
+  page shown.
 
 ## Stylesheet additions from the Phase 4 visual pass
 
