@@ -328,6 +328,8 @@ uv run pytest
 ```
 
 CI type-checks on both Windows and macOS, so run mypy for both platforms before pushing.
+CI runs on pull requests and on pushes to main; a push to a branch without a pull request runs
+nothing.
 
 ## Git workflow
 
