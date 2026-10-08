@@ -6,8 +6,11 @@ import pytest
 from pydantic import SecretStr
 
 from mailbrief.errors import ConfigurationError
+from mailbrief.infra import vault
+from mailbrief.infra.vault import VaultUnavailableError
 from mailbrief.providers.gmail import cache
 from mailbrief.providers.gmail.cache import GmailCredentialStore, RefreshCredential
+from mailbrief.providers.gmail.errors import GmailSetupError
 
 
 class MemoryVault:
@@ -112,4 +115,13 @@ def test_unavailable_vault_is_setup_error(
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setitem(sys.modules, module, None)
     with pytest.raises(ConfigurationError, match=message):
+        cache.os_vault()
+
+
+def test_an_unusable_shared_vault_is_a_gmail_setup_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raiser() -> object:
+        raise VaultUnavailableError("The macOS Keychain is unavailable.")
+
+    monkeypatch.setattr(vault, "os_vault", raiser)
+    with pytest.raises(GmailSetupError, match="^The macOS Keychain is unavailable.$"):
         cache.os_vault()
