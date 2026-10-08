@@ -1,10 +1,13 @@
 """Global pytest configuration and environment hooks."""
 
+import functools
 import os
 import socket
 from typing import Any
 
 import pytest
+
+from mailbrief.storage import database
 
 # Ensure Qt runs in offscreen mode in headless test environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -50,3 +53,24 @@ def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+
+@pytest.fixture(autouse=True)
+def sqlite_without_disk_flushes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop SQLite flushing each commit to disk on test connections.
+
+    This applies to tests only: the app keeps SQLite's default of flushing every commit to
+    disk. Test databases are thrown away, so a crash can't lose anything they need.
+    """
+    configure = database._configure_sqlite_connection
+
+    @functools.wraps(configure)
+    def configure_without_flushes(dbapi_connection: Any, connection_record: Any) -> None:
+        configure(dbapi_connection, connection_record)
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA synchronous=OFF")
+        finally:
+            cursor.close()
+
+    monkeypatch.setattr(database, "_configure_sqlite_connection", configure_without_flushes)

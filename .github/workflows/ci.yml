@@ -21,6 +21,13 @@ jobs:
       QT_QPA_PLATFORM: offscreen
 
     steps:
+      - name: Exclude CI folders from Defender
+        if: runner.os == 'Windows'
+        # Real-time scanning of every file uv unpacks and every test database slows Windows runs.
+        continue-on-error: true
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:TEMP, "$env:LOCALAPPDATA\uv"
+
       - name: Check out repository
         uses: actions/checkout@v7
 
@@ -48,7 +55,7 @@ jobs:
 
       - name: Test
         # macOS runs its Qt tests in the next step, so its coverage gate waits for them.
-        run: uv run pytest ${{ runner.os == 'macOS' && '--cov-fail-under=0' || '' }}
+        run: uv run pytest -n auto --durations=30 ${{ runner.os == 'macOS' && '--cov-fail-under=0' || '' }}
 
       - name: Qt tests on the Cocoa platform
         if: runner.os == 'macOS'
@@ -56,7 +63,8 @@ jobs:
           MACOS_GUI_AVAILABLE: "1"
           QT_QPA_PLATFORM: cocoa
         # Adds these tests' coverage to the main run's; the 80% gate applies to the total.
-        run: uv run pytest --cov-append tests/ui tests/unit/test_app.py
+        # Serial: the keyboard tests need one active window at a time.
+        run: uv run pytest --cov-append --durations=30 tests/ui tests/unit/test_app.py
 
       - name: Verify required service coverage
         run: uv run python scripts/check_coverage.py
