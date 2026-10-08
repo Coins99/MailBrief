@@ -15,8 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-    # Windows pull-request runs reached 25–29 minutes with the workspace UI tests; the follow-up PR speeds them up.
-    timeout-minutes: 45
+    # Twice the longest measured job, rounded up to 5 minutes. On 3e4ab01 (PR #34), Windows jobs
+    # took 16.5 and 22.7 minutes (Test 874 s and 1,227 s) and macOS jobs 6.6 and 9.3 minutes
+    # (Test 80 s and 123 s, Cocoa 211 s and 296 s).
+    timeout-minutes: 50
     env:
       QT_QPA_PLATFORM: offscreen
 
