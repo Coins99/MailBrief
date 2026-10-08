@@ -5,11 +5,12 @@ import re
 
 import pytest
 from PySide6.QtCore import QMetaMethod
-from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetrics, QPalette
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QFontMetrics, QPalette
 from PySide6.QtWidgets import QApplication, QStyle
 
 from mailbrief.ui.theme import (
     DARK,
+    LIGHT,
     ThemeMode,
     Tokens,
     apply_theme,
@@ -23,6 +24,7 @@ from mailbrief.ui.theme import (
     ui_font,
     ui_metrics,
 )
+from mailbrief.ui.theme import style as theme_style
 from mailbrief.ui.theme.style import ThemeStyle
 
 
@@ -194,3 +196,50 @@ def test_registering_the_fonts_drops_cached_metrics(
     monkeypatch.setattr(assets, "_fonts_loaded", None)
     register_fonts()
     assert ui_metrics(11) is not cached
+
+
+def broken_stylesheet(*args: object) -> str:
+    raise RuntimeError("Theme stylesheet failed.")
+
+
+def test_a_failed_theme_puts_back_what_it_found(
+    qapp: QApplication, themed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    qapp.setStyle("Fusion")  # A plain style, not ThemeStyle.
+    qapp.setStyleSheet("QLabel { margin: 1px; }")
+    palette = qapp.palette()
+    palette.setColor(QPalette.ColorRole.Window, QColor("white"))
+    qapp.setPalette(palette)
+    font = qapp.font()
+    font.setPixelSize(17)
+    qapp.setFont(font)
+    qapp.setStyleSheet("")  # A stylesheet's proxy style hides the real style's name.
+    name = qapp.style().name()
+    qapp.setStyleSheet("QLabel { margin: 1px; }")
+    monkeypatch.setattr("mailbrief.ui.theme.style.build_stylesheet", broken_stylesheet)
+
+    with pytest.raises(RuntimeError):
+        apply_theme(qapp)
+
+    assert qapp.styleSheet() == "QLabel { margin: 1px; }"
+    assert qapp.palette().color(QPalette.ColorRole.Window) == QColor("white")
+    assert qapp.font().pixelSize() == 17
+    assert current_tokens() is LIGHT
+    qapp.setStyleSheet("")
+    assert not isinstance(qapp.style(), ThemeStyle)
+    assert qapp.style().name() == name
+
+
+def test_a_failed_theme_keeps_the_theme_style_it_found(
+    qapp: QApplication, themed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    apply_theme(qapp)
+    monkeypatch.setattr("mailbrief.ui.theme.style.build_stylesheet", broken_stylesheet)
+
+    with pytest.raises(RuntimeError):
+        apply_theme(qapp)
+
+    qapp.setStyleSheet("")
+    assert isinstance(qapp.style(), ThemeStyle)
+    assert theme_style._style is qapp.style()  # Its Python override stays alive.
+    assert current_tokens() is DARK

@@ -15,6 +15,7 @@ from mailbrief.ui.theme.style import (
     build_palette,
     build_stylesheet,
     current_tokens,
+    palette_tokens,
     set_current_tokens,
 )
 from mailbrief.ui.theme.tokens import (
@@ -50,6 +51,7 @@ __all__ = [
     "current_tokens",
     "icon",
     "icon_pixmap",
+    "palette_tokens",
     "register_fonts",
     "release_font_cache",
     "set_current_tokens",

@@ -300,7 +300,9 @@ Buttons are made with `outline_button()` (`button_label()` text, `variant="outli
 - Settings is a `_NavButton` painted like a page row (icon at `_ICON_X`, label at
   `_LABEL_X`), so it lines up with the pages.
 - `register_fonts()` returns False instead of raising; `apply_theme` then keeps Qt's font
-  and still applies the colours, and `main()` runs unthemed if the theme fails.
+  and still applies the colours. `apply_theme` is all or nothing. On failure it puts back
+  the stylesheet, style, palette and font it found, sets tokens from the restored palette
+  (`palette_tokens`) and raises; `main()` logs the failure and runs unthemed.
 
 ## Tests
 
