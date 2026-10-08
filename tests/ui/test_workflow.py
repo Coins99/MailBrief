@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import SecretStr
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices
 from pytestqt.qtbot import QtBot
 
@@ -47,6 +47,7 @@ from mailbrief.services.preferences import PreferencesConflictError
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.preferences import DesktopPreferences
 from tests.factories import make_action, make_digest_item, make_message
+from tests.ui.brief_view import detail, shown_text
 from tests.ui.fake_drafts import FakeDrafts
 
 
@@ -440,7 +441,7 @@ async def test_offline_startup_restores_saved_content(window: MainWindow) -> Non
     window.backend.connect_fail = ProviderError("private exception")
     window.start(window.initialize)
     await finish(window)
-    assert "private subject" in window.digest.toPlainText()
+    assert "private subject" in shown_text(window)
     assert "offline" in window.connection.text()
     assert window.ai.text() == "AI: configured"
     assert window.generate_button.isEnabled()
@@ -493,7 +494,7 @@ async def test_unchecked_messages_are_excluded_and_decline_is_explicit(window: M
     assert window.backend.selected == ("message-1",)
     assert not window.backend.approved
     assert "declined" in window.status.text()
-    assert "private subject" in window.digest.toPlainText()
+    assert "private subject" in shown_text(window)
 
 
 async def test_continue_needs_at_least_one_message(window: MainWindow) -> None:
@@ -548,12 +549,12 @@ async def test_failed_refresh_preserves_brief_and_hides_exception(
     error: Exception,
 ) -> None:
     await window.initialize()
-    before = window.digest.toPlainText()
+    before = shown_text(window)
     assert isinstance(window.backend, FakeBackend)
     window.backend.fail = error
     window.start(window._generate)
     await finish(window)
-    assert window.digest.toPlainText() == before
+    assert shown_text(window) == before
     assert "secret" not in window.status.text()
     assert window.generate_button.isEnabled()
 
@@ -565,10 +566,11 @@ async def test_links_only_open_explicit_saved_gmail_source(
     await window.initialize()
     opened = Mock(return_value=True)
     monkeypatch.setattr(QDesktopServices, "openUrl", opened)
-    assert '<a href="https://evil.example">private subject</a>' in window.digest.toPlainText()
-    window.digest.anchorClicked.emit(QUrl("https://evil.example"))
+    assert '<a href="https://evil.example">private subject</a>' in shown_text(window)
+    detail(window).source_requested.emit("https://evil.example")
     opened.assert_not_called()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:source/0"))
+    assert isinstance(window.backend, FakeBackend)
+    detail(window).source_requested.emit(str(window.backend.saved.items[0].source_url))
     assert opened.call_count == 1
     assert "authuser=owner%40example.com" in opened.call_args.args[0].toString()
 
@@ -576,8 +578,8 @@ async def test_links_only_open_explicit_saved_gmail_source(
 @pytest.mark.parametrize(
     "precision, expected",
     [
-        (DeadlinePrecision.DATE, "Due 2026-09-04 (date only)"),
-        (DeadlinePrecision.DATETIME, "Due 2026-09-04T21:00+00:00"),
+        (DeadlinePrecision.DATE, "Due Fri Sep 4"),
+        (DeadlinePrecision.DATETIME, "Due Fri Sep 4, 21:00"),
     ],
 )
 async def test_brief_displays_resolved_deadline(
@@ -593,8 +595,8 @@ async def test_brief_displays_resolved_deadline(
             )
         }
     )
-    window.digest.show_digest(digest)
-    assert expected in window.digest.toPlainText()
+    window.workspace.show_digest(digest, owner_zone=window.zone, today=digest.local_date)
+    assert expected in shown_text(window)
 
 
 @pytest.mark.parametrize(
@@ -673,7 +675,7 @@ async def test_startup_storage_failure_can_retry(
     assert "newer" in window.status.text()
     assert "SECRET" not in window.status.text()
     assert "checking" not in window.connection.text()
-    assert "No saved brief yet" not in window.digest.toPlainText()
+    assert "No saved brief yet" not in shown_text(window)
     window.retry_button.click()
     await finish(window)
     assert window.generate_button.isEnabled()

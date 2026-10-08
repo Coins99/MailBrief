@@ -15,7 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-    timeout-minutes: 30
+    # Windows pull-request runs reached 25–29 minutes with the workspace UI tests; the follow-up PR speeds them up.
+    timeout-minutes: 45
     env:
       QT_QPA_PLATFORM: offscreen
 

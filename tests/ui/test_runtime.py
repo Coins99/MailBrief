@@ -23,6 +23,7 @@ from mailbrief.ui import runtime
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
 from tests.ui.test_workflow import FakeBackend
+from tests.ui.window_wait import WindowWait
 from tests.unit.services.ai_fakes import FakeAIProvider
 from tests.unit.services.test_sync import FakeEmailProvider
 
@@ -107,12 +108,12 @@ async def test_generation_cancellation_closes_both_providers(
 @pytest.mark.parametrize("during_run", [False, True])
 def test_real_qasync_loop_closes_window_and_backend(
     qtbot: QtBot,
+    themed: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     quit_via_qt: bool,
     during_run: bool,
 ) -> None:
-    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
     from mailbrief import app
@@ -141,21 +142,21 @@ def test_real_qasync_loop_closes_window_and_backend(
         ),
     )
 
-    def close_window() -> None:
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, MainWindow) and widget.isVisible():
-                if during_run and not widget.review_panel.isVisible():
-                    if widget.generate_button.isEnabled():
-                        widget.generate_button.click()
-                    QTimer.singleShot(10, close_window)
-                    return
-                if quit_via_qt:
-                    QApplication.quit()
-                else:
-                    widget.close()
+    def close_window(window: MainWindow) -> bool:
+        if during_run and not window.review_panel.isVisible():
+            if window.generate_button.isEnabled():
+                window.generate_button.click()
+            return False  # Try again once the review is showing.
+        if quit_via_qt:
+            QApplication.quit()
+        else:
+            window.close()
+        return True
 
-    QTimer.singleShot(100, close_window)
-    assert app.main([]) == 0
+    # Applying the theme can delay the first show; keep looking until it appears.
+    wait = WindowWait(close_window)
+    wait.start()
+    assert wait.run(lambda: app.main([])) == 0
     assert backend.closed
     application = QApplication.instance()
     assert isinstance(application, QApplication)
@@ -163,8 +164,67 @@ def test_real_qasync_loop_closes_window_and_backend(
     asyncio.set_event_loop(None)
 
 
+@pytest.mark.parametrize("light", [True, False])
+def test_a_theme_failure_never_stops_the_desktop(
+    qtbot: QtBot,
+    themed: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    light: bool,
+) -> None:
+    """Unthemed, the painted widgets take the tokens that suit the palette in effect, and
+    desktop.log records the failure."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPalette
+    from PySide6.QtWidgets import QApplication
+
+    from mailbrief import app
+    from mailbrief.paths import AppPaths
+    from mailbrief.ui.theme import DARK, LIGHT, current_tokens
+
+    def broken_theme(*args: object) -> None:
+        raise RuntimeError("Bundled fonts could not be loaded.")
+
+    qt = QApplication.instance()
+    assert isinstance(qt, QApplication)
+    palette = qt.palette()  # The platform's own, as the theme would have replaced it.
+    window_colour = Qt.GlobalColor.white if light else Qt.GlobalColor.black
+    palette.setColor(QPalette.ColorRole.Window, QColor(window_colour))
+    qt.setPalette(palette)
+    backend = FakeBackend()
+    monkeypatch.setattr(app, "apply_theme", broken_theme)
+    monkeypatch.setattr(app, "DesktopRuntime", lambda path: backend)
+    monkeypatch.setattr(
+        AppPaths,
+        "from_qt",
+        lambda: AppPaths(
+            data_dir=tmp_path,
+            database_path=tmp_path / "unused.sqlite3",
+            microsoft_token_cache_path=tmp_path / "unused.bin",
+        ),
+    )
+
+    def close(window: MainWindow) -> bool:
+        window.close()
+        return True
+
+    wait = WindowWait(close)
+    wait.start()
+    try:
+        assert wait.run(lambda: app.main([])) == 0
+        assert backend.closed
+        assert current_tokens() is (LIGHT if light else DARK)
+        assert "exception=RuntimeError" in (tmp_path / "desktop.log").read_text("utf-8")
+    finally:
+        application = QApplication.instance()
+        assert isinstance(application, QApplication)
+        application.setQuitOnLastWindowClosed(True)
+        asyncio.set_event_loop(None)
+
+
 def test_offline_package_mode_never_opens_profile_or_vault(
     qtbot: QtBot,
+    themed: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -192,6 +252,7 @@ def test_offline_package_mode_never_opens_profile_or_vault(
 
 def test_package_failure_reports_type_without_sensitive_exception(
     qtbot: QtBot,
+    themed: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:

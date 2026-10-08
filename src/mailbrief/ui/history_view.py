@@ -1,6 +1,6 @@
-"""The Briefs dialog: saved briefs by day, and missed days to brief (M8 Part 3).
+"""The Briefs page: saved briefs by day, and missed days to brief (M8 Part 3).
 
-The dialog only emits requests; the window loads and briefs through the backend. Rows are
+The panel only emits requests; the window loads and briefs through the backend. Rows are
 plain text. Briefing a past day is always the owner's explicit choice, one day at a time,
 and replacing a saved brief is confirmed first.
 """
@@ -9,7 +9,6 @@ from datetime import date, timedelta
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -22,6 +21,7 @@ from PySide6.QtWidgets import (
 from mailbrief.domain.digests import SavedBriefSummary
 from mailbrief.services.history import CATCH_UP_DAYS
 from mailbrief.ui.lists import ActivatingList
+from mailbrief.ui.theme import TITLE_PX, ui_font
 
 NOT_CONNECTED = "Connect Gmail to brief missed days."
 NONE_MISSED = "No missed days in the last 7 days."
@@ -36,6 +36,14 @@ def _plain(text: str = "") -> QLabel:
     return label
 
 
+def _outline(text: str, name: str) -> QPushButton:
+    button = QPushButton(text)
+    button.setObjectName(name)
+    button.setProperty("variant", "outline")
+    button.setAutoDefault(False)
+    return button
+
+
 def summary_text(summary: SavedBriefSummary) -> str:
     noun = "item" if summary.item_count == 1 else "items"
     return (
@@ -44,24 +52,28 @@ def summary_text(summary: SavedBriefSummary) -> str:
     )
 
 
-class BriefHistoryDialog(QDialog):
+class BriefHistoryPanel(QWidget):
     """``open_requested(account_email, local_date)`` asks to show a saved brief;
     ``generate_requested(local_date)`` asks to brief a past day for the connected account."""
 
     open_requested = Signal(str, object)
     generate_requested = Signal(object)
 
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Briefs")
-        self.setWindowModality(Qt.WindowModality.WindowModal)
-        self.resize(560, 520)
+        self.setObjectName("briefHistory")
+        self.setAccessibleName("Saved briefs and missed days")
         self._summaries: tuple[SavedBriefSummary, ...] = ()
         self._missed: tuple[date, ...] = ()
         self._account: str | None = None
         self._today = date.min
         self._busy = False
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        heading = QLabel("Briefs")
+        heading.setTextFormat(Qt.TextFormat.PlainText)
+        heading.setFont(ui_font(TITLE_PX, medium=True))
+        layout.addWidget(heading)
         layout.addWidget(_plain("Saved briefs"))
         self.saved = ActivatingList()
         self.saved.setAccessibleName("Saved briefs")
@@ -73,20 +85,26 @@ class BriefHistoryDialog(QDialog):
         self.missed_note = _plain()
         layout.addWidget(self.missed_note)
         buttons = QHBoxLayout()
-        self.open_button = QPushButton("&Open")
-        self.brief_button = QPushButton("&Brief this day…")
+        self.open_button = _outline("&Open", "openBriefButton")
+        self.brief_button = _outline("&Brief this day…", "briefDayButton")
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.brief_button)
+        buttons.addStretch(1)
         layout.addLayout(buttons)
         self.confirm_panel = QWidget()
-        confirm = QHBoxLayout(self.confirm_panel)
+        self.confirm_panel.setObjectName("replaceConfirmation")
+        self.confirm_panel.setAccessibleName("Replace the saved brief")
+        confirm = QVBoxLayout(self.confirm_panel)
         confirm.setContentsMargins(0, 0, 0, 0)
         self.confirm_label = _plain()
-        self.replace_button = QPushButton("&Replace")
-        self.keep_button = QPushButton("&Keep it")
-        confirm.addWidget(self.confirm_label, 1)
-        confirm.addWidget(self.replace_button)
-        confirm.addWidget(self.keep_button)
+        confirm.addWidget(self.confirm_label)
+        choices = QHBoxLayout()
+        self.replace_button = _outline("&Replace", "replaceBriefButton")
+        self.keep_button = _outline("&Keep it", "keepBriefButton")
+        choices.addWidget(self.replace_button)
+        choices.addWidget(self.keep_button)
+        choices.addStretch(1)
+        confirm.addLayout(choices)
         layout.addWidget(self.confirm_panel)
         self.confirm_panel.hide()
         layout.addWidget(
@@ -97,9 +115,6 @@ class BriefHistoryDialog(QDialog):
         )
         self.status = _plain()
         layout.addWidget(self.status)
-        close = QPushButton("&Close")
-        layout.addWidget(close)
-        close.clicked.connect(self.reject)
         self.saved.currentRowChanged.connect(lambda row: self._chose(self.saved, row))
         self.missed.currentRowChanged.connect(lambda row: self._chose(self.missed, row))
         self.saved.itemActivated.connect(lambda _item: self._open())
@@ -136,8 +151,28 @@ class BriefHistoryDialog(QDialog):
             NOT_CONNECTED if account_email is None else "" if missed else NONE_MISSED
         )
         self.missed_note.setVisible(bool(self.missed_note.text()))
+        self.missed.setVisible(bool(missed))  # The note says why there are none.
         if summaries:
             self.saved.setCurrentRow(0)
+        self._update_buttons()
+
+    def set_account(self, account_email: str | None) -> None:
+        """Follow the connected account without reading storage. Missed days belong to an
+        account, so another account's are dropped (the window reloads them); without one,
+        the page says to connect. A replacement being confirmed is withdrawn."""
+        if account_email == self._account:
+            return
+        self._account = account_email
+        self._missed = ()
+        self.missed.blockSignals(True)
+        self.missed.clear()
+        self.missed.blockSignals(False)
+        self.missed.hide()
+        self.missed_note.setText(NOT_CONNECTED if account_email is None else "")
+        self.missed_note.setVisible(bool(self.missed_note.text()))
+        self.confirm_panel.hide()
+        if self.status.text() in (NEEDS_CONNECTION, OTHER_ACCOUNT):
+            self.status.clear()  # It was about the account that changed.
         self._update_buttons()
 
     def set_busy(self, busy: bool) -> None:

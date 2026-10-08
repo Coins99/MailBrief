@@ -12,7 +12,7 @@ from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import DigestStatus, SavedBriefSummary
 from mailbrief.ui.actions_view import EDIT, ActionsPanel
 from mailbrief.ui.drafts_view import OPEN, DraftsPanel
-from mailbrief.ui.history_view import BriefHistoryDialog
+from mailbrief.ui.history_view import BriefHistoryPanel
 from mailbrief.ui.lists import ActivatingList
 from tests.factories import make_action
 from tests.ui.test_actions_view import NOW, TODAY, UTC_ZONE
@@ -70,12 +70,12 @@ def test_an_empty_list_ignores_the_key(qtbot: QtBot) -> None:
 
 
 @pytest.mark.parametrize("key", KEYS)
-def test_the_history_dialog_opens_a_brief_once(qtbot: QtBot, key: Qt.Key) -> None:
-    dialog = BriefHistoryDialog(None)  # type: ignore[arg-type]
-    qtbot.addWidget(dialog)
+def test_the_briefs_page_opens_a_brief_once(qtbot: QtBot, key: Qt.Key) -> None:
+    panel = BriefHistoryPanel()
+    qtbot.addWidget(panel)
     opened: list[object] = []
-    dialog.open_requested.connect(lambda email, day: opened.append((email, day)))
-    dialog.configure(
+    panel.open_requested.connect(lambda email, day: opened.append((email, day)))
+    panel.configure(
         (
             SavedBriefSummary(
                 account_email="owner@example.com",
@@ -90,10 +90,10 @@ def test_the_history_dialog_opens_a_brief_once(qtbot: QtBot, key: Qt.Key) -> Non
         "owner@example.com",
         date(2026, 9, 5),
     )
-    dialog.show()
-    dialog.saved.setFocus()
+    panel.show()
+    panel.saved.setFocus()
 
-    QTest.keyClick(dialog.saved, key)
+    QTest.keyClick(panel.saved, key)
 
     assert opened == [("owner@example.com", date(2026, 9, 3))]
 

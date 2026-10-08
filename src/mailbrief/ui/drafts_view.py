@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.drafts import KIND_NAMES, DraftKind, DraftSummary
 from mailbrief.ui.lists import ActivatingList
+from mailbrief.ui.theme import TITLE_PX, ui_font
 
 NEW = "new"
 OPEN = "open"
@@ -55,19 +56,22 @@ class DraftsPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         heading = QLabel("Your drafts and notes")
         heading.setTextFormat(Qt.TextFormat.PlainText)
-        font = heading.font()
-        font.setPointSize(font.pointSize() + 3)
-        heading.setFont(font)
+        heading.setFont(ui_font(TITLE_PX, medium=True))
         layout.addWidget(heading)
         self.list = ActivatingList()
         self.list.setAccessibleName("Drafts and notes")
         self.list.currentRowChanged.connect(lambda _row: self._update_buttons())
         self.list.itemActivated.connect(lambda _item: self._request(OPEN))
-        layout.addWidget(self.list)
+        layout.addWidget(self.list, 1)
+        # With no drafts, a centred message fills the page in place of the list.
         self.empty = QLabel("No drafts yet. Start one with New, or from a brief item or action.")
+        self.empty.setObjectName("draftsEmpty")
         self.empty.setTextFormat(Qt.TextFormat.PlainText)
         self.empty.setWordWrap(True)
-        layout.addWidget(self.empty)
+        self.empty.setProperty("tone", "muted")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.empty, 1)
+        self.list.hide()
         buttons = QHBoxLayout()
         self.new_button = QPushButton("Ne&w")
         self.new_menu = QMenu(self.new_button)
@@ -80,7 +84,10 @@ class DraftsPanel(QWidget):
         self.open_button = QPushButton("&Open")
         self.delete_button = QPushButton("Delete draf&t")
         for button in (self.new_button, self.open_button, self.delete_button):
+            button.setProperty("variant", "outline")
+            button.setAutoDefault(False)
             buttons.addWidget(button)
+        buttons.addStretch(1)  # Buttons keep their own width.
         layout.addLayout(buttons)
         self.open_button.clicked.connect(lambda: self._request(OPEN))
         self.delete_button.clicked.connect(lambda: self._request(DELETE))
@@ -103,6 +110,7 @@ class DraftsPanel(QWidget):
             self.list.setCurrentRow(ids.index(previous.public_id))
         elif drafts:
             self.list.setCurrentRow(min(max(row, 0), len(drafts) - 1))
+        self.list.setVisible(bool(drafts))
         self.empty.setVisible(not drafts)
         self._update_buttons()
 

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
 
@@ -16,6 +17,14 @@ from mailbrief.storage.recovery import BackupValidationError, restore_backup_hol
 from mailbrief.ui.diagnostics import configure_logging, log_failure, logger
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
+from mailbrief.ui.theme import (
+    DARK,
+    LIGHT,
+    ThemeMode,
+    Tokens,
+    apply_theme,
+    set_current_tokens,
+)
 
 
 def create_application(arguments: Sequence[str] | None = None) -> QApplication:
@@ -29,8 +38,17 @@ def create_application(arguments: Sequence[str] | None = None) -> QApplication:
     return application
 
 
-async def run_desktop() -> None:
-    """Keep the loop alive until pending work and resources have shut down."""
+def palette_tokens(application: QApplication) -> Tokens:
+    """The tokens that suit the palette in effect: light on a light window colour."""
+    window = application.palette().color(QPalette.ColorRole.Window)
+    return LIGHT if window.lightness() > 127 else DARK
+
+
+async def run_desktop(theme_failure: Exception | None = None) -> None:
+    """Keep the loop alive until pending work and resources have shut down.
+
+    ``theme_failure`` is why the theme couldn't be applied, logged once desktop.log is open.
+    """
     paths = AppPaths.from_qt()
     lock = QLockFile(str(paths.data_dir / "desktop.lock"))
     # Long-running instances must not be considered stale merely because of their age.
@@ -47,6 +65,8 @@ async def run_desktop() -> None:
     handler = None
     try:
         handler = configure_logging(paths.data_dir)
+        if theme_failure is not None:
+            log_failure(theme_failure)
         window = MainWindow(DesktopRuntime(paths.database_path), database_path=paths.database_path)
         closed = asyncio.Event()
         window.closing.connect(closed.set)
@@ -111,6 +131,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     options = parser.parse_args(arguments)
     application = create_application([sys.argv[0]])
+    theme_failure: Exception | None = None
+    try:
+        apply_theme(application, ThemeMode.DARK)
+    except Exception as exc:
+        # The theme is cosmetic: run unthemed rather than not at all, painting with the
+        # tokens that suit the palette in effect, so text stays readable on it. The package
+        # check reports missing fonts or icons; desktop.log isn't open yet, so the failure
+        # is logged once it is.
+        theme_failure = exc
+        set_current_tokens(palette_tokens(application))
     application.setQuitOnLastWindowClosed(False)
     with QEventLoop(application) as loop:
         asyncio.set_event_loop(loop)
@@ -129,5 +159,5 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 report.write_text(json.dumps(failure), encoding="utf-8")
                 return 1
         else:
-            loop.run_until_complete(run_desktop())
+            loop.run_until_complete(run_desktop(theme_failure))
     return 0

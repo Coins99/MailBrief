@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QDialog
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
-from mailbrief.domain.digests import DigestCoverage, SyncStatus
+from mailbrief.domain.digests import DigestCoverage, SavedBriefSummary, SyncStatus
 from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.errors import ConfigurationError
 from mailbrief.ports.errors import AuthenticationRequiredError, ProviderError
@@ -342,7 +342,6 @@ async def test_a_refresh_waits_a_minute_while_another_operation_runs(
     "name",
     [
         "settings_dialog",
-        "history_dialog",
         "cached_dialog",
         "proposals_dialog",
         "auto_send_dialog",
@@ -367,6 +366,68 @@ async def test_a_refresh_waits_while_the_owner_is_in_a_dialog(
 
     await due(window)
     assert backend.automatic_calls == 1
+
+
+async def open_briefs(window: MainWindow) -> None:
+    window.start(window._open_history)
+    assert window.task is not None
+    await window.task
+    assert window.workspace.current_page() == "briefs"
+
+
+async def test_the_briefs_page_holds_a_refresh_only_while_a_replacement_is_confirmed(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    await open_briefs(window)
+    window.history_panel.confirm_panel.show()  # "This replaces the saved brief…"
+    window._refresh_due()
+
+    assert backend.automatic_calls == 0
+    assert due_at(window) == NOW  # Retried at the next tick, not skipped.
+    assert window.task is None or window.task.done()
+    window.history_panel.confirm_panel.hide()
+    await due(window)
+    assert backend.automatic_calls == 1  # Only looking at Briefs doesn't hold it.
+
+
+async def test_an_automatic_run_reloads_the_briefs_page(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    await window.initialize()
+    await open_briefs(window)
+    before = window.history_panel.saved.count()
+    earlier = backend.saved.model_copy(
+        update={"local_date": backend.saved.local_date - timedelta(days=1)}
+    )
+    backend.briefs[(earlier.account_id, earlier.local_date)] = earlier
+
+    await due(window)
+
+    assert backend.automatic_calls == 1
+    assert window.workspace.current_page() == "briefs"
+    assert window.history_panel.saved.count() == before + 1
+
+
+async def test_a_briefs_page_that_can_t_be_reloaded_doesn_t_fail_the_run(
+    window: MainWindow, backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await window.initialize()
+    await open_briefs(window)
+    backend.automatic_result = ready(backend, 2)
+
+    async def unreadable() -> tuple[SavedBriefSummary, ...]:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(backend, "list_briefs", unreadable)
+    await due(window)
+
+    assert backend.automatic_calls == 1
+    text = window.status.text()
+    assert text.startswith("Checked Gmail at 10:02. 2 new messages are ready to review.")
+    assert text.endswith("The view could not be refreshed; restart MailBrief to see the latest.")
+    assert "failed" not in text  # The run itself succeeded.
+    assert window.workspace.current_page() == "briefs"
 
 
 async def test_a_busy_window_keeps_its_status_line_even_if_gmail_is_disconnected(

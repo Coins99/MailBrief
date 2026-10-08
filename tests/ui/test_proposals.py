@@ -9,25 +9,23 @@ from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.actions import Action, ActionFilter, ActionProposal, ProposalState
+from mailbrief.domain.actions import Action, ActionFilter, ActionProposal
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
 from mailbrief.domain.digests import (
-    SECTION_TITLES,
     DailyDigest,
-    DigestSection,
     DigestStatus,
 )
 from mailbrief.services.actions import ActionConflictError
 from mailbrief.services.proposals import ProposalNotFoundError
 from mailbrief.ui.actions_view import PROPOSALS, ActionsPanel, describe
-from mailbrief.ui.digest_view import DigestView
+from mailbrief.ui.brief_detail import APPLY, DISMISS
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.proposals_view import (
     NONE_PENDING,
@@ -36,6 +34,7 @@ from mailbrief.ui.proposals_view import (
     pending_proposals,
 )
 from tests.factories import make_action, make_digest_item, make_proposal
+from tests.ui.brief_view import detail, shown_text
 from tests.ui.test_workflow import FakeBackend
 
 KEY = "reply-1"
@@ -79,17 +78,6 @@ def brief(zone: str = "America/Toronto") -> DailyDigest:
     )
 
 
-def anchors(view: DigestView) -> list[str]:
-    return re.findall(r'href="([^"]*)"', view.toHtml())
-
-
-def shown(*proposals: ActionProposal, zone: str = "America/Toronto") -> tuple[DigestView, str]:
-    view = DigestView()
-    view.zone = UTC_ZONE
-    view.show_digest(brief(zone), None, {KEY: proposals})
-    return view, view.toPlainText()
-
-
 # Effect names
 
 
@@ -111,141 +99,6 @@ def test_a_proposal_is_named_by_its_effect(fields: dict[str, object], effect: st
     assert effect_text(proposal, TORONTO) == effect
     if proposal.deadline_precision is DeadlinePrecision.DATETIME:
         assert effect_text(proposal, UTC_ZONE) == "Set the deadline to 2026-10-05 21:00"
-
-
-# The brief
-
-
-@pytest.mark.parametrize(
-    ("fields", "effect"),
-    [
-        (NEW_DATETIME, "Set the deadline to 2026-10-05 17:00"),
-        (NEW_DATE, "Set the deadline to 2026-10-05"),
-        (NEW_WORDS, "Set the deadline to “when the board meets”"),
-        ({"kind": FollowUpKind.CANCELLED}, "Complete it (cancelled)"),
-        ({"kind": FollowUpKind.DELIVERED}, "Complete it (delivered)"),
-    ],
-    ids=["datetime", "date", "words", "cancelled", "delivered"],
-)
-def test_the_brief_shows_each_proposal_under_its_item_with_an_effect_named_link(
-    qtbot: QtBot, fields: dict[str, object], effect: str
-) -> None:
-    view, text = shown(make_proposal(**fields))
-    qtbot.addWidget(view)
-
-    assert "Proposes for “Approve the proposal”: “No longer needed, thanks”" in text
-    assert f"{effect} · Dismiss" in text
-    # The proposal sits between the item and its footer links.
-    assert text.index("Approve the proposal by Friday.") < text.index("Proposes for")
-    assert text.index("Proposes for") < text.index("Draft a reply")
-    assert all(link.startswith("mailbrief:") for link in anchors(view))
-
-
-def test_an_exact_deadline_reads_in_the_brief_s_zone_not_the_owner_s(qtbot: QtBot) -> None:
-    proposal = make_proposal(**NEW_DATETIME)
-    view, text = shown(proposal, zone="Asia/Tokyo")  # 21:00 UTC is 06:00 the next day.
-    qtbot.addWidget(view)
-
-    assert "Set the deadline to 2026-10-06 06:00" in text
-
-
-def test_proposal_links_emit_apply_or_dismiss_with_the_proposal_and_its_revision(
-    qtbot: QtBot,
-) -> None:
-    first = make_proposal(id=3, action_revision=4)
-    second = make_proposal(id=9, action_revision=7, kind=FollowUpKind.DELIVERED)
-    view, _ = shown(first, second)
-    qtbot.addWidget(view)
-    requests: list[tuple[str, int, int]] = []
-    view.proposal_requested.connect(lambda *request: requests.append(request))
-
-    links = ["mailbrief:proposal/0", "mailbrief:proposal/1", "mailbrief:proposal/2"]
-    for link in (*links, "mailbrief:proposal/3", "mailbrief:proposal/4", "mailbrief:proposal/x"):
-        view.anchorClicked.emit(QUrl(link))
-
-    assert requests == [
-        ("apply", 3, 4),
-        ("dismiss", 3, 4),
-        ("apply", 9, 7),
-        ("dismiss", 9, 7),
-    ]
-    view.show_digest(brief())  # Without proposals the old links do nothing.
-    view.anchorClicked.emit(QUrl("mailbrief:proposal/0"))
-    assert len(requests) == 4
-    assert "Proposes for" not in view.toPlainText()
-
-
-def test_only_pending_proposals_are_shown(qtbot: QtBot) -> None:
-    applied = make_proposal(state=ProposalState.APPLIED)
-    view, text = shown(applied, make_proposal(id=4, evidence="Quietly dropped"))
-    qtbot.addWidget(view)
-
-    assert text.count("Proposes for") == 1 and "Quietly dropped" in text
-    assert [link for link in anchors(view) if link.startswith("mailbrief:proposal/")] == [
-        "mailbrief:proposal/0",
-        "mailbrief:proposal/1",
-    ]
-
-
-def test_everything_an_email_or_the_owner_wrote_is_escaped(qtbot: QtBot) -> None:
-    hostile = '<a href="https://evil.example">x</a> & <b>bold</b>'
-    proposal = make_proposal(
-        action_title=hostile,
-        evidence="Click <img src=x> & go",
-        **{**NEW_WORDS, "deadline_text": hostile},
-    )
-    view, text = shown(proposal)
-    qtbot.addWidget(view)
-
-    assert f"Proposes for “{hostile}”: “Click <img src=x> & go”" in text
-    assert f"Set the deadline to “{hostile}”" in text
-    assert "evil.example" not in "".join(anchors(view))
-    assert all(link.startswith("mailbrief:") for link in anchors(view))
-    assert "<b>" not in view.toHtml().split("Proposes for")[1].split("</p>")[0]
-
-
-def test_sections_use_one_shared_set_of_titles(qtbot: QtBot) -> None:
-    sections = (
-        DigestSection.ACTIONS,
-        DigestSection.DEADLINES,
-        DigestSection.DECISIONS,
-        DigestSection.HIGHLIGHTS,
-        DigestSection.FOLLOW_UPS,
-    )
-    digest = DailyDigest(
-        account_id="owner@example.com",
-        local_date=date(2026, 9, 4),
-        timezone_name="UTC",
-        generated_at_utc=datetime(2026, 9, 4, 12, tzinfo=UTC),
-        status=DigestStatus.COMPLETE,
-        items=tuple(
-            make_digest_item(message_key=f"m{index}", position=index, section=section)
-            for index, section in enumerate(sections)
-        ),
-    )
-    view = DigestView()
-    view.zone = UTC_ZONE
-    qtbot.addWidget(view)
-
-    view.show_digest(digest)
-
-    headings = re.findall(r"<h3[^>]*>.*?</h3>", view.toHtml(), re.S)
-    plain = [re.sub(r"<[^>]+>", "", heading).strip() for heading in headings]
-    assert plain == [
-        "Actions",  # The four existing titles are unchanged...
-        "Deadlines",
-        "Decisions",
-        "Highlights",
-        "Replies in threads you track",  # ...and the new one.
-    ]
-    assert SECTION_TITLES == {
-        DigestSection.ACTIONS: "Actions",
-        DigestSection.DEADLINES: "Deadlines",
-        DigestSection.DECISIONS: "Decisions",
-        DigestSection.HIGHLIGHTS: "Highlights",
-        DigestSection.FOLLOW_UPS: "Replies in threads you track",
-    }
-    assert set(SECTION_TITLES) == set(DigestSection)
 
 
 # The actions pane
@@ -519,7 +372,6 @@ def test_refreshing_keeps_the_selection_and_an_empty_dialog_says_so(
 # The window
 
 PROPOSAL = make_proposal(id=3, action_revision=4, **NEW_DATE)
-ACTION_ID = "0c5e2c1d-6b8e-4f55-9d0e-2a7f3b9c1e44"
 
 
 @pytest.fixture
@@ -550,7 +402,7 @@ async def test_every_brief_is_shown_with_its_proposals(
     await window.initialize()
 
     assert backend.proposal_calls == [backend.saved]
-    assert "Proposes for “Approve the proposal”" in window.digest.toPlainText()
+    assert "Proposes for “Approve the proposal”" in shown_text(window)
 
 
 async def test_a_brief_whose_proposals_fail_to_load_is_shown_without_them(
@@ -559,8 +411,8 @@ async def test_a_brief_whose_proposals_fail_to_load_is_shown_without_them(
     backend.proposals_fail = RuntimeError("private detail")
     await window.initialize()
 
-    assert "Approval needed by Friday" in window.digest.toPlainText()
-    assert "Proposes for" not in window.digest.toPlainText()
+    assert "Approval needed by Friday" in shown_text(window)
+    assert "Proposes for" not in shown_text(window)
     assert "private detail" not in window.status.text()
 
 
@@ -570,7 +422,7 @@ async def test_applying_from_the_brief_runs_one_operation_then_undo_reverses_it(
     await window.initialize()
     loads, lists = backend.loads, backend.list_calls
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/0"))
+    detail(window).proposal_requested.emit(APPLY, 3, 4)
     await finish(window)
 
     assert backend.action_calls == [("apply_proposal", 3, 4)]  # At the revision it was shown at.
@@ -592,7 +444,7 @@ async def test_dismissing_from_the_brief_then_undo_restores_it(
 ) -> None:
     await window.initialize()
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/1"))
+    detail(window).proposal_requested.emit(DISMISS, 3, 4)
     await finish(window)
 
     assert backend.action_calls == [("dismiss_proposal", 3)]
@@ -606,7 +458,7 @@ async def test_dismissing_from_the_brief_then_undo_restores_it(
     assert window.status.text() == "Undone."
 
 
-@pytest.mark.parametrize("link", ["mailbrief:proposal/0", "mailbrief:proposal/1"])
+@pytest.mark.parametrize("link", [APPLY, DISMISS])
 async def test_a_conflict_shows_its_static_message_and_refreshes(
     window: MainWindow, backend: FakeBackend, link: str
 ) -> None:
@@ -615,7 +467,7 @@ async def test_a_conflict_shows_its_static_message_and_refreshes(
     backend.action_fail = ActionConflictError(message)
     loads, lists = backend.loads, backend.list_calls
 
-    window.digest.anchorClicked.emit(QUrl(link))
+    detail(window).proposal_requested.emit(link, 3, 4)
     await finish(window)
 
     assert window.status.text() == message
@@ -623,14 +475,14 @@ async def test_a_conflict_shows_its_static_message_and_refreshes(
     assert window.undo_button.isHidden()  # Nothing changed, so nothing to undo.
 
 
-@pytest.mark.parametrize("link", ["mailbrief:proposal/0", "mailbrief:proposal/1"])
+@pytest.mark.parametrize("link", [APPLY, DISMISS])
 async def test_a_proposal_that_is_gone_reloads(
     window: MainWindow, backend: FakeBackend, link: str
 ) -> None:
     await window.initialize()
     backend.action_fail = ProposalNotFoundError()
 
-    window.digest.anchorClicked.emit(QUrl(link))
+    detail(window).proposal_requested.emit(link, 3, 4)
     await finish(window)
 
     assert window.status.text() == "That changed or is no longer available; the view was reloaded."
@@ -639,7 +491,7 @@ async def test_a_proposal_that_is_gone_reloads(
 
 async def test_a_refused_undo_explains_itself(window: MainWindow, backend: FakeBackend) -> None:
     await window.initialize()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/0"))
+    detail(window).proposal_requested.emit(APPLY, 3, 4)
     await finish(window)
     backend.action_fail = ActionConflictError("Only an unchanged update can be undone.")
 
@@ -661,7 +513,7 @@ async def test_a_click_while_busy_is_refused_with_a_reason(
     window.start(hold)  # Something else is running.
     await asyncio.sleep(0)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:proposal/0"))
+    detail(window).proposal_requested.emit(APPLY, 3, 4)
 
     assert window.status.text() == "MailBrief is busy; try again in a moment."
     assert backend.action_calls == []

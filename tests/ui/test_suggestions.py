@@ -5,16 +5,16 @@ from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
 
 import pytest
-from PySide6.QtCore import Qt, QUrl
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import SuggestionState, SuggestionView
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, TargetReason
 from mailbrief.domain.digests import DailyDigest, DigestStatus
 from mailbrief.services.actions import ActionConflictError, SuggestionNotFoundError
-from mailbrief.ui.digest_view import ACCEPT, DISMISS, DigestView
+from mailbrief.ui.brief_detail import ACCEPT, DISMISS
 from mailbrief.ui.main_window import MainWindow
 from tests.factories import fingerprint_of, make_digest_item, make_suggestion
+from tests.ui.brief_view import detail, shown_text
 from tests.ui.test_workflow import FakeBackend
 
 PENDING = SuggestionView(
@@ -86,124 +86,11 @@ async def finish(window: MainWindow) -> None:
     await window.task
 
 
-def test_suggestions_render_escaped_with_their_plan_and_target(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-
-    view.show_digest(brief(PENDING, ACCEPTED, DISMISSED))
-
-    text = view.toPlainText()
-    assert 'Suggested: <a href="https://evil.example">Approve</a> the budget' in text
-    assert "target 2026-10-01, one working day before the deadline" in text
-    assert "due 2026-10-02" in text
-    assert "Check the <b>totals</b>" in text
-    assert "Accepted: Book the room" in text
-    assert "Hidden after dismissal" not in text
-    # The title's markup is text: a real anchor would start with a raw "<a ".
-    assert '<a href="https://evil.example"' not in view.toHtml()
-
-
-def test_only_the_brief_s_own_suggestion_links_are_acted_on(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    view.show_digest(brief(PENDING, ACCEPTED, DISMISSED))
-    requests: list[tuple[str, int]] = []
-    view.suggestion_requested.connect(lambda kind, key: requests.append((kind, key)))
-
-    for link in (
-        "mailbrief:accept/7",
-        "mailbrief:dismiss/7",
-        "mailbrief:accept/8",  # Already accepted: no link was drawn for it.
-        "mailbrief:dismiss/9",  # Dismissed: hidden.
-        "mailbrief:accept/999",
-        "https://evil.example",
-    ):
-        view.anchorClicked.emit(QUrl(link))
-
-    assert requests == [(ACCEPT, 7), (DISMISS, 7)]
-
-    view.show_digest(brief())  # A new brief forgets the old links.
-    view.anchorClicked.emit(QUrl("mailbrief:accept/7"))
-    assert requests == [(ACCEPT, 7), (DISMISS, 7)]
-
-
-def test_a_suggestion_without_dates_names_only_its_owner(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    undated = SuggestionView(
-        suggestion_id=10,
-        state=SuggestionState.PENDING,
-        suggestion=make_suggestion(
-            position=0, title="Book the room", fingerprint=fingerprint_of("room"), steps=()
-        ),
-    )
-
-    view.show_digest(brief(undated))
-
-    (line,) = [line for line in view.toPlainText().splitlines() if line.startswith("Suggested:")]
-    assert line == "Suggested: Book the room (yours)"  # No "target" or "due" part.
-
-
-def test_an_exact_suggestion_deadline_reads_in_the_brief_s_zone(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    friday_night = SuggestionView(
-        suggestion_id=11,
-        state=SuggestionState.PENDING,
-        suggestion=make_suggestion(
-            position=0,
-            title="Send the contract",
-            fingerprint=fingerprint_of("contract"),
-            steps=(),
-            deadline_text="Friday 11 PM Pacific",
-            deadline_precision=DeadlinePrecision.DATETIME,
-            deadline_date=date(2026, 10, 2),
-            deadline_at_utc=datetime(2026, 10, 3, 6, 0, tzinfo=UTC),
-            deadline_timezone="America/Los_Angeles",
-        ),
-    )
-
-    view.show_digest(brief(friday_night).model_copy(update={"timezone_name": "America/Toronto"}))
-
-    (line,) = [line for line in view.toPlainText().splitlines() if line.startswith("Suggested:")]
-    assert line == "Suggested: Send the contract (yours; due 2026-10-03 02:00)"  # Saturday.
-
-
-def test_an_unresolved_suggestion_deadline_shows_its_words(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    soon = SuggestionView(
-        suggestion_id=12,
-        state=SuggestionState.PENDING,
-        suggestion=make_suggestion(
-            position=0,
-            title="Reply to <Sam>",
-            fingerprint=fingerprint_of("sam"),
-            steps=(),
-            deadline_text="<b>soon</b>",
-            deadline_precision=DeadlinePrecision.UNRESOLVED,
-        ),
-    )
-
-    view.show_digest(brief(soon))
-
-    assert "Suggested: Reply to <Sam> (yours; due “<b>soon</b>”)" in view.toPlainText()
-    assert "<b>soon" not in view.toHtml()
-
-
-def test_suggestion_links_can_be_reached_from_the_keyboard(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    view.show_digest(brief(PENDING))
-
-    assert Qt.TextInteractionFlag.LinksAccessibleByKeyboard in view.textInteractionFlags()
-
-
 async def test_accepting_then_undoing(window: MainWindow, backend: FakeBackend) -> None:
     await window.initialize()
     loads = backend.loads
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
 
     assert backend.action_calls == [("accept_suggestion", 7)]
@@ -227,7 +114,7 @@ async def test_accepting_then_undoing(window: MainWindow, backend: FakeBackend) 
 async def test_dismissing_then_undoing(window: MainWindow, backend: FakeBackend) -> None:
     await window.initialize()
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:dismiss/7"))
+    detail(window).suggestion_requested.emit(DISMISS, 7)
     await finish(window)
     assert window.undo_button.text() == "&Undo dismiss"
     window.undo_button.click()
@@ -243,7 +130,7 @@ async def test_a_stale_suggestion_reloads_the_brief(
     backend.action_fail = SuggestionNotFoundError("That suggestion was not found.")
     loads = backend.loads
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
 
     assert "no longer available" in window.status.text()
@@ -255,7 +142,7 @@ async def test_undo_explains_a_change_it_cannot_reverse(
     window: MainWindow, backend: FakeBackend
 ) -> None:
     await window.initialize()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
     backend.action_fail = ActionConflictError("changed")
 
@@ -270,7 +157,7 @@ async def test_a_new_brief_withdraws_the_undo_offer(
     window: MainWindow, backend: FakeBackend
 ) -> None:
     await window.initialize()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:dismiss/7"))
+    detail(window).suggestion_requested.emit(DISMISS, 7)
     await finish(window)
     assert not window.undo_button.isHidden()
 
@@ -289,7 +176,7 @@ async def test_suggestion_links_do_nothing_while_another_operation_runs(
     window.start(window._generate)
     await asyncio.sleep(0)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await asyncio.sleep(0)
 
     assert backend.action_calls == []
@@ -314,13 +201,13 @@ async def test_the_brief_stays_on_screen_when_the_reload_after_an_accept_finds_n
     window = MainWindow(backend)
     qtbot.addWidget(window)
     await window.initialize()
-    shown = window.digest.toPlainText()
+    shown = shown_text(window)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:accept/7"))
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
 
     assert backend.loads == 2  # The reload after the accept found nothing...
-    assert window.digest.toPlainText() == shown  # ...so the previous brief stays.
+    assert shown_text(window) == shown  # ...so the previous brief stays.
     assert "Accepted: Approve the budget" in window.status.text()
     assert window.undo_button.text() == "&Undo accept"
 
@@ -346,7 +233,7 @@ async def test_dismissing_a_stale_suggestion_reloads_and_offers_no_undo(
     backend.action_fail = SuggestionNotFoundError("That suggestion was not found.")
     loads = backend.loads
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:dismiss/7"))
+    detail(window).suggestion_requested.emit(DISMISS, 7)
     await finish(window)
 
     assert backend.action_calls == [("dismiss_suggestion", 7)]

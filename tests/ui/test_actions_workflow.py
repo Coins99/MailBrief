@@ -16,9 +16,10 @@ from mailbrief.domain.actions import Action, ActionEdit, ActionFilter, ActionSta
 from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.services.actions import ActionConflictError
-from mailbrief.ui.digest_view import ACCEPT, DISMISS
+from mailbrief.ui.brief_detail import ACCEPT, DISMISS
 from mailbrief.ui.main_window import MainWindow
 from tests.factories import make_action
+from tests.ui.brief_view import detail
 from tests.ui.test_workflow import FakeBackend
 
 OPEN = make_action(title="Send the deck")
@@ -216,7 +217,7 @@ async def test_a_failed_refresh_after_a_dismiss_keeps_the_message_and_notes_it_o
     if lists_fail:
         backend.list_fail = RuntimeError("database locked")
 
-    window.digest.suggestion_requested.emit(DISMISS, 7)
+    detail(window).suggestion_requested.emit(DISMISS, 7)
     await finish(window)
 
     assert window.status.text() == (
@@ -236,7 +237,7 @@ async def test_accepting_a_suggestion_refreshes_every_action_list(
     )
     backend.actions[ActionFilter.OPEN] = (OPEN, accepted)
 
-    window.digest.suggestion_requested.emit(ACCEPT, 7)
+    detail(window).suggestion_requested.emit(ACCEPT, 7)
     await finish(window)
 
     assert backend.list_calls == lists + 3

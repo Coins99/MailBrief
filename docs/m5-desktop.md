@@ -42,6 +42,25 @@ stored Gmail accounts. Neither operation removes saved briefs or cached analyses
 Each actual transmission still requires approval; revocation restores the first-use
 disclosure for subsequent transmissions.
 
+## The window
+
+Since PR #21 the window is the three-pane workspace
+([screenshot](ui/workspace-dark.png), dark theme only for now):
+
+- The **header** shows when Gmail was last checked ("Checked Gmail at 09:14", in your time
+  zone), then **Sync and review**, and **Cancel** while an operation runs.
+- The **sidebar** lists the pages **Today**, **Actions**, **Waiting**, **Drafts** and
+  **Briefs**, with counts for actions, waiting actions and drafts. Its footer has **Saved
+  mail**, **Data** (Data and recovery) and **Settings**, the Gmail and AI status lines,
+  and **Connect Gmail** without a connected account or **Disconnect** with one.
+- **Today** shows the brief: the emails by section on the left and the selected email on
+  the right. **Actions** and **Waiting** open the actions page on that tab, **Drafts**
+  lists drafts and notes, and **Briefs** lists saved briefs and missed days.
+- The **status strip** along the bottom shows the latest status, with **Undo** after a
+  change you can reverse.
+- Ctrl+1 to Ctrl+5 (Cmd+1 to Cmd+5 on macOS) open Today, Actions, Waiting, Drafts and
+  Briefs. Briefs says so instead while MailBrief is busy or before local storage loads.
+
 ## Daily workflow
 
 The app migrates local storage and restores the latest saved Gmail brief before
@@ -49,13 +68,15 @@ attempting silent sign-in. Offline viewing of saved metadata and results does
 not require provider credentials. Gmail and AI configuration have separate status
 labels.
 
-Connect Gmail, then choose **Sync and review**. Review all ranked messages from
-today's Inbox. Automatic suggestions are prechecked; add or remove messages,
+Connect Gmail, then choose **Sync and review**. The run takes two steps on its own page,
+while the sidebar stays on Today. Step 1, **Choose what MailBrief reads**, lists all ranked
+messages from today's Inbox. Automatic suggestions are prechecked; add or remove messages,
 up to ten in total, and continue. Rank scores and reasons appear in row tooltips.
 The service independently rejects invalid IDs, duplicates and oversized selections.
 Only checked messages have bodies retrieved, with no second sync
-between review and analysis. Approve or decline the transmission disclosure;
-cached analyses can be reused without a new AI call.
+between review and analysis. Step 2, **Approve sending to Groq**: approve or decline the
+transmission disclosure, with Decline focused; cached analyses can be reused without a new
+AI call.
 
 The brief shows account, date, save time/age, coverage, partial or empty status,
 summaries, actions and resolved deadlines. Gmail source links retain their
@@ -69,7 +90,7 @@ An in-flight worker-thread migration is joined before shutdown or another operat
 can access the database. An incomplete sync with no usable messages also preserves
 the last good brief rather than saving a misleading empty one.
 
-**Browse saved mail (offline)** opens a read-only view of locally cached Gmail
+**Saved mail** in the sidebar opens a read-only view of locally cached Gmail
 metadata. Choose an account and received date in your time zone (M8: it opens on today
 there, from the Preferences time zone), and use
 100-message pages. The browser includes messages no longer marked as being in the
@@ -79,8 +100,12 @@ are available without credentials, body retrieval, AI or network access. Opening
 a source in Gmail is an explicit separate action. Local-day filtering respects
 daylight-saving boundaries.
 
-Keyboard navigation includes Space to toggle a focused review row. The main
-workflow scrolls when space is limited so review/consent controls remain reachable.
+Keyboard navigation includes Space to toggle a focused review row. The shortlist is only
+as tall as its rows and scrolls on its own when they don't fit, so Continue stays in
+view; the run page scrolls when space is limited. Tab runs from **Sync and review**
+through **Cancel**, the sidebar's pages, **Saved mail**, **Data**, **Settings**, **Connect
+Gmail** or **Disconnect**, then the page shown (on Today, the brief list and the selected
+email's buttons in order), then **Undo**, and back to the start.
 
 ## Build and check packages
 

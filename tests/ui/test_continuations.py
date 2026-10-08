@@ -2,12 +2,10 @@
 the thread-check status line."""
 
 import asyncio
-import re
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
-from PySide6.QtCore import QUrl
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import (
@@ -21,9 +19,9 @@ from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
 from mailbrief.domain.digests import DailyDigest, DigestStatus, SyncResult, SyncStatus
 from mailbrief.services.actions import ActionConflictError, ActionNotFoundError
-from mailbrief.ui.digest_view import DigestView
 from mailbrief.ui.main_window import MainWindow, thread_check_text
 from tests.factories import fingerprint_of, make_action, make_digest_item, make_suggestion
+from tests.ui.brief_view import detail, shown_text
 from tests.ui.test_workflow import FakeBackend
 
 KEY = "reply-1"
@@ -68,62 +66,6 @@ def brief(local_date: date = date(2026, 9, 4), *views: SuggestionView) -> DailyD
     )
 
 
-def anchors(view: DigestView) -> list[str]:
-    return re.findall(r'href="([^"]*)"', view.toHtml())
-
-
-# The brief view
-
-
-def test_continuations_name_only_actions_the_email_does_not_belong_to(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-
-    view.show_digest(brief(), LINKS)
-
-    text = view.toPlainText()
-    assert (
-        'Continues: “<a href="https://evil.example">Chase</a> the <b>deck</b>” (waiting for)'
-        in (text)
-    )
-    assert "Continues: “Book the room”" not in text  # The email is already its source.
-    assert 'Add to “<a href="https://evil.example">Chase</a> the <b>deck</b>”' in text
-    assert "Add to “Book the room”" in text
-    assert "evil.example" not in "".join(anchors(view))  # Titles are text, never links.
-    assert all(link.startswith("mailbrief:") for link in anchors(view))
-
-
-def test_add_to_links_emit_the_suggestion_action_and_revision(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    view.show_digest(brief(), LINKS)
-    requests: list[tuple[int, str, int]] = []
-    view.accept_into_requested.connect(lambda *request: requests.append(request))
-
-    for link in ("mailbrief:into/0", "mailbrief:into/1", "mailbrief:into/2", "mailbrief:into/x"):
-        view.anchorClicked.emit(QUrl(link))
-
-    assert requests == [(7, TRACKED.public_id, 3), (7, OWN.public_id, 1)]
-    view.show_digest(brief())  # Without links: nothing to add to.
-    view.anchorClicked.emit(QUrl("mailbrief:into/0"))
-    assert len(requests) == 2
-    assert "Continues" not in view.toPlainText() and "Add to" not in view.toPlainText()
-
-
-def test_only_pending_suggestions_offer_add_to(qtbot: QtBot) -> None:
-    view = DigestView()
-    qtbot.addWidget(view)
-    accepted = PENDING.model_copy(
-        update={"state": SuggestionState.ACCEPTED, "action_public_id": OWN.public_id}
-    )
-
-    view.show_digest(brief(date(2026, 9, 4), accepted), LINKS)
-
-    assert "Continues: “<a" in view.toPlainText()
-    assert "Add to" not in view.toPlainText()
-    assert not [link for link in anchors(view) if link.startswith("mailbrief:into/")]
-
-
 # The window
 
 
@@ -155,7 +97,7 @@ async def test_every_brief_is_shown_with_its_continuations(
     await window.initialize()
 
     assert backend.link_calls == [backend.saved]
-    assert "Continues: “" in window.digest.toPlainText()
+    assert "Continues: “" in shown_text(window)
 
 
 async def test_a_brief_whose_links_fail_to_load_is_shown_without_them(
@@ -164,8 +106,8 @@ async def test_a_brief_whose_links_fail_to_load_is_shown_without_them(
     backend.links_fail = RuntimeError("private detail")
     await window.initialize()
 
-    assert "Approval needed by Friday" in window.digest.toPlainText()
-    assert "Continues" not in window.digest.toPlainText()
+    assert "Approval needed by Friday" in shown_text(window)
+    assert "Continues" not in shown_text(window)
     assert "private detail" not in window.status.text()
 
 
@@ -177,7 +119,7 @@ async def test_add_to_then_undo(
     backend.source_added = source_added
     loads = backend.loads
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:into/0"))
+    detail(window).accept_into_requested.emit(7, TRACKED.public_id, TRACKED.revision)
     await finish(window)
 
     assert backend.action_calls == [("accept_into", 7, TRACKED.public_id, 3)]
@@ -199,7 +141,7 @@ async def test_repeating_add_to_offers_no_undo(window: MainWindow, backend: Fake
     await window.initialize()
     backend.add_changed = False  # The suggestion was already added to that action.
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:into/0"))
+    detail(window).accept_into_requested.emit(7, TRACKED.public_id, TRACKED.revision)
     await finish(window)
 
     assert backend.action_calls == [("accept_into", 7, TRACKED.public_id, 3)]
@@ -214,7 +156,7 @@ async def test_an_add_to_conflict_shows_its_message_and_refreshes(
     backend.action_fail = ActionConflictError("That suggestion already belongs to another action.")
     loads, lists = backend.loads, backend.list_calls
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:into/0"))
+    detail(window).accept_into_requested.emit(7, TRACKED.public_id, TRACKED.revision)
     await finish(window)
 
     assert window.status.text() == "That suggestion already belongs to another action."
@@ -226,7 +168,7 @@ async def test_add_to_a_deleted_action_reloads(window: MainWindow, backend: Fake
     await window.initialize()
     backend.action_fail = ActionNotFoundError("That action was not found.")
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:into/1"))
+    detail(window).accept_into_requested.emit(7, OWN.public_id, OWN.revision)
     await finish(window)
 
     assert "no longer available" in window.status.text()
@@ -235,7 +177,7 @@ async def test_add_to_a_deleted_action_reloads(window: MainWindow, backend: Fake
 
 async def test_a_refused_undo_add_explains_itself(window: MainWindow, backend: FakeBackend) -> None:
     await window.initialize()
-    window.digest.anchorClicked.emit(QUrl("mailbrief:into/0"))
+    detail(window).accept_into_requested.emit(7, TRACKED.public_id, TRACKED.revision)
     await finish(window)
     backend.action_fail = ActionConflictError("Only an unchanged addition can be undone.")
 
@@ -255,18 +197,18 @@ async def test_add_to_and_undo_stay_on_a_past_brief(
     window.start(lambda: window._show_brief(past.account_id, past.local_date))
     await finish(window)
     assert backend.link_calls[-1] == past
-    assert "Continues: “" in window.digest.toPlainText()
+    assert "Continues: “" in shown_text(window)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:into/0"))
+    detail(window).accept_into_requested.emit(7, TRACKED.public_id, TRACKED.revision)
     await finish(window)
     assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
-    assert window.digest.toPlainText().startswith("2026-09-03")
+    assert shown_text(window).startswith("Thu Sep 3")
     assert backend.link_calls[-1] == past
 
     window.undo_button.click()
     await finish(window)
     assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
-    assert window.digest.toPlainText().startswith("2026-09-03")
+    assert shown_text(window).startswith("Thu Sep 3")
 
 
 async def test_mark_seen_runs_for_an_action_with_activity(

@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import HttpUrl
-from PySide6.QtCore import QUrl
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter, ActionSource
@@ -20,6 +19,7 @@ from mailbrief.ui.draft_editor import CONFLICT, NOT_SAVED
 from mailbrief.ui.drafts_view import OPEN
 from mailbrief.ui.main_window import DraftWrites, MainWindow
 from tests.factories import make_action
+from tests.ui.brief_view import detail, shown_text
 from tests.ui.test_workflow import FakeBackend
 
 ACTION = make_action(
@@ -97,9 +97,9 @@ async def test_a_brief_item_opens_a_prefilled_reply(
     window: MainWindow, backend: FakeBackend
 ) -> None:
     await window.initialize()
-    assert "Draft a reply" in window.digest.toPlainText()
+    assert "Draft a reply" in shown_text(window)
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:reply/0"))
+    detail(window).reply_requested.emit("owner@example.com", "local-1")
     await finish(window)
 
     assert backend.draft_calls == [("create_reply_draft", "owner@example.com", "local-1")]
@@ -119,7 +119,7 @@ async def test_a_reply_to_mail_no_longer_local_says_so(
     await window.initialize()
     backend.reply_sources.clear()
 
-    window.digest.anchorClicked.emit(QUrl("mailbrief:reply/0"))
+    detail(window).reply_requested.emit("owner@example.com", "local-1")
     await finish(window)
 
     assert window.status.text() == "That email is no longer in local mail."

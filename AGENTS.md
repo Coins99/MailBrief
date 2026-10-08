@@ -28,12 +28,12 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   autosave, versions, copy and export, and AI drafting with Groq from context the owner
   chooses (desktop, plus `mailbrief-gmail-diagnostic drafts`). See `docs/m7-drafts.md`,
   ADR 0012 and ADR 0013.
-- M8 implemented, awaiting live acceptance, on `feat/m8-continuity` (PR #17), built in nine parts
+- M8 implemented (merged in PR #17), awaiting live acceptance, built in nine parts
   (`docs/m8-daily-operation.md`); preferences (Parts 1–2) implemented, awaiting live
   acceptance: time zone, messages per brief, sender exclusions, drafting defaults and AI
   limits, in the Settings Preferences tab and `mailbrief-gmail-diagnostic preferences show`.
   See ADR 0014. Brief history and bounded catch-up (Part 3) implemented, awaiting live
-  acceptance: the desktop Briefs… dialog and `brief --date`, `briefs list` and
+  acceptance: the desktop Briefs page and `brief --date`, `briefs list` and
   `briefs show`. Thread tracking backend (Part 4) implemented, awaiting live acceptance:
   the threads of open actions are checked after today's sync (`actions list`,
   `actions seen`). See ADR 0015. Thread activity in the desktop and "Add to" an existing
@@ -52,7 +52,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   with one brief per day. The consolidated live acceptance and known limits are in
   `docs/m8-daily-operation.md`.
 
-- M9 implemented on `feat/m9-durability`, awaiting owner live acceptance:
+- M9 implemented (merged in PR #19, review fixes in PR #20), awaiting owner live acceptance:
   Data and recovery provides consistent backup, archive verification, restore after
   shutdown, portable action/draft/note exports, previewed manual retention, safe
   diagnostics and bundled help. Offline backup/verify/restore is also available through
@@ -64,6 +64,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   backup/recovery/export/cleanup.
   See `docs/m9-durability.md` and `docs/m9-live-validation.md`. Do not claim M9 accepted
   until the owner completes real-record recovery and the 7–14-day release scenario.
+- The desktop UI is the three-pane workspace (PR #21); see `.claude/skills/mailbrief-ui/`.
 
 ## Layout (ports and adapters)
 
@@ -104,12 +105,21 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   desktop service composition, saved-brief display, the actions pane and editor, the
   drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
   (`drafting_panel.py`), the Settings Preferences tab (`preferences_view.py`) and the
-  Briefs… dialog for saved briefs and missed days (`history_view.py`), the Proposals dialog
+  Briefs page for saved briefs and missed days (`history_view.py`), the Proposals dialog
   for one action and the wording of a proposal's effect (`proposals_view.py`); `lists.py`
   holds `ActivatingList`, where Return or Enter activates a row once on every platform.
 - `ui/scheduler.py` (`RefreshScheduler`, the minute tick behind timed refresh) and
   `ui/auto_send_view.py` (the automatic-analysis permission dialog); `services/consent.py`
   reads and sets that permission.
+- `ui/theme/`: design tokens (`tokens.py`, the only place UI colours are defined), the
+  Fusion palette and stylesheet (`style.py`, `apply_theme`), bundled Inter under the SIL
+  OFL (`fonts/`) and Tabler icons under MIT (`icons/`). `ui/labels.py` holds
+  `plain_label`, `wrap_label` (`WrapLabel`) and `button_label`. MainWindow hosts the three-pane workspace
+  (`workspace.py`, with `hairline.py`, `brief_list.py` and `brief_detail.py`): the header
+  (when Gmail was last checked, Sync and review, Cancel), the sidebar's pages and footer
+  (Saved mail, Data, Settings, the Gmail and AI lines, Connect and Disconnect), the Today,
+  run (review and consent), Actions, Drafts and Briefs pages, and a status strip with
+  Undo.
 - `src/mailbrief/app.py` owns the qasync loop.
 - `scripts/build_desktop.py` and `scripts/check_package.py`: native PyInstaller builds
   and credential-free package checks. Build artifacts stay in `out/`.
@@ -284,6 +294,17 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
   drafts, drafting, preferences, history, threads, proposals, consent and data services.
   `scripts/check_coverage.py` enforces the 90% combined statement/branch service gate.
+
+## UI work
+
+- Use the `/mailbrief-ui` skill (`.claude/skills/mailbrief-ui/`) for any change under
+  `src/mailbrief/ui`.
+- Colours come only from `ui/theme/tokens.py`; mail and AI text only through
+  `plain_label()`, `wrap_label()` or a delegate's `drawText()`; button text through
+  `button_label()`.
+- Render the screenshot gallery with
+  `MAILBRIEF_UI_SHOTS=scratch/ui-shots uv run pytest tests/ui/test_workspace.py -q --no-cov`
+  and compare it with `docs/ui/mockup-three-pane-dark.png`.
 
 ## Dormant Microsoft notes
 

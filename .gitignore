@@ -230,3 +230,4 @@ token-cache.json
 *.sqlite3
 *.sqlite3-*
 *.db
+scratch/

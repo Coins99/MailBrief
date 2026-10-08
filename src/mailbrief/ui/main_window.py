@@ -2,18 +2,20 @@
 
 import asyncio
 import contextlib
+import itertools
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Protocol, assert_never
 
 from pydantic import SecretStr
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QGridLayout,
+    QAbstractItemView,
+    QFrame,
     QHBoxLayout,
-    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -117,6 +119,7 @@ from mailbrief.ui.actions_view import (
     ActionsPanel,
 )
 from mailbrief.ui.auto_send_view import AutoSendDialog
+from mailbrief.ui.brief_detail import ACCEPT, APPLY, DISMISS, is_gmail_link
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.data_view import DataDialog
 from mailbrief.ui.diagnostics import (
@@ -125,18 +128,22 @@ from mailbrief.ui.diagnostics import (
     log_automatic_run,
     log_failure,
 )
-from mailbrief.ui.digest_view import ACCEPT, APPLY, DISMISS, DigestView
 from mailbrief.ui.draft_editor import DraftEditor
 from mailbrief.ui.drafts_view import DELETE as DELETE_DRAFT
 from mailbrief.ui.drafts_view import NEW as NEW_DRAFT
 from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
-from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryDialog
+from mailbrief.ui.hairline import HairlineDivider, HairlineFrame
+from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryPanel
+from mailbrief.ui.labels import plain_label, wrap_label
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
 from mailbrief.ui.proposals_view import ProposalsDialog
+from mailbrief.ui.run_view import ROW_ROLE, ShortlistDelegate, shortlist_row
 from mailbrief.ui.scheduler import RefreshScheduler
 from mailbrief.ui.settings_view import SettingsDialog
+from mailbrief.ui.theme import CAPTION_PX, SMALL_PX, TITLE_PX, ui_font
+from mailbrief.ui.workspace import ThreePaneWorkspace
 
 
 class DesktopBackend(Protocol):
@@ -250,6 +257,7 @@ _DRAFT_STALE = (DraftConflictError, DraftNotFoundError)
 _PICK_ONE = "Select at least one message to analyze, or Cancel."
 _NOT_REFRESHED = "The view could not be refreshed; restart MailBrief to see the latest."
 _BUSY = "MailBrief is busy; try again in a moment."
+_BRIEFS_UNAVAILABLE = "Saved briefs open once local storage loads. Choose Retry loading saved data."
 _EDITOR_STALE = (
     "This action changed since you opened it. Your edits are still here — copy what you "
     "need, then Cancel and reopen the action."
@@ -312,6 +320,52 @@ def _ready_text(ready: int) -> str:
     return f"{ready} new messages are ready to review."
 
 
+def _outline_button(
+    text: str, name: str, *, px: int | None = None, accessible_name: str | None = None
+) -> QPushButton:
+    """An app-authored outline button; ``text`` may carry its ``&`` mnemonic. Without
+    ``accessible_name``, Qt reads the button's text, so a label that changes stays read."""
+    button = QPushButton(text)
+    button.setObjectName(name)
+    _outline(button)
+    if accessible_name is not None:
+        button.setAccessibleName(accessible_name)
+    if px is not None:
+        button.setFont(ui_font(px))
+    return button
+
+
+def _outline(button: QPushButton) -> None:
+    button.setProperty("variant", "outline")
+    button.setAutoDefault(False)
+
+
+_RUN_WIDTH = 760
+# Ctrl+1 to Ctrl+5 (Cmd on macOS) show the sidebar's pages, in its order.
+PAGE_SHORTCUTS = ("today", "actions", "waiting", "drafts", "briefs")
+
+
+def _step_heading(layout: QVBoxLayout, step: str, title: str) -> None:
+    """A run step's caption ("Step 1 of 2") above its title."""
+    caption = plain_label(step, tone="muted", px=CAPTION_PX)
+    caption.setObjectName("stepCaption")
+    layout.addWidget(caption)
+    heading = plain_label(title, px=TITLE_PX, medium=True)
+    heading.setObjectName("stepTitle")
+    layout.addWidget(heading)
+
+
+def _page(widget: QWidget, name: str, accessible_name: str) -> QWidget:
+    """A workspace page holding ``widget`` with 12 px margins."""
+    page = QWidget()
+    page.setObjectName(name)
+    page.setAccessibleName(accessible_name)
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(12, 12, 12, 12)
+    layout.addWidget(widget)
+    return page
+
+
 class _ApprovedGate:
     """The editor's preview already asked; first use also needs the ticked consent box."""
 
@@ -320,14 +374,6 @@ class _ApprovedGate:
 
     async def request_drafting_consent(self, preview: DraftingPreview) -> bool:
         return self._agreed or not preview.first_use
-
-
-def plain_label(text: str) -> QLabel:
-    """Mail-derived text must never become rich text or an automatic hyperlink."""
-    label = QLabel(text)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setWordWrap(True)
-    return label
 
 
 class DraftWrites:
@@ -434,6 +480,15 @@ class MainWindow(QMainWindow):
         # Whether the running operation is an automatic refresh (ADR 0017): its failures are
         # reported as such, and it never opens a panel or dialog.
         self._automatic_active = False
+        # When the running sync finished, once its review opens: the review and consent may
+        # follow it by many minutes. The header shows the last such time, ``_checked``, with
+        # its date once it isn't today; ``_day`` is the owner's day the views were built
+        # for, then at each minute tick.
+        self._synced_at: datetime | None = None
+        self._checked: datetime | None = None
+        self._day: date | None = None
+        # A new day's reload of the actions and Briefs, waiting for the window to be free.
+        self._day_refresh_pending = False
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
@@ -452,9 +507,9 @@ class MainWindow(QMainWindow):
         self.proposals_dialog.dismiss_requested.connect(
             lambda proposal_id: self._start_from_link(lambda: self._dismiss_proposal(proposal_id))
         )
-        self.history_dialog = BriefHistoryDialog(self)
-        self.history_dialog.open_requested.connect(self._request_open_brief)
-        self.history_dialog.generate_requested.connect(self._request_brief_day)
+        self.history_panel = BriefHistoryPanel()
+        self.history_panel.open_requested.connect(self._request_open_brief)
+        self.history_panel.generate_requested.connect(self._request_brief_day)
         self.cached_dialog.page_requested.connect(self._request_cached_page)
         self.settings_dialog = SettingsDialog(self)
         self.auto_send_dialog = AutoSendDialog(self.settings_dialog)
@@ -462,6 +517,11 @@ class MainWindow(QMainWindow):
         # When an automatic run is due, by the owner's schedule; it stops with the window.
         self.scheduler = RefreshScheduler(self, clock=lambda: self.now())
         self.scheduler.due.connect(self._refresh_due)
+        # Once a minute, so a new day dates the check time and recounts the deadline chips.
+        self.day_timer = QTimer(self)
+        self.day_timer.setInterval(60_000)
+        self.day_timer.timeout.connect(self._minute_tick)
+        self.day_timer.start()
         self.settings_dialog.save_requested.connect(self._request_save_preferences)
         self.settings_dialog.key_requested.connect(self._request_save_key)
         self.settings_dialog.remove_key_requested.connect(
@@ -479,115 +539,187 @@ class MainWindow(QMainWindow):
             lambda: self.start(self._open_auto_send, cancellable=False)
         )
         self.setWindowTitle("MailBrief")
-        self.resize(980, 760)
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(12)
-        title = plain_label("Your daily mail brief")
-        font = title.font()
-        font.setPointSize(20)
-        title.setFont(font)
-        layout.addWidget(title)
-        self.connection = plain_label("Gmail: checking saved session…")
-        self.ai = plain_label("AI: checking configuration…")
-        layout.addWidget(self.connection)
-        layout.addWidget(self.ai)
-        actions = QGridLayout()
-        self.connect_button = QPushButton("&Connect Gmail")
-        self.disconnect_button = QPushButton("&Disconnect")
-        self.generate_button = QPushButton("&Sync and review")
+        self.resize(1100, 720)
+        workspace = self.workspace = ThreePaneWorkspace()
+        sidebar = workspace.sidebar
+        # The header: when Gmail was last checked, then Sync and review and Cancel.
+        self.generate_button = _outline_button("&Sync and review", "generateButton")
         self.generate_button.setToolTip("Refresh today's Inbox or retry an incomplete run.")
-        self.cancel_button = QPushButton("&Cancel")
-        self.settings_button = QPushButton("Se&ttings")
-        for index, button in enumerate(
-            (
-                self.connect_button,
-                self.disconnect_button,
-                self.settings_button,
-                self.generate_button,
-                self.cancel_button,
-            )
-        ):
-            actions.addWidget(button, index // 3, index % 3)
-        layout.addLayout(actions)
-        self.retry_button = QPushButton("&Retry loading saved data")
-        self.retry_button.clicked.connect(lambda: self.start(self.initialize))
-        actions.addWidget(self.retry_button, 3, 0, 1, 3)
-        self.cached_button = QPushButton("Browse saved &mail (offline)")
-        actions.addWidget(self.cached_button, 1, 2)
-        self.briefs_button = QPushButton("&Briefs…")
-        self.briefs_button.setToolTip("Open saved briefs, or brief a missed day.")
-        actions.addWidget(self.briefs_button, 2, 0)
-        self.data_button = QPushButton("&Data and recovery…")
+        self.cancel_button = _outline_button("&Cancel", "cancelButton")
+        workspace.header.add_widget(self.generate_button)
+        workspace.header.add_widget(self.cancel_button)
+        # The sidebar's rows, under the names the rest of the window uses.
+        self.settings_button = sidebar.settings
+        self.cached_button = sidebar.saved_mail
+        self.data_button = sidebar.data
         self.data_button.clicked.connect(lambda: self.start(self._open_data, cancellable=False))
-        actions.addWidget(self.data_button, 2, 1)
-        self.status = plain_label("Loading saved brief…")
-        layout.addWidget(self.status)
-        self.undo_button = QPushButton("&Undo")
-        self.undo_button.hide()
-        self.undo_button.clicked.connect(lambda: self.start(self._undo_last, cancellable=False))
-        layout.addWidget(self.undo_button)
-        self.review_panel = QWidget()
-        review_layout = QVBoxLayout(self.review_panel)
-        self.review_hint = plain_label(_review_hint(MAX_SHORTLIST_SIZE))
-        review_layout.addWidget(self.review_hint)
-        self.shortlist = QListWidget()
-        self.shortlist.setAccessibleName("Messages selected for analysis")
-        self.shortlist.itemChanged.connect(self._selection_changed)
-        review_layout.addWidget(self.shortlist)
-        self.review_button = QPushButton("Co&ntinue with selected messages")
-        review_layout.addWidget(self.review_button)
-        layout.addWidget(self.review_panel)
-        self.review_panel.hide()
-        self.consent_panel = QWidget()
-        consent_layout = QVBoxLayout(self.consent_panel)
-        self.disclosure = plain_label("")
-        consent_layout.addWidget(self.disclosure)
-        self.approve_button = QPushButton("&Approve transmission to Groq")
-        self.decline_button = QPushButton("&Decline")
-        consent_layout.addWidget(self.approve_button)
-        consent_layout.addWidget(self.decline_button)
-        layout.addWidget(self.consent_panel)
-        self.consent_panel.hide()
+        # Wrapping labels, read by their whole text.
+        self.connection = wrap_label("Gmail: checking saved session…", tone="muted", px=CAPTION_PX)
+        self.connection.setObjectName("connectionStatus")
+        self.ai = wrap_label("AI: checking configuration…", tone="muted", px=CAPTION_PX)
+        self.ai.setObjectName("aiStatus")
+        self.connect_button = _outline_button(
+            "&Connect Gmail", "connectButton", px=SMALL_PX, accessible_name="Connect Gmail"
+        )
+        self.disconnect_button = _outline_button(
+            "&Disconnect", "disconnectButton", px=SMALL_PX, accessible_name="Disconnect Gmail"
+        )
+        for line in (self.connection, self.ai):
+            line.setContentsMargins(10, 0, 0, 0)  # In line with the rows' icons.
+        for widget in (self.connection, self.ai, self.connect_button, self.disconnect_button):
+            sidebar.footer.addWidget(widget)
+        # Today: the banner for a past brief and the retry row, above the brief.
         self.viewing = QWidget()
+        self.viewing.setObjectName("viewingBanner")
+        self.viewing.setAccessibleName("Brief shown")
         viewing = QHBoxLayout(self.viewing)
-        viewing.setContentsMargins(0, 0, 0, 0)
-        self.viewing_label = plain_label("")
-        self.latest_button = QPushButton("Back to &latest")
+        viewing.setContentsMargins(12, 8, 12, 8)
+        viewing.setSpacing(8)
+        self.viewing_label = wrap_label("", tone="secondary", px=SMALL_PX)
+        self.viewing_label.setObjectName("viewingLabel")
+        self.latest_button = _outline_button("Back to &latest", "latestButton")
         viewing.addWidget(self.viewing_label, 1)
         viewing.addWidget(self.latest_button)
-        layout.addWidget(self.viewing)
+        workspace.today_top.addWidget(self.viewing)
         self.viewing.hide()
-        self.digest = DigestView()
-        self.digest.zone = self.zone
+        self.retry_button = _outline_button("&Retry loading saved data", "retryButton")
+        self.retry_button.clicked.connect(lambda: self.start(self.initialize))
+        retry = QHBoxLayout()
+        retry.setContentsMargins(12, 8, 12, 8)
+        retry.addWidget(self.retry_button)
+        retry.addStretch(1)
+        workspace.today_top.addLayout(retry)
+        # The run page: step 1 reviews the shortlist, step 2 approves sending.
+        self.review_panel = QWidget()
+        self.review_panel.setObjectName("reviewPanel")
+        self.review_panel.setAccessibleName("Review the shortlist")
+        review_layout = QVBoxLayout(self.review_panel)
+        review_layout.setContentsMargins(0, 0, 0, 0)
+        review_layout.setSpacing(8)
+        _step_heading(review_layout, "Step 1 of 2", "Choose what MailBrief reads")
+        self.review_hint = wrap_label(_review_hint(MAX_SHORTLIST_SIZE), tone="secondary")
+        self.review_hint.setObjectName("reviewHint")
+        review_layout.addWidget(self.review_hint)
+        self.shortlist = QListWidget()
+        self.shortlist.setObjectName("shortlist")
+        self.shortlist.setAccessibleName("Messages selected for analysis")
+        self.shortlist.setItemDelegate(ShortlistDelegate(self.shortlist))
+        # Rows take the viewport's width, so nothing scrolls sideways.
+        self.shortlist.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.shortlist.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.shortlist.itemChanged.connect(self._selection_changed)
+        # Up to its rows' height (review() sets it), then it fills the page and scrolls.
+        review_layout.addWidget(self.shortlist, 1)
+        self.review_button = QPushButton("Co&ntinue with selected messages")
+        self.review_button.setObjectName("reviewButton")
+        self.review_button.setProperty("variant", "primary")
+        self.review_button.setAutoDefault(False)
+        review_layout.addWidget(self.review_button, 0, Qt.AlignmentFlag.AlignLeft)
+        # Height the list can't use goes below Continue, never between the labels.
+        review_layout.addStretch(0)
+        self.review_panel.hide()
+        self.consent_panel = QWidget()
+        self.consent_panel.setObjectName("consentPanel")
+        self.consent_panel.setAccessibleName("Consent to send")
+        consent_layout = QVBoxLayout(self.consent_panel)
+        consent_layout.setContentsMargins(0, 0, 0, 0)
+        consent_layout.setSpacing(8)
+        _step_heading(consent_layout, "Step 2 of 2", "Approve sending to Groq")
+        disclosure_card = HairlineFrame()
+        disclosure_card.setObjectName("disclosureCard")
+        disclosure_card.setAccessibleName("What will be sent")
+        QVBoxLayout(disclosure_card).setContentsMargins(0, 0, 0, 0)
+        self.disclosure = wrap_label("")
+        self.disclosure.setObjectName("disclosure")
+        card_layout = disclosure_card.layout()
+        assert card_layout is not None
+        card_layout.addWidget(self.disclosure)
+        consent_layout.addWidget(disclosure_card)
+        self.approve_button = QPushButton("&Approve transmission to Groq")
+        self.approve_button.setObjectName("approveButton")
+        self.decline_button = QPushButton("&Decline")
+        self.decline_button.setObjectName("declineButton")
+        answers = QHBoxLayout()
+        answers.setSpacing(8)
+        for answer in (self.approve_button, self.decline_button):
+            _outline(answer)
+            answers.addWidget(answer)
+        answers.addStretch(1)
+        consent_layout.addLayout(answers)
+        self.consent_panel.hide()
+        run_page = QScrollArea()
+        run_page.setObjectName("runPage")
+        run_page.setAccessibleName("Review and consent")
+        run_page.setWidgetResizable(True)
+        run_page.setFrameShape(QFrame.Shape.NoFrame)
+        run_content = QWidget()
+        run_content.setObjectName("runContent")
+        # A centred column, at most _RUN_WIDTH wide.
+        centred = QHBoxLayout(run_content)
+        centred.setContentsMargins(16, 14, 16, 14)
+        column = QWidget()
+        column.setObjectName("runColumn")
+        column.setMaximumWidth(_RUN_WIDTH)
+        run_layout = QVBoxLayout(column)
+        run_layout.setContentsMargins(0, 0, 0, 0)
+        run_layout.addWidget(self.review_panel, 1)
+        run_layout.addWidget(self.consent_panel)
+        run_layout.addStretch(0)
+        centred.addStretch(1)
+        centred.addWidget(column, 1000)
+        centred.addStretch(1)
+        run_page.setWidget(run_content)
+        workspace.add_page("run", run_page)
         self.cached_dialog.zone = self.zone
-        self.digest.suggestion_requested.connect(self._request_suggestion)
-        self.digest.accept_into_requested.connect(self._request_accept_into)
-        self.digest.proposal_requested.connect(self._request_proposal)
-        self.digest.setMinimumHeight(180)
-        layout.addWidget(self.digest, 1)
+        workspace.detail.suggestion_requested.connect(self._request_suggestion)
+        workspace.detail.accept_into_requested.connect(self._request_accept_into)
+        workspace.detail.proposal_requested.connect(self._request_proposal)
+        workspace.detail.reply_requested.connect(self._request_reply)
+        workspace.detail.source_requested.connect(self._open_source)
         self.actions_panel = ActionsPanel()
-        self.actions_panel.setMinimumHeight(220)
         self.actions_panel.action_requested.connect(self._request_action)
         self.actions_panel.draft_requested.connect(self._request_action_draft)
-        layout.addWidget(self.actions_panel, 1)
+        self.actions_panel.tabs.currentChanged.connect(self._actions_tab_changed)
+        workspace.add_page("actions", _page(self.actions_panel, "actionsPage", "Actions"))
         self.drafts_panel = DraftsPanel()
-        self.drafts_panel.setMinimumHeight(200)
         self.drafts_panel.draft_requested.connect(self._request_draft)
-        layout.addWidget(self.drafts_panel, 1)
-        self.digest.reply_requested.connect(self._request_reply)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(content)
-        self.setCentralWidget(scroll)
+        workspace.add_page("drafts", _page(self.drafts_panel, "draftsPage", "Drafts"))
+        workspace.add_page("briefs", _page(self.history_panel, "briefsPage", "Briefs"))
+        # Sidebar counts; each refresh replaces only its own, and a failure keeps them.
+        self._counts: dict[str, int | None] = {"actions": None, "waiting": None, "drafts": None}
+        # The status strip under the workspace.
+        strip = QWidget()
+        strip.setObjectName("statusStrip")
+        strip.setAccessibleName("Status")
+        strip.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(12, 6, 12, 6)
+        strip_layout.setSpacing(8)
+        self.status = wrap_label("Loading saved brief…", tone="secondary", px=SMALL_PX)
+        self.status.setObjectName("statusText")
+        strip_layout.addWidget(self.status, 1)
+        self.undo_button = _outline_button("&Undo", "undoButton")
+        self.undo_button.hide()
+        self.undo_button.clicked.connect(lambda: self.start(self._undo_last, cancellable=False))
+        strip_layout.addWidget(self.undo_button)
+        central = QWidget()
+        central.setObjectName("mainWindowContent")
+        central.setAccessibleName("MailBrief")
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(workspace, 1)
+        layout.addWidget(HairlineDivider(Qt.Orientation.Horizontal))
+        layout.addWidget(strip)
+        self.setCentralWidget(central)
+        sidebar.page_requested.connect(self._request_page)
+        self._set_account(None)
+        sidebar.settings_requested.connect(lambda: self.start(self._open_settings))
         self.connect_button.clicked.connect(lambda: self.start(self._connect))
         self.disconnect_button.clicked.connect(
             lambda: self.start(self._disconnect, cancellable=False)
         )
-        self.settings_button.clicked.connect(lambda: self.start(self._open_settings))
         self.cached_button.clicked.connect(lambda: self.start(self._open_cached))
-        self.briefs_button.clicked.connect(lambda: self.start(self._open_history))
         self.latest_button.clicked.connect(
             lambda: self.start(self._back_to_latest, cancellable=False)
         )
@@ -596,7 +728,51 @@ class MainWindow(QMainWindow):
         self.review_button.clicked.connect(self._accept_review)
         self.approve_button.clicked.connect(lambda: self._answer_consent(True))
         self.decline_button.clicked.connect(lambda: self._answer_consent(False))
+        self.page_shortcuts: dict[str, QShortcut] = {}
+        for number, key in enumerate(PAGE_SHORTCUTS, start=1):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{number}"), self)
+            shortcut.activated.connect(partial(self._request_page, key))
+            self.page_shortcuts[key] = shortcut
+        # Each email's detail has new buttons; they join the Tab order after the list.
+        workspace.detail.rebuilt.connect(self._link_tab_order)
+        self._link_tab_order()
         self._set_busy(False)
+
+    def _link_tab_order(self) -> None:
+        """Tab runs from Sync and review through Cancel, the sidebar's pages, Saved mail,
+        Data, Settings, Connect or Disconnect, the page shown, then Undo and back to the
+        start. Hidden and disabled widgets are skipped.
+
+        The chain starts at Undo, so every widget not named here (the other pages', in
+        their own order) falls between Today's last button and Undo. Never walk the focus
+        chain from Python: PySide re-parents each wrapper ``nextInFocusChain()`` returns
+        under the widget it was called on, and deleting that widget then invalidates it."""
+        workspace = self.workspace
+        chain: list[QWidget] = [
+            self.undo_button,
+            self.generate_button,
+            self.cancel_button,
+            workspace.sidebar.nav,
+            self.cached_button,
+            self.data_button,
+            self.settings_button,
+            self.connect_button,
+            self.disconnect_button,
+            self.latest_button,
+            self.retry_button,
+            workspace.brief_list,
+            *workspace.detail.buttons(),
+        ]
+        for first, second in itertools.pairwise(chain):
+            QWidget.setTabOrder(first, second)
+
+    def _set_account(self, email: str | None) -> None:
+        """The connected Gmail account, or None; Connect shows only without one and
+        Disconnect only with one, and the Briefs page follows it."""
+        self._account_email = email
+        self.connect_button.setVisible(email is None)
+        self.disconnect_button.setVisible(email is not None)
+        self.history_panel.set_account(email)
 
     def _set_busy(self, busy: bool) -> None:
         self.retry_button.setVisible(not self._ready)
@@ -605,14 +781,14 @@ class MainWindow(QMainWindow):
         self.disconnect_button.setEnabled(not busy)
         self.generate_button.setEnabled(not busy and self._ready)
         self.cancel_button.setEnabled(busy and self._cancellable)
+        self.cancel_button.setVisible(busy)
         self.settings_button.setEnabled(not busy)
         self.settings_dialog.set_busy(busy)
         self.cached_button.setEnabled(not busy and self._ready)
-        self.briefs_button.setEnabled(not busy and self._ready)
         self.data_button.setEnabled(not busy and self.data_dialog is not None)
         if self.data_dialog is not None:
             self.data_dialog.set_busy(busy)
-        self.history_dialog.set_busy(busy)
+        self.history_panel.set_busy(busy)
         self.latest_button.setEnabled(not busy)
         self.cached_dialog.set_busy(busy)
         self.proposals_dialog.set_busy(busy)
@@ -620,6 +796,106 @@ class MainWindow(QMainWindow):
         self.actions_panel.set_busy(busy)
         self.action_editor.set_busy(busy)
         self.drafts_panel.set_busy(busy)
+
+    # Pages. The sidebar shows Today while the review or consent is up on the run page, and
+    # Actions or Waiting by the actions page's tab.
+
+    def _gate_pending(self) -> bool:
+        """Whether the review or the consent question is waiting for the owner."""
+        return any(
+            future is not None and not future.done() for future in (self._review, self._consent)
+        )
+
+    def _show_page(self, key: str) -> None:
+        if key == "today":
+            self.workspace.show_page("run" if self._gate_pending() else "today")
+        elif key in ("actions", "waiting"):
+            self.workspace.show_page("actions")
+            self.actions_panel.show_view(
+                ActionFilter.WAITING if key == "waiting" else ActionFilter.OPEN
+            )
+        else:
+            self.workspace.show_page(key)
+        self.workspace.sidebar.set_current(self._sidebar_key())
+
+    def _sidebar_key(self) -> str:
+        """The sidebar row for the page shown."""
+        page = self.workspace.current_page()
+        if page == "run":
+            return "today"
+        if page == "actions":
+            return "waiting" if self.actions_panel.view() is ActionFilter.WAITING else "actions"
+        return page
+
+    def _actions_tab_changed(self, _index: int) -> None:
+        if self.workspace.current_page() == "actions":
+            self.workspace.sidebar.set_current(self._sidebar_key())
+
+    def _request_page(self, key: str) -> None:
+        if key == "briefs":
+            # Briefs loads first; the sidebar moves once its page shows.
+            self.workspace.sidebar.set_current(self._sidebar_key())
+            if not self._ready:
+                self.status.setText(_BRIEFS_UNAVAILABLE)
+            elif not self.start(self._open_history) and not self._closing:
+                self.status.setText(_BUSY)
+            return
+        self._show_page(key)
+
+    def _leave_run_page(self) -> None:
+        """Back to Today once neither the review nor the consent is waiting."""
+        if not self._gate_pending() and self.workspace.current_page() == "run":
+            self._show_page("today")
+
+    def _open_source(self, url: str) -> None:
+        if is_gmail_link(url):
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _local_today(self) -> date:
+        return self.now().astimezone(self.zone).date()
+
+    def _stamp_checked(self) -> None:
+        """When the run's sync finished: when its review opened, else (no review) now."""
+        self._checked = self.now() if self._synced_at is None else self._synced_at
+        self._render_checked()
+
+    def _render_checked(self) -> None:
+        """The header's check time: "Checked Gmail at 09:14" today in the owner's zone,
+        "Checked Gmail Oct 7 at 23:50" on any other day."""
+        if self._checked is None:
+            return
+        local = self._checked.astimezone(self.zone)
+        if local.date() == self._local_today():
+            text = f"Checked Gmail at {local:%H:%M}"
+        else:
+            text = f"Checked Gmail {local:%b} {local.day} at {local:%H:%M}"
+        self.workspace.header.set_status(text)
+
+    def _minute_tick(self) -> None:
+        """When the owner's day has changed since the views were built: the check time
+        gains its date and the brief's chips recount in place at once, and the actions and
+        the Briefs page reload through ``start()``. While another operation runs, that
+        reload is held and retried on each tick until it starts."""
+        today = self._local_today()
+        if self._day is not None and today != self._day:
+            self._render_checked()
+            self.workspace.set_today(today, self.zone)
+            self._day_refresh_pending = True
+        self._day = today
+        if self._day_refresh_pending:
+            self._day_refresh_pending = not self.start(self._refresh_for_new_day, cancellable=False)
+
+    async def _refresh_for_new_day(self) -> None:
+        """What counts from the day: the actions' due labels, and the Briefs page's missed
+        days and the days it can brief. Each keeps what it showed if it can't be read."""
+        await self._refresh_actions()
+        await self._reload_history()
+
+    def _set_counts(self, **counts: int | None) -> None:
+        self._counts.update(counts)
+        self.workspace.sidebar.set_counts(
+            self._counts["actions"], self._counts["waiting"], self._counts["drafts"]
+        )
 
     async def _open_data(self) -> None:
         if self._unsaved_drafts:
@@ -658,13 +934,13 @@ class MainWindow(QMainWindow):
         self.viewing.hide()
         saved = await self.backend.load_saved()
         if saved is None:
-            self.digest.clear()
+            self.workspace.clear("")
         else:
             await self._show_digest(saved)
         await self._refresh_actions()
         await self._refresh_drafts()
         self.cached_dialog.reject()
-        self.history_dialog.reject()
+        await self._reload_history()
         self.proposals_dialog.reject()
         if self.data_dialog is not None:
             self.data_dialog.configure(await self.backend.cached_accounts(), available=True)
@@ -722,7 +998,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log_failure(exc)
             proposals = None
-        self.digest.show_digest(digest, links, proposals)
+        self.workspace.show_digest(
+            digest,
+            links=links,
+            proposals=proposals,
+            owner_zone=self.zone,
+            today=self._local_today(),
+        )
 
     async def _refresh_actions(self) -> None:
         now = self.now()
@@ -739,12 +1021,18 @@ class MainWindow(QMainWindow):
                 self.actions_panel.show_actions(
                     view, actions, today=today, zone=self.zone, now=now, total=total
                 )
+                if view is ActionFilter.OPEN:
+                    self._set_counts(actions=len(actions))
+                elif view is ActionFilter.WAITING:
+                    self._set_counts(waiting=len(actions))
         except Exception as exc:
             self._note_not_refreshed(exc)
 
     async def _refresh_drafts(self) -> None:
         try:
-            self.drafts_panel.show_drafts(await self.backend.list_drafts(), self.zone)
+            drafts = await self.backend.list_drafts()
+            self.drafts_panel.show_drafts(drafts, self.zone)
+            self._set_counts(drafts=len(drafts))
         except Exception as exc:
             self._note_not_refreshed(exc)
 
@@ -1389,7 +1677,7 @@ class MainWindow(QMainWindow):
             self.status.setText("Cancelled. The displayed saved brief is unchanged.")
         except AuthenticationRequiredError as exc:
             log_failure(exc)
-            self._account_email = None
+            self._set_account(None)
             self.connection.setText("Gmail: session expired or missing. Connect Gmail to continue.")
             self.status.setText("Sign in to Gmail, then retry. The saved brief is still available.")
         except ConfigurationError as exc:
@@ -1414,14 +1702,13 @@ class MainWindow(QMainWindow):
                 self.cached_dialog.status.setText(self.status.text())
             if self.settings_dialog.isVisible():
                 self.settings_dialog.status.setText(self.status.text())
-            if self.history_dialog.isVisible():
-                self.history_dialog.status.setText(self.status.text())
             self.review_panel.hide()
             self.consent_panel.hide()
             self.shortlist.clear()
-            self.disclosure.clear()
+            self.disclosure.setText("")
             self._review = None
             self._consent = None
+            self._leave_run_page()
             self._set_busy(False)
 
     async def _open_cached(self) -> None:
@@ -1466,7 +1753,8 @@ class MainWindow(QMainWindow):
     def _apply_owner_preferences(self, preferences: OwnerPreferences) -> None:
         """The owner's zone for every local day and time shown, and the drafting defaults."""
         self.zone = owner_zone(preferences)
-        self.digest.zone = self.cached_dialog.zone = self.zone
+        self.cached_dialog.zone = self.zone
+        self._render_checked()  # In the new zone.
         self.draft_editor.ai_panel.set_defaults(preferences.draft_tone, preferences.draft_length)
         self.scheduler.configure(
             preferences.refresh_on_launch, preferences.refresh_interval_minutes
@@ -1559,15 +1847,18 @@ class MainWindow(QMainWindow):
                 "unreadable. Use the latest MailBrief, check disk access, then Retry loading "
                 "saved data. Do not delete your database."
             )
-            self.digest.setPlainText("Saved brief unavailable until local storage can be opened.")
+            self.workspace.clear("Saved brief unavailable until local storage can be opened.")
             return
         self._ready = True
         self.status.setText("Ready. Sync to review today's messages.")
         await self._load_owner_preferences()
+        # The day the views below are built for, in the owner's zone (just applied): in the
+        # system's zone it can already be tomorrow, and that midnight would go unnoticed.
+        self._day = self._local_today()
         if saved is not None:
             await self._show_digest(saved)
         else:
-            self.digest.setPlainText(
+            self.workspace.clear(
                 "No saved brief yet. Connect Gmail, then sync and review your shortlist."
             )
         await self._refresh_actions()
@@ -1585,7 +1876,7 @@ class MainWindow(QMainWindow):
             log_failure(exc)
             self.connection.setText("Gmail: offline or unavailable. Saved brief available locally.")
         else:
-            self._account_email = email
+            self._set_account(email)
             self.connection.setText(f"Gmail: connected as {email}")
             self._launch_soon()
 
@@ -1598,15 +1889,16 @@ class MainWindow(QMainWindow):
     async def _connect(self) -> None:
         self.status.setText("Connecting to Gmail. Complete sign-in in your browser.")
         email = await self.backend.connect(silent_only=False)
-        self._account_email = email
+        self._set_account(email)
         self.connection.setText(f"Gmail: connected as {email}")
         self.status.setText("Connected. Sync to review today's messages.")
         await self._show_auto_send()  # The permission shown is the connected account's.
+        await self._reload_history()  # The new account's missed days.
         self._launch_soon()  # Only the first connection of a start counts as the launch.
 
     async def _disconnect(self) -> None:
         await self.backend.disconnect()
-        self._account_email = None
+        self._set_account(None)
         self.connection.setText("Gmail: disconnected")
         self.status.setText("Local credentials removed. Saved briefs remain on this device.")
         await self._show_auto_send()
@@ -1614,50 +1906,76 @@ class MainWindow(QMainWindow):
     # Saved briefs by day. Opening one needs no connection; briefing a past day is the
     # owner's explicit choice, one day at a time, for the connected account.
 
-    async def _open_history(self) -> None:
+    async def _load_history(self) -> None:
         briefs = await self.backend.list_briefs()
         email = self._account_email
         missed = await self.backend.missed_days(email) if email is not None else ()
         today = self.now().astimezone(self.zone).date()
-        self.history_dialog.configure(briefs, missed, email, today)
-        self.status.setText("Open a saved brief, or brief a missed day.")
-        self.history_dialog.open()
+        self.history_panel.configure(briefs, missed, email, today)
+
+    async def _reload_history(self) -> None:
+        """Reload the Briefs page when it shows. The page is only a view: when it can't be
+        read, it stays as it was and the status line says so."""
+        if self.workspace.current_page() != "briefs":
+            return
+        try:
+            await self._load_history()
+        except Exception as exc:
+            self._note_not_refreshed(exc)
+
+    def _show_page_unless_moved(self, origin: str, key: str) -> None:
+        """Show ``key`` once a load finishes, unless the owner moved from ``origin``, the
+        page shown when it was requested, in the meantime."""
+        if self.workspace.current_page() == origin:
+            self._show_page(key)
+
+    async def _open_history(self) -> None:
+        origin = self.workspace.current_page()
+        await self._load_history()
+        if self.workspace.current_page() == origin:
+            self.status.setText("Open a saved brief, or brief a missed day.")
+            self._show_page("briefs")
 
     def _request_open_brief(self, account_email: str, local_date: date) -> None:
         self.start(lambda: self._show_brief(account_email, local_date), cancellable=False)
 
     async def _show_brief(self, account_email: str, local_date: date) -> None:
+        origin = self.workspace.current_page()
         digest = await self.backend.load_brief(account_email, local_date)
         if digest is None:
             self.status.setText("That brief is no longer saved.")
             return
-        await self._view(digest)
-        self.history_dialog.accept()
+        await self._view(digest, origin)  # Back on Today.
         self.status.setText(f"Showing the brief for {local_date.isoformat()}.")
 
-    async def _view(self, digest: DailyDigest) -> None:
-        """Show a brief; the banner appears unless it is the latest."""
+    async def _view(self, digest: DailyDigest, origin: str | None = None) -> None:
+        """Show a brief; the banner appears unless it is the latest. Today shows it unless
+        the owner moved from ``origin`` (by default, the page shown now) while it loaded."""
+        origin = self.workspace.current_page() if origin is None else origin
         latest = await self.backend.load_saved()
         identity = (digest.account_id, digest.local_date)
         is_latest = latest is not None and (latest.account_id, latest.local_date) == identity
         self._set_shown(None if is_latest else identity)
         await self._show_digest(digest)
+        self._show_page_unless_moved(origin, "today")
 
     async def _back_to_latest(self) -> None:
+        origin = self.workspace.current_page()
         self._set_shown(None)
         await self._reload_brief()
+        self._show_page_unless_moved(origin, "today")
         self.status.setText("Showing the latest brief.")
 
     def _request_brief_day(self, local_date: date) -> None:
         if self._account_email is None:
-            self.history_dialog.status.setText(NEEDS_CONNECTION)
+            self.history_panel.status.setText(NEEDS_CONNECTION)
             return
-        self.history_dialog.accept()
         self.start(lambda: self._generate(local_date))
 
     async def _generate(self, local_date: date | None = None) -> None:
-        """Brief today (Sync and review), or a past day chosen in Briefs…. However it ends,
-        the next automatic run is an interval later (ADR 0017)."""
+        """Brief today (Sync and review), or a past day chosen on the Briefs page. However
+        it ends, the next automatic run is an interval later (ADR 0017)."""
+        self._synced_at = None  # Until this run's review opens.
         try:
             await self._generate_brief(local_date)
         finally:
@@ -1673,6 +1991,8 @@ class MainWindow(QMainWindow):
         result = await self.backend.generate(
             self, self, self._cancel, self._progress, local_date=local_date
         )
+        if result.sync.status in (SyncStatus.COMPLETE, SyncStatus.PARTIAL):
+            self._stamp_checked()
         match result.status:
             case BriefStatus.SAVED:
                 digest = result.digest
@@ -1723,13 +2043,18 @@ class MainWindow(QMainWindow):
     # no review, no consent question and no dialog; everything it says goes to the status line.
 
     def _dialog_open(self) -> bool:
-        """Whether the owner is working in one of the window's dialogs or editors."""
+        """Whether the owner is working in one of the window's dialogs or editors, or is
+        confirming a replacement on the Briefs page."""
+        if (
+            self.workspace.current_page() == "briefs"
+            and not self.history_panel.confirm_panel.isHidden()
+        ):
+            return True
         return (self.data_dialog is not None and self.data_dialog.isVisible()) or any(
             widget.isVisible()
             for widget in (
                 self.settings_dialog,
                 self.auto_send_dialog,
-                self.history_dialog,
                 self.cached_dialog,
                 self.proposals_dialog,
                 self.action_editor,
@@ -1758,6 +2083,7 @@ class MainWindow(QMainWindow):
     async def _automatic_refresh(self) -> None:
         """One automatic run. However it ends, the next is an interval later."""
         self._automatic_active = True
+        self._synced_at = None  # No review: its sync has just finished when it returns.
         self.status.setText(_AUTOMATIC + "checking Gmail…")
         try:
             result = await self.backend.generate_automatic(self._cancel, self._progress)
@@ -1769,6 +2095,8 @@ class MainWindow(QMainWindow):
         """Say what the run did, in the status line, and show what it saved."""
         log_automatic_run(result)
         stamp = f"{self.now().astimezone(self.zone):%H:%M}"
+        if result.sync.status in (SyncStatus.COMPLETE, SyncStatus.PARTIAL):
+            self._stamp_checked()
         match result.status:
             case BriefStatus.READY_FOR_REVIEW:
                 # Either it only checked, because nothing may be sent or nothing is new, or it
@@ -1820,11 +2148,12 @@ class MainWindow(QMainWindow):
                     if code.startswith("AI_"):
                         self.ai.setText("AI: " + guidance)
             if "AUTH_REQUIRED" in (result.error_code, result.sync.error_code):
-                self._account_email = None  # Nothing more runs until the owner signs in again.
+                self._set_account(None)  # Nothing more runs until the owner signs in again.
                 self.connection.setText("Gmail: session expired. Connect Gmail, then retry.")
         self.status.setText(text)
         if result.status is not BriefStatus.CANCELLED:
             await self._refresh_actions()  # Thread activity and proposals may have changed.
+        await self._reload_history()  # Today's brief may be new or changed.
 
     async def _show_auto_send(self) -> None:
         """The automatic-analysis line in Settings, from the connected account's active
@@ -1893,15 +2222,24 @@ class MainWindow(QMainWindow):
         Replies in tracked threads that aren't in today's Inbox (``outside_ids``) are labelled
         as such and are otherwise like any other message. Messages the owner left out of an
         earlier review (``declined_ids``) start unchecked, with "you left this out earlier"."""
+        self._synced_at = self.now()  # The sync has finished; the owner may take a while.
         if not candidates:
             return ()
         self._review = asyncio.get_running_loop().create_future()
+        self._show_page("today")  # The run page, while the review waits.
         self._review_limit, self._review_blocked = limit, blocked_ids
         self.review_hint.setText(_review_hint(limit))
         self.shortlist.clear()
         for ranked in candidates:
             message = ranked.message
             label = f"{message.sender.address} — {message.subject}"
+            # What the shortlist's delegate paints; the item's text stays what is read.
+            row = shortlist_row(
+                ranked,
+                blocked=message.provider_message_id in blocked_ids,
+                outside=message.provider_message_id in outside_ids,
+                declined=message.provider_message_id in declined_ids,
+            )
             if message.provider_message_id in blocked_ids:
                 # Not user-checkable and never given a check box, so neither a click nor
                 # Space can select it.
@@ -1909,6 +2247,7 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.UserRole, message.provider_message_id)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 item.setToolTip(_EXCLUDED_TIP)
+                item.setData(ROW_ROLE, row)
                 self.shortlist.addItem(item)
                 continue
             if message.provider_message_id in outside_ids:
@@ -1927,7 +2266,9 @@ class MainWindow(QMainWindow):
                 if message.provider_message_id in selected_ids
                 else Qt.CheckState.Unchecked
             )
+            item.setData(ROW_ROLE, row)
             self.shortlist.addItem(item)
+        self._fit_shortlist()
         self.review_panel.show()
         self.shortlist.setCurrentRow(0)
         self.shortlist.setFocus()
@@ -1937,6 +2278,13 @@ class MainWindow(QMainWindow):
             return await self._review
         finally:
             self.review_panel.hide()
+            self._leave_run_page()
+
+    def _fit_shortlist(self) -> None:
+        """The shortlist is never taller than its rows, so a short list shows no empty box."""
+        shortlist = self.shortlist
+        rows = sum(shortlist.sizeHintForRow(number) for number in range(shortlist.count()))
+        shortlist.setMaximumHeight(rows + 2 * shortlist.frameWidth())
 
     def _checked_ids(self) -> list[str]:
         """The checked messages; a blocked message never counts, even if checked."""
@@ -1974,6 +2322,7 @@ class MainWindow(QMainWindow):
 
     async def confirm(self, preview: TransmissionPreview) -> bool:
         self._consent = asyncio.get_running_loop().create_future()
+        self._show_page("today")  # The run page, while the consent waits.
         self.disclosure.setText("\n\n".join(disclosure_lines(preview)))
         self.consent_panel.show()
         self.decline_button.setFocus()
@@ -1982,6 +2331,7 @@ class MainWindow(QMainWindow):
             return await self._consent
         finally:
             self.consent_panel.hide()
+            self._leave_run_page()
 
     def _answer_consent(self, answer: bool) -> None:
         if self._consent is not None and not self._consent.done():
@@ -2003,10 +2353,10 @@ class MainWindow(QMainWindow):
             return
         self._closing = True
         self.scheduler.stop()
+        self.day_timer.stop()
         self.auto_send_dialog.reject()
         self.settings_dialog.reject()
         self.cached_dialog.reject()
-        self.history_dialog.reject()
         self.proposals_dialog.reject()
         if self.data_dialog is not None:
             self.data_dialog.reject()

@@ -27,6 +27,7 @@ from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.deadline_text import deadline_text
 from mailbrief.ui.lists import ActivatingList
 from mailbrief.ui.proposals_view import pending_proposals
+from mailbrief.ui.theme import TITLE_PX, ui_font
 
 EDIT = "edit"
 COMPLETE = "complete"
@@ -135,9 +136,7 @@ class ActionsPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         heading = QLabel("Your actions")
         heading.setTextFormat(Qt.TextFormat.PlainText)
-        font = heading.font()
-        font.setPointSize(font.pointSize() + 3)
-        heading.setFont(font)
+        heading.setFont(ui_font(TITLE_PX, medium=True))
         layout.addWidget(heading)
         self.tabs = QTabWidget()
         self.lists: dict[ActionFilter, QListWidget] = {}
@@ -185,7 +184,10 @@ class ActionsPanel(QWidget):
             self.proposals_button,
             self.draft_button,
         ):
+            button.setProperty("variant", "outline")
+            button.setAutoDefault(False)
             buttons.addWidget(button)
+        buttons.addStretch(1)  # Buttons keep their own width.
         layout.addLayout(buttons)
         self.edit_button.clicked.connect(lambda: self._request(EDIT))
         self.complete_button.clicked.connect(self._complete_or_reopen)
@@ -198,6 +200,9 @@ class ActionsPanel(QWidget):
 
     def view(self) -> ActionFilter:
         return list(ActionFilter)[self.tabs.currentIndex()]
+
+    def show_view(self, view: ActionFilter) -> None:
+        self.tabs.setCurrentWidget(self.lists[view])
 
     def selected(self) -> Action | None:
         view = self.view()
