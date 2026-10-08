@@ -1,22 +1,18 @@
-"""Enforce the service coverage contract in addition to pytest's overall gate."""
+"""Enforce 90% combined statement/branch coverage for every module in
+src/mailbrief/services, in addition to pytest's overall gate."""
 
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-SERVICES = (
-    "sync",
-    "ranking",
-    "bodies",
-    "digest",
-    "drafts",
-    "drafting",
-    "preferences",
-    "history",
-    "threads",
-    "proposals",
-    "consent",
-    "data",
+ROOT = Path(__file__).resolve().parents[1]
+# Every service module is gated, so a new one can't slip under the bar.
+SERVICES = tuple(
+    sorted(
+        path.stem
+        for path in (ROOT / "src" / "mailbrief" / "services").glob("*.py")
+        if path.stem != "__init__"
+    )
 )
 
 
@@ -48,7 +44,7 @@ def check(report: Path) -> list[str]:
 
 
 def main() -> int:
-    failures = check(Path(__file__).resolve().parents[1] / "coverage.xml")
+    failures = check(ROOT / "coverage.xml")
     for failure in failures:
         print(failure)
     if not failures:

@@ -22,9 +22,18 @@ def test_service_coverage_counts_branches_and_requires_every_service(tmp_path: P
         "<coverage>" + "".join(classes).replace("100% (2/2)", "50% (1/2)", 1) + "</coverage>",
         encoding="utf-8",
     )
-    assert check(report) == ["services/sync.py: 66.67% below 90%"]
+    # The first service in the list is the one made to fail.
+    assert check(report) == [f"services/{SERVICES[0]}.py: 66.67% below 90%"]
     report.write_text("<coverage/>", encoding="utf-8")
     assert len(check(report)) == len(SERVICES)
+
+
+def test_every_service_module_is_gated() -> None:
+    services = Path(__file__).resolve().parents[2] / "src" / "mailbrief" / "services"
+    modules = {path.stem for path in services.glob("*.py")} - {"__init__"}
+    assert set(SERVICES) == modules
+    assert len(SERVICES) == len(modules)
+    assert {"analysis", "brief", "actions", "application"} <= set(SERVICES)
 
 
 @pytest.mark.parametrize(

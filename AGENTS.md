@@ -291,9 +291,9 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Tests mirror `src/` under `tests/`. Use `tests/factories.py`, `respx` for HTTP and
   injected sleeps/clocks. Tests never touch external networks (localhost is fine), real
   credentials, real mailboxes or paid AI.
-- Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
-  drafts, drafting, preferences, history, threads, proposals, consent and data services.
-  `scripts/check_coverage.py` enforces the 90% combined statement/branch service gate.
+- Coverage: at least 80% overall and 90% for every module in src/mailbrief/services/.
+  `scripts/check_coverage.py` finds the modules itself and enforces the combined
+  statement/branch gate.
 - Tests run SQLite without disk flushes, CI runs tests in parallel (`pytest -n auto`), and CI
   runs macOS in Toronto and Windows in Tokyo time.
 
