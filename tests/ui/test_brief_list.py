@@ -23,6 +23,7 @@ from mailbrief.ui.brief_list import (
     build_rows,
     deadline_chip,
     proposal_chip,
+    row_height,
     sender_text,
     sender_with_address,
 )
@@ -244,6 +245,8 @@ def test_chips_make_a_row_taller(view: BriefListView) -> None:
     without = delegate.sizeHint(option, view.model().index(2, 0))
     header = delegate.sizeHint(option, view.model().index(0, 0))
     assert with_chip.height() > without.height() > header.height() > 0
+    assert with_chip.height() == row_height(True)
+    assert without.height() == row_height(False)
 
 
 def test_selection_reports_the_email(view: BriefListView) -> None:

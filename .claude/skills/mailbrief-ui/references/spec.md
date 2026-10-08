@@ -34,6 +34,10 @@ All read colours from `current_tokens()` at paint time.
   antialiasing.
 - `HairlineSplitter(QSplitter)`: `handleWidth(5)` so it can be grabbed; its handle fills
   with panel and draws one cosmetic hairline at its centre.
+- `paint_focus_ring(painter, rect, state, color)`: the focus ring of the sidebar, brief
+  list and shortlist delegates, a 1px cosmetic rect inset by 1, painted only when
+  `keyboard_focus(state)` is true (focus that the keyboard moved, not focus on first
+  show).
 
 ## Brief list (`ui/brief_list.py`)
 
@@ -63,6 +67,9 @@ All read colours from `current_tokens()` at paint time.
   (text_secondary); chips after a 4px gap, 11px, padding 1 × 6, radius `min(8, h/2)`, 6px
   apart, warning or accent fg/bg; a cosmetic hairline at the bottom; with focus, a 1px
   cosmetic accent_fg rect inset by 1. Title and sender elide to the row width minus 24.
+- Shared with the run page's shortlist: `paint_selection`, `paint_lines`,
+  `paint_separator`, `row_height`, `elided`, `flat`, `SINGLE_LINE`, `ROW_PAD_V`,
+  `ROW_PAD_H` and `CHIP_GAP`; the focus ring is `paint_focus_ring()` from hairline.py.
 - View: objectName `briefList`, accessible name "Brief items", NoFrame,
   ScrollPerPixel, SingleSelection; `item_selected(DigestItem)`; `show_rows(rows)` selects
   the first item row; Return and Enter emit `activated` once and are consumed.
@@ -227,7 +234,7 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
 - The shortlist stays a `QListWidget`: each item keeps its text (what is read aloud), its
   ID under `UserRole`, flags, check state and app-text tooltip. `review()` adds a
   `ShortlistRow(subject, name, address, chips, blocked)` under `ROW_ROLE`, and
-  `ShortlistDelegate` paints it like a brief row: selection fill and 2px `accent_border`
+  `ShortlistDelegate` paints it with the brief list's row helpers: selection fill and 2px `accent_border`
   bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary
   (`sender_line`: the whole "Name <address>" when it fits; else the name cut at its end
   before " <address>"; else the address alone, cut by `cut_address`; a long display name
