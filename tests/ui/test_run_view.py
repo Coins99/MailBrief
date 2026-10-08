@@ -10,6 +10,7 @@ import asyncio
 
 import pytest
 from PySide6.QtCore import QModelIndex, QPoint, QRect, Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,12 +36,18 @@ from mailbrief.ui.run_view import (
     ShortlistDelegate,
     ShortlistRow,
     indicator_colors,
+    sender_line,
     shortlist_row,
 )
-from mailbrief.ui.theme import DARK, LIGHT, ThemeMode, Tokens, apply_theme
+from mailbrief.ui.theme import DARK, LIGHT, TEXT_PX, ThemeMode, Tokens, apply_theme, ui_font
 from tests.factories import make_message
 from tests.ui.test_main_window_layout import save_shot
 from tests.ui.test_workflow import FakeBackend
+
+
+def sender_metrics() -> QFontMetrics:
+    """The sender line's metrics, as the delegate measures them (after the theme's font)."""
+    return QFontMetrics(ui_font(TEXT_PX))
 
 
 @pytest.fixture
@@ -163,7 +170,7 @@ async def test_rows_carry_their_chips_and_keep_their_text(window: MainWindow) ->
     assert rows["blocked"].chips == (Chip(EXCLUDED, ChipTone.WARNING),)
     assert rows["blocked"].blocked and not rows["plain"].blocked
     assert rows["plain"].subject == "Approval needed by Friday"
-    assert rows["plain"].sender == "Alex <alex@example.com>"  # The name and its address.
+    assert (rows["plain"].name, rows["plain"].address) == ("Alex", "alex@example.com")
     # The item's own text, the one read aloud, is unchanged.
     assert item(window, "outside").text().endswith(OUTSIDE_REPLY_TEXT)
     assert item(window, "declined").text().endswith(DECLINED_TEXT)
@@ -185,7 +192,35 @@ async def test_rows_carry_their_chips_and_keep_their_text(window: MainWindow) ->
 def test_a_review_row_never_hides_the_sender_s_address(sender: EmailContact, shown: str) -> None:
     ranked = RankedMessage(message=make_message(sender=sender), score=50, reasons=())
     row = shortlist_row(ranked, blocked=False, outside=False, declined=False)
-    assert row.sender == shown
+    assert sender_line(sender_metrics(), row.name, row.address, 10_000) == shown
+
+
+def sender_width(window: MainWindow, key: str) -> int:
+    """The width the review step really gives ``key``'s sender line."""
+    return delegate(window).text_width(*row_option(window, key))
+
+
+async def test_a_long_display_name_never_pushes_the_address_out(window: MainWindow) -> None:
+    await reviewing(window)
+    metrics, width = sender_metrics(), sender_width(window, "plain")
+    name = ("Priya Shah, Finance " * 10)[:200]
+    line = sender_line(metrics, name, "attacker@evil.example", width)
+    assert line.endswith("… <attacker@evil.example>")  # The name gave way, not the address.
+    assert line.startswith("Priya Shah") and metrics.horizontalAdvance(line) <= width
+    # A short name fits whole.
+    assert sender_line(metrics, "Alex", "alex@example.com", width) == "Alex <alex@example.com>"
+    window.cancel()
+    await finish(window)
+
+
+@pytest.mark.parametrize("name", ["Priya Shah", None])
+def test_a_narrow_row_cuts_the_address_in_the_middle(name: str | None) -> None:
+    metrics = sender_metrics()
+    width = metrics.horizontalAdvance("attacker@evi")  # Less than the address alone.
+    line = sender_line(metrics, name, "attacker@evil.example", width)
+    assert "@" in line and "…" in line
+    assert line.startswith("att") and line.endswith("ple")  # Both ends stay.
+    assert "Priya" not in line
 
 
 async def test_clicks_and_space_toggle_only_checkable_rows(window: MainWindow) -> None:

@@ -87,14 +87,19 @@ def sender_text(contact: EmailContact) -> str:
 
 
 def sender_with_address(contact: EmailContact) -> str:
-    """ "Name <address>", so a display name can't pass for someone else. The address alone
-    when the name is empty or the address itself, or contains "@": a name that looks like
-    an address is how a sender poses as another."""
-    name = " ".join((contact.name or "").split())
-    address = contact.address
-    if not name or name.casefold() == address.casefold() or "@" in name:
+    """The sender as "Name <address>", so a display name can't pass for someone else (see
+    ``with_address``)."""
+    return with_address(contact.name, contact.address)
+
+
+def with_address(name: str | None, address: str) -> str:
+    """A sender as "Name <address>"; the address alone when the name is empty or the
+    address itself, or contains "@": a name that looks like an address is how a sender
+    poses as another."""
+    shown = " ".join((name or "").split())
+    if not shown or shown.casefold() == address.casefold() or "@" in shown:
         return address
-    return f"{name} <{address}>"
+    return f"{shown} <{address}>"
 
 
 def deadline_chip(item: DigestItem, zone: ZoneInfo, today: date) -> Chip | None:

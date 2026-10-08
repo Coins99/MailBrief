@@ -218,10 +218,12 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   then outline Approve and Decline side by side, Decline focused.
 - The shortlist stays a `QListWidget`: each item keeps its text (what is read aloud), its
   ID under `UserRole`, flags, check state and app-text tooltip. `review()` adds a
-  `ShortlistRow(subject, sender, chips, blocked)` under `ROW_ROLE`, and
+  `ShortlistRow(subject, name, address, chips, blocked)` under `ROW_ROLE`, and
   `ShortlistDelegate` paints it like a brief row: selection fill and 2px `accent_border`
   bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary
-  (`sender_with_address`: what the owner decides to send), chips ("Tracked reply" and
+  (`sender_line`: the whole "Name <address>" when it fits; else the name cut at its end
+  before " <address>"; else the address alone, cut in the middle by `cut_address`, which
+  keeps its "@"; a long display name never hides the address), chips ("Tracked reply" and
   "Left out earlier" accent, "Excluded in Settings"
   warning). A cosmetic hairline separates rows; the last row has none, since the list's
   frame closes it.

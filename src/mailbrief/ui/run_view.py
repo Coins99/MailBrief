@@ -28,7 +28,7 @@ from mailbrief.ui.brief_list import (
     ChipTone,
     chip_height,
     paint_chips,
-    sender_with_address,
+    with_address,
 )
 from mailbrief.ui.hairline import hairline_pen
 from mailbrief.ui.theme import TEXT_PX, Tokens, current_tokens, ui_font
@@ -56,7 +56,8 @@ _Index = QModelIndex | QPersistentModelIndex
 @dataclass(frozen=True)
 class ShortlistRow:
     subject: str
-    sender: str
+    name: str | None  # The sender's display name, which anyone can set.
+    address: str  # The sender's address, always shown (``sender_line``).
     chips: tuple[Chip, ...]
     blocked: bool
 
@@ -74,7 +75,8 @@ def shortlist_row(
         chips.append(Chip(EXCLUDED, ChipTone.WARNING))
     return ShortlistRow(
         subject=message.subject or NO_SUBJECT,
-        sender=sender_with_address(message.sender),  # What the owner decides to send.
+        name=message.sender.name,
+        address=message.sender.address,
         chips=tuple(chips),
         blocked=blocked,
     )
@@ -92,6 +94,46 @@ def _single_line() -> int:
 
 def _flat(text: str) -> str:
     return " ".join(text.split())
+
+
+def _fits(metrics: QFontMetrics, text: str, width: int) -> bool:
+    return metrics.horizontalAdvance(text) <= width
+
+
+def cut_address(metrics: QFontMetrics, address: str, width: int) -> str:
+    """``address`` cut in the middle to fit ``width``, always keeping its "@": when a plain
+    middle cut would drop it, the part before the "@" is cut at its end and the domain at
+    its start, so both ends stay readable."""
+    if _fits(metrics, address, width):
+        return address
+    middle = metrics.elidedText(address, Qt.TextElideMode.ElideMiddle, width)
+    if "@" in middle:
+        return middle
+    local, _, domain = address.rpartition("@")
+    room = max(0, width - metrics.horizontalAdvance("@"))
+    start = metrics.elidedText(local, Qt.TextElideMode.ElideRight, room // 2)
+    end = metrics.elidedText(
+        domain, Qt.TextElideMode.ElideLeft, max(0, room - metrics.horizontalAdvance(start))
+    )
+    return f"{start}@{end}"
+
+
+def sender_line(metrics: QFontMetrics, name: str | None, address: str, width: int) -> str:
+    """The review row's sender in ``width``, never without its address: the whole "Name
+    <address>" if it fits; else, with no name to show, the address cut in the middle; else
+    the name cut at its end before " <address>", if that fits; else the address alone, cut
+    in the middle. A long display name can't push the address out of view."""
+    full = with_address(name, address)
+    if _fits(metrics, full, width):
+        return full
+    if full == address:
+        return cut_address(metrics, address, width)
+    suffix = f" <{address}>"
+    room = width - metrics.horizontalAdvance(suffix)
+    shown = full[: -len(suffix)]  # The name as with_address shows it.
+    if room >= metrics.horizontalAdvance("…"):
+        return metrics.elidedText(shown, Qt.TextElideMode.ElideRight, room) + suffix
+    return cut_address(metrics, address, width)
 
 
 def indicator_colors(checked: bool, tokens: Tokens) -> tuple[str, str, str]:
@@ -152,6 +194,11 @@ class ShortlistDelegate(QStyledItemDelegate):
         rect: QRect = option.rect
         return check.right() + _CHECK_GAP if check.isValid() else rect.left() + _PAD_H
 
+    def text_width(self, option: QStyleOptionViewItem, index: _Index) -> int:
+        """How wide the row's subject and sender lines are."""
+        rect: QRect = option.rect
+        return max(0, rect.right() - _PAD_H - self.text_left(option, index))
+
     def _view(self) -> QWidget | None:
         parent = self.parent()
         return parent if isinstance(parent, QWidget) else None
@@ -183,7 +230,7 @@ class ShortlistDelegate(QStyledItemDelegate):
             )
         # Blocked rows line up with checkable ones, with nothing to check.
         left = self.text_left(option, index)
-        width = max(0, rect.right() - _PAD_H - left)
+        width = self.text_width(option, index)
         top = rect.top() + _PAD_V
         title_font = ui_font(TEXT_PX, medium=True)
         title_metrics = QFontMetrics(title_font)
@@ -202,7 +249,7 @@ class ShortlistDelegate(QStyledItemDelegate):
         painter.drawText(
             QRect(left, top, width, sender_metrics.height()),
             _single_line(),
-            sender_metrics.elidedText(_flat(row.sender), Qt.TextElideMode.ElideRight, width),
+            sender_line(sender_metrics, row.name, row.address, width),
         )
         top += sender_metrics.height()
         if row.chips:
