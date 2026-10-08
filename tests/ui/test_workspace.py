@@ -18,6 +18,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestItem, DigestStatus
 from mailbrief.domain.messages import EmailContact
+from mailbrief.services.history import coverage_short
 from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
 from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
 from mailbrief.ui.workspace import (
@@ -252,6 +253,32 @@ def coverage(**counts: int | bool) -> DigestCoverage:
         int(values[key]) for key in ("analyzed", "reused", "failed", "skipped", "deferred")
     )
     return DigestCoverage.model_validate(values)
+
+
+def test_brief_meta_uses_the_brief_zone() -> None:
+    toronto, paris = ZoneInfo("America/Toronto"), ZoneInfo("Europe/Paris")
+    morning = brief_with(
+        timezone_name="America/Toronto",
+        local_date=date(2026, 10, 6),
+        generated_at_utc=datetime(2026, 10, 6, 13, 14, tzinfo=UTC),
+        coverage=None,
+    )
+    assert brief_meta(morning, paris) == (
+        "owner@example.com · saved 09:14 (America/Toronto)",
+        "owner@example.com. Saved 2026-10-06T09:14-04:00 (America/Toronto).",
+    )
+    assert "up to 09:14" in coverage_short(morning)  # The heading and footer agree.
+    # Oct 6 23:30 in Toronto is Oct 7 05:30 in Paris: the brief's own day decides.
+    late = morning.model_copy(update={"generated_at_utc": datetime(2026, 10, 7, 3, 30, tzinfo=UTC)})
+    short, _full = brief_meta(late, paris)
+    assert short.startswith("owner@example.com · saved 23:30 (America/Toronto)")
+    assert "Oct 7" not in short
+    # Another name with the same offset at that moment shows the same time: no zone.
+    for owner in (toronto, ZoneInfo("America/New_York")):
+        for brief in (morning, late):
+            assert "(" not in brief_meta(brief, owner)[0]
+    calcutta = morning.model_copy(update={"timezone_name": "Asia/Calcutta"})
+    assert "(" not in brief_meta(calcutta, ZoneInfo("Asia/Kolkata"))[0]  # One zone, two names.
 
 
 def test_brief_title_names_the_day_and_an_incomplete_brief() -> None:

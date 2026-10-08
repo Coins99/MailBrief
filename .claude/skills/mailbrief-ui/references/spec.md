@@ -159,10 +159,12 @@ Buttons are made with `outline_button()` (`button_label()` text, `variant="outli
 - `BriefHeading` (`briefHeading`), at the top of the list pane, margins 12, 10, 12, 4,
   hidden until a brief is shown: `title` (13px Medium, `brief_title`: "Tue Oct 6", plus
   " · Partial" or " · Empty") and `meta` (11px muted, elided, `brief_meta`): "{account} ·
-  saved HH:MM" ("saved Oct 7 HH:MM" when saved on a later day), plus " · N failed",
-  " · N deferred" and " · Inbox sync incomplete". Its accessible name is the full
-  sentence: account, save time in the owner's zone, the coverage counts and whether the
-  Inbox sync was complete.
+  saved HH:MM" ("saved Oct 7 HH:MM" when saved on a later day in the brief's zone), plus
+  " · N failed", " · N deferred" and " · Inbox sync incomplete". The save time is in the
+  brief's own zone, like its coverage footer, with that zone named in parentheses when the
+  owner's zone would show a different time. Its accessible name is the full sentence:
+  account, save time in the brief's zone, the coverage counts and whether the Inbox sync
+  was complete.
 - `ThreePaneWorkspace`: objectName `workspace`. HeaderBar, a horizontal divider, then
   SidebarNav, a vertical divider and `pages`, a QStackedWidget. Page `today`
   (`todayPage`): `today_top` (a QVBoxLayout for banners) above a `HairlineSplitter`

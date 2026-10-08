@@ -102,14 +102,22 @@ def brief_title(digest: DailyDigest) -> str:
 
 def brief_meta(digest: DailyDigest, zone: ZoneInfo) -> tuple[str, str]:
     """The brief's account, save time and coverage: a short line to show, and the full
-    sentence for its accessible name."""
-    saved = digest.generated_at_utc.astimezone(zone)
+    sentence for its accessible name.
+
+    The save time is in the brief's own zone, like its coverage footer. When the owner's
+    zone, ``zone``, would show another time, the brief's zone is named.
+    """
+    saved = digest.generated_at_utc.astimezone(ZoneInfo(digest.timezone_name))
     if saved.date() > digest.local_date:
         when = f"{saved:%b} {saved.day} {saved:%H:%M}"
     else:
         when = f"{saved:%H:%M}"
-    short = [f"{digest.account_id} · saved {when}"]
-    full = f"{digest.account_id}. Saved {saved.isoformat(timespec='minutes')}."
+    # Compare offsets, not names: two names for one zone (Asia/Calcutta, Asia/Kolkata),
+    # or zones that agree at that moment, show the same time and need no name.
+    owner_offset = digest.generated_at_utc.astimezone(zone).utcoffset()
+    named = "" if saved.utcoffset() == owner_offset else f" ({digest.timezone_name})"
+    short = [f"{digest.account_id} · saved {when}{named}"]
+    full = f"{digest.account_id}. Saved {saved.isoformat(timespec='minutes')}{named}."
     coverage = digest.coverage
     if coverage is not None:
         if coverage.failed:
