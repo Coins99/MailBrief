@@ -53,6 +53,9 @@ def sender_metrics() -> QFontMetrics:
 
 
 LONG_NAME = ("Priya Shah, Finance " * 10)[:200]
+# Elision measures fractional widths and horizontalAdvance rounds, so a line built to fit
+# a width measured from a string can need a pixel or two more (Windows needs it).
+SLACK = 4
 LOOKALIKE = "billing@paypal.com.secure-login.evil.example"
 
 
@@ -229,11 +232,11 @@ def test_a_narrow_row_cuts_the_address_in_the_middle(
     metrics = sender_metrics()
     address = "attacker@evil.example"
     # Room for the whole domain: the part before the "@" gives way.
-    width = metrics.horizontalAdvance("at…@evil.example")
+    width = metrics.horizontalAdvance("at…@evil.example") + SLACK
     line = sender_line(metrics, name, address, width)
     assert line.endswith("…@evil.example") and metrics.horizontalAdvance(line) <= width
     # Less: the domain's start gives way, never its end.
-    width = metrics.horizontalAdvance("…@…example")
+    width = metrics.horizontalAdvance("…@…example") + SLACK
     line = sender_line(metrics, name, address, width)
     assert line.startswith("…@…") and line.endswith("example")
     assert "Priya" not in line and metrics.horizontalAdvance(line) <= width
@@ -259,7 +262,7 @@ def test_a_cut_address_keeps_the_end_of_its_domain(qapp: QApplication, themed: N
     domain = LOOKALIKE.split("@")[1]
     # The narrowest line that can end in the whole last label: below it, only "…@…" and
     # the domain's last letters fit (at 40 px, "…@…").
-    whole_label = metrics.horizontalAdvance("…@…example")
+    whole_label = metrics.horizontalAdvance("…@…example") + SLACK
     for width in range(40, 401):
         line = cut_address(metrics, LOOKALIKE, width)
         assert metrics.horizontalAdvance(line) <= width, (width, line)
