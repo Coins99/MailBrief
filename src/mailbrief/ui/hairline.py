@@ -1,9 +1,9 @@
 """Hairlines painted with cosmetic pens: one device pixel at every scale, unlike QSS borders,
 which round to whole logical pixels and blur at fractional scales."""
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPaintEvent, QPen
-from PySide6.QtWidgets import QFrame, QSplitter, QSplitterHandle, QWidget
+from PySide6.QtWidgets import QFrame, QSplitter, QSplitterHandle, QStyle, QWidget
 
 from mailbrief.ui.theme import RADIUS, current_tokens
 
@@ -13,6 +13,24 @@ def hairline_pen(color: str) -> QPen:
     pen = QPen(QColor(color), 0)
     pen.setCosmetic(True)
     return pen
+
+
+def keyboard_focus(state: QStyle.StateFlag) -> bool:
+    """The focus ring shows once the keyboard has moved focus, not on first show."""
+    return bool(
+        state & QStyle.StateFlag.State_HasFocus
+        and state & QStyle.StateFlag.State_KeyboardFocusChange
+    )
+
+
+def paint_focus_ring(painter: QPainter, rect: QRect, state: QStyle.StateFlag, color: str) -> None:
+    """A one-device-pixel ring just inside ``rect``, once the keyboard has moved focus."""
+    if not keyboard_focus(state):
+        return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(hairline_pen(color))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(QRectF(rect).adjusted(1, 1, -1, -1))
 
 
 class HairlineFrame(QFrame):

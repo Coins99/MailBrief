@@ -45,7 +45,11 @@ from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus
 from mailbrief.services.history import coverage_line, coverage_short
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
-from mailbrief.ui.hairline import HairlineDivider, HairlineSplitter, hairline_pen
+from mailbrief.ui.hairline import (
+    HairlineDivider,
+    HairlineSplitter,
+    paint_focus_ring,
+)
 from mailbrief.ui.labels import ElidedLabel, button_label, plain_label
 from mailbrief.ui.theme import (
     CAPTION_PX,
@@ -212,23 +216,11 @@ class _NavDelegate(QStyledItemDelegate):
         if isinstance(count, int):
             painter.setPen(QColor(tokens.text_secondary))
             painter.drawText(label, flags | int(Qt.AlignmentFlag.AlignRight), str(count))
-        if _keyboard_focus(state):
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            painter.setPen(hairline_pen(tokens.accent_fg))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(QRectF(rect).adjusted(1, 1, -1, -1))
+        paint_focus_ring(painter, rect, state, tokens.accent_fg)
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: _Index) -> QSize:
         return QSize(option.rect.width(), _NAV_ROW)
-
-
-def _keyboard_focus(state: QStyle.StateFlag) -> bool:
-    """The focus ring shows once the keyboard has moved focus, not on first show."""
-    return bool(
-        state & QStyle.StateFlag.State_HasFocus
-        and state & QStyle.StateFlag.State_KeyboardFocusChange
-    )
 
 
 class _NavList(QListView):
