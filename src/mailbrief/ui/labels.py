@@ -12,9 +12,10 @@ from PySide6.QtGui import (
     QTextLayout,
     QTextOption,
 )
-from PySide6.QtWidgets import QLabel, QSizePolicy
+from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy
 
-from mailbrief.ui.theme.assets import ui_font
+from mailbrief.ui.theme.assets import icon, ui_font
+from mailbrief.ui.theme.style import current_tokens
 
 
 def plain_label(
@@ -78,6 +79,52 @@ def short_button_label(text: str, limit: int = 40) -> str:
     """Button text of at most ``limit`` characters, on one line, escaped like
     ``button_label``. Give the button the full text as its accessible name."""
     return button_label(cut_text(" ".join(text.split()), limit))
+
+
+OUTLINE_ICON_PX: Final = 14
+
+
+def outline_button(
+    text: str,
+    name: str,
+    *,
+    mnemonic: bool = False,
+    shorten: bool = False,
+    px: int | None = None,
+    icon_name: str | None = None,
+    accessible_name: str | None = None,
+) -> QPushButton:
+    """An outline button named ``name``; every outline button is made here.
+
+    ``text`` is escaped with button_label, so mail text can't create a mnemonic. App text
+    that carries its own ``&`` mnemonic passes ``mnemonic=True``. With ``shorten``, long
+    mail-derived text is cut by short_button_label and the full text becomes the
+    accessible name, never a tooltip. ``px`` sets the font size, ``icon_name`` adds a
+    bundled icon in the text colour, and ``accessible_name`` is what screen readers say
+    (without it, Qt reads the button's text).
+    """
+    if mnemonic and shorten:
+        raise ValueError("A shortened label can't carry a mnemonic.")
+    if mnemonic:
+        shown = text
+    elif shorten:
+        shown = short_button_label(text)
+    else:
+        shown = button_label(text)
+    button = QPushButton(shown)
+    button.setObjectName(name)
+    button.setProperty("variant", "outline")
+    button.setAutoDefault(False)
+    if shorten:
+        button.setAccessibleName(text)
+    if accessible_name is not None:
+        button.setAccessibleName(accessible_name)
+    if px is not None:
+        button.setFont(ui_font(px))
+    if icon_name is not None:
+        button.setIcon(icon(icon_name, current_tokens().text, OUTLINE_ICON_PX))
+        button.setIconSize(QSize(OUTLINE_ICON_PX, OUTLINE_ICON_PX))
+    return button
 
 
 class ElidedLabel(QLabel):

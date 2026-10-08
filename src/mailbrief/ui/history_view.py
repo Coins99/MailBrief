@@ -13,13 +13,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from mailbrief.domain.digests import SavedBriefSummary
 from mailbrief.services.history import CATCH_UP_DAYS
+from mailbrief.ui.labels import outline_button
 from mailbrief.ui.lists import ActivatingList
 from mailbrief.ui.theme import TITLE_PX, ui_font
 
@@ -34,14 +34,6 @@ def _plain(text: str = "") -> QLabel:
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
     return label
-
-
-def _outline(text: str, name: str) -> QPushButton:
-    button = QPushButton(text)
-    button.setObjectName(name)
-    button.setProperty("variant", "outline")
-    button.setAutoDefault(False)
-    return button
 
 
 def summary_text(summary: SavedBriefSummary) -> str:
@@ -85,8 +77,8 @@ class BriefHistoryPanel(QWidget):
         self.missed_note = _plain()
         layout.addWidget(self.missed_note)
         buttons = QHBoxLayout()
-        self.open_button = _outline("&Open", "openBriefButton")
-        self.brief_button = _outline("&Brief this day…", "briefDayButton")
+        self.open_button = outline_button("&Open", "openBriefButton", mnemonic=True)
+        self.brief_button = outline_button("&Brief this day…", "briefDayButton", mnemonic=True)
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.brief_button)
         buttons.addStretch(1)
@@ -99,8 +91,8 @@ class BriefHistoryPanel(QWidget):
         self.confirm_label = _plain()
         confirm.addWidget(self.confirm_label)
         choices = QHBoxLayout()
-        self.replace_button = _outline("&Replace", "replaceBriefButton")
-        self.keep_button = _outline("&Keep it", "keepBriefButton")
+        self.replace_button = outline_button("&Replace", "replaceBriefButton", mnemonic=True)
+        self.keep_button = outline_button("&Keep it", "keepBriefButton", mnemonic=True)
         choices.addWidget(self.replace_button)
         choices.addWidget(self.keep_button)
         choices.addStretch(1)

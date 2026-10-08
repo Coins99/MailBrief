@@ -14,6 +14,7 @@ from mailbrief.ui.labels import (
     WrapLabel,
     button_label,
     cut_text,
+    outline_button,
     plain_label,
     short_button_label,
     wrap_label,
@@ -210,3 +211,43 @@ def test_wrap_label_lays_its_text_out_once_per_width(
     short = label.heightForWidth(120)
     label.setText("much longer text " * 20)
     assert label.heightForWidth(120) > short
+
+
+def test_outline_button_is_an_outline_button(qtbot: QtBot) -> None:
+    button = outline_button("Accept", "acceptButton")
+    qtbot.addWidget(button)
+    assert button.property("variant") == "outline"
+    assert not button.autoDefault()
+    assert button.objectName() == "acceptButton"
+
+
+def test_outline_button_text_is_escaped_unless_it_carries_a_mnemonic(qtbot: QtBot) -> None:
+    assert outline_button("Q&A", "x").text() == "Q&&A"
+    assert outline_button("&Open", "x", mnemonic=True).text() == "&Open"
+
+
+def test_a_shortened_outline_button_keeps_the_whole_text_for_screen_readers(
+    qtbot: QtBot,
+) -> None:
+    title = "Add to “" + "A & B " * 20 + "”"
+    button = outline_button(title, "addToButton", shorten=True)
+    qtbot.addWidget(button)
+    assert len(button.text().replace("&&", "&")) <= 40 and button.text().endswith("…")
+    assert "&&" in button.text()
+    assert button.accessibleName() == title
+    assert button.toolTip() == ""
+
+
+def test_outline_button_takes_a_size_and_an_icon(qtbot: QtBot) -> None:
+    sized = outline_button("Connect", "x", px=12)
+    assert sized.font().pixelSize() == 12
+    iconic = outline_button("Draft a reply", "replyButton", icon_name="pencil")
+    assert not iconic.icon().isNull()
+    assert (iconic.iconSize().width(), iconic.iconSize().height()) == (14, 14)
+    named = outline_button("&Connect Gmail", "x", mnemonic=True, accessible_name="Connect Gmail")
+    assert named.accessibleName() == "Connect Gmail"
+
+
+def test_a_shortened_outline_button_can_t_carry_a_mnemonic() -> None:
+    with pytest.raises(ValueError):
+        outline_button("&Open", "x", mnemonic=True, shorten=True)

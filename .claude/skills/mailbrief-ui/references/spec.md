@@ -125,9 +125,10 @@ line is a `WrapLabel`):
 9. Footer: "Draft a reply" (pencil) and, only for https links on mail.google.com,
    "Open in Gmail" (external-link).
 10. A stretch.
-Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`, and an
-objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton`,
-`dismissProposalButton`, `replyButton` and `openInGmailButton`.
+Buttons are made with `outline_button()` (`button_label()` text, `variant="outline"`,
+`setAutoDefault(False)`) and have an objectName: `acceptButton`, `dismissButton`,
+`addToButton`, `applyProposalButton`, `dismissProposalButton`, `replyButton` and
+`openInGmailButton`.
 
 ## Workspace (`ui/workspace.py`)
 
