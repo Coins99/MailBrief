@@ -53,7 +53,8 @@ All read colours from `current_tokens()` at paint time.
   day the brief covers. "Within the week" is judged by the deadline's date in the owner's
   zone: DATETIME from today to today + 6 days `Due {local:%a %H:%M}`, any other DATETIME
   (past ones too) `Due {%b} {day} {%H:%M}`;
-  DATE `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters with "…";
+  DATE `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters at a grapheme
+  boundary (`cut_text`), with "…";
   NONE no chip.
 - Proposal chip (ACCENT), from the first pending proposal: NEW_DEADLINE "Proposes a new
   deadline"; CANCELLED or DELIVERED "Proposes completing an action".
@@ -289,7 +290,7 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   (`State_KeyboardFocusChange`), not on first show.
 - Suggestion cards: 4px between title and meta, 8px before each button row.
 - Long mail-derived button text ("Add to …", a proposal's effect) goes through
-  `short_button_label` (40 characters, then "…"), with the full text as the button's
+  `short_button_label` (40 characters, cut at a grapheme boundary, then "…"), with the full text as the button's
   accessible name; each "Add to" button has its own row.
 - Settings is a `_NavButton` painted like a page row (icon at `_ICON_X`, label at
   `_LABEL_X`), so it lines up with the pages.

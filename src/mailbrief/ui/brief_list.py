@@ -41,6 +41,7 @@ from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind
 from mailbrief.domain.digests import SECTION_TITLES, DailyDigest, DigestItem
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ui.hairline import hairline_pen, paint_focus_ring
+from mailbrief.ui.labels import cut_text
 from mailbrief.ui.theme import (
     CAPTION_PX,
     RADIUS,
@@ -135,10 +136,7 @@ def deadline_chip(
         day = item.deadline_date
         text = f"Due {day:%b} {day.day}"
     elif item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
-        phrase = item.deadline_text
-        if len(phrase) > _UNRESOLVED_CHARS:
-            phrase = phrase[: _UNRESOLVED_CHARS - 1] + "…"
-        text = f"Due {phrase}"
+        text = f"Due {cut_text(item.deadline_text, _UNRESOLVED_CHARS)}"
     return None if text is None else Chip(text, ChipTone.WARNING)
 
 

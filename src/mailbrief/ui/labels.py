@@ -1,8 +1,9 @@
 """Safe text widgets: mail and AI text is always plain text, never rich text or a link."""
 
 import math
+from typing import Final
 
-from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtCore import QPointF, QSize, Qt, QTextBoundaryFinder
 from PySide6.QtGui import (
     QFontMetricsF,
     QPainter,
@@ -48,13 +49,35 @@ def button_label(text: str) -> str:
     return text.replace("&", "&&")
 
 
+_ELLIPSIS: Final = "…"
+
+
+def cut_text(text: str, limit: int) -> str:
+    """``text`` when it has at most ``limit`` characters; otherwise its start, cut at a
+    grapheme boundary, then "…", at most ``limit`` characters in all. A cut never splits an
+    emoji sequence, a flag or a letter from its accent."""
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    if len(text) <= limit:
+        return text
+    # QTextBoundaryFinder counts UTF-16 code units; Python counts code points.
+    units = [0]
+    for character in text:
+        units.append(units[-1] + (2 if ord(character) > 0xFFFF else 1))
+    index_of = {unit: index for index, unit in enumerate(units)}
+    finder = QTextBoundaryFinder(QTextBoundaryFinder.BoundaryType.Grapheme, text)
+    cut = 0
+    position = finder.toNextBoundary()
+    while position != -1 and index_of[position] <= limit - 1:
+        cut = index_of[position]
+        position = finder.toNextBoundary()
+    return text[:cut] + _ELLIPSIS
+
+
 def short_button_label(text: str, limit: int = 40) -> str:
     """Button text of at most ``limit`` characters, on one line, escaped like
     ``button_label``. Give the button the full text as its accessible name."""
-    flat = " ".join(text.split())
-    if len(flat) > limit:
-        flat = flat[: limit - 1] + "…"
-    return button_label(flat)
+    return button_label(cut_text(" ".join(text.split()), limit))
 
 
 class ElidedLabel(QLabel):

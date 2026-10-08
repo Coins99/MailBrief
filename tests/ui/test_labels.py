@@ -2,6 +2,7 @@
 
 import math
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import QApplication
@@ -11,6 +12,7 @@ from mailbrief.ui.labels import (
     ElidedLabel,
     WrapLabel,
     button_label,
+    cut_text,
     plain_label,
     short_button_label,
     wrap_label,
@@ -19,6 +21,7 @@ from mailbrief.ui.theme import CAPTION_PX, SIDEBAR_WIDTH, apply_theme
 from mailbrief.ui.workspace import SidebarNav
 
 HOSTILE = '<b>Win</b> & <a href="x">link</a>'
+FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
 
 
 def test_plain_label_is_plain_wrapped_text(qtbot: QtBot) -> None:
@@ -144,3 +147,33 @@ def test_a_path_wraps_after_its_slashes(qtbot: QtBot) -> None:
     assert len(lines) > 1
     assert all(not text or text.endswith("/") for text in lines[:-1])
     assert "​" not in label.text()
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "expected"),
+    [
+        ("a" * 50, 40, "a" * 39 + "…"),
+        ("x" * 36 + FAMILY + "tail", 40, "x" * 36 + "…"),  # A ZWJ sequence across the cut.
+        ("y" * 38 + "\U0001f1e8\U0001f1e6" + "zz", 40, "y" * 38 + "…"),  # A flag.
+        ("z" * 38 + "e\u0301" + "more", 40, "z" * 38 + "…"),  # A letter and its accent.
+        ("\U0001f600" * 30, 24, "\U0001f600" * 23 + "…"),  # Two UTF-16 units each.
+        ("short", 40, "short"),
+        ("x" * 40, 40, "x" * 40),
+    ],
+)
+def test_cut_text_cuts_at_a_grapheme_boundary(text: str, limit: int, expected: str) -> None:
+    result = cut_text(text, limit)
+    assert result == expected
+    assert len(result) <= limit
+    assert "\u200d" not in result or "\u200d" in expected
+
+
+def test_cut_text_needs_room_for_the_ellipsis() -> None:
+    with pytest.raises(ValueError):
+        cut_text("anything", 0)
+
+
+def test_short_button_label_never_splits_an_emoji() -> None:
+    short = short_button_label("Q&A " + "x" * 32 + FAMILY + " tail")
+    assert short == "Q&&A " + "x" * 32 + "…"
+    assert "\u200d" not in short

@@ -124,6 +124,18 @@ def test_deadline_chip_text(overrides: dict[str, object], expected: str | None) 
             assert len(expected) <= len("Due ") + 24
 
 
+def test_an_unresolved_deadline_is_cut_at_a_grapheme_boundary() -> None:
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
+    item = make_digest_item(
+        deadline_text="x" * 20 + family + " later",
+        deadline_precision=DeadlinePrecision.UNRESOLVED,
+        deadline_at_utc=None,
+    )
+    chip = deadline_chip(item, TORONTO, TODAY, TORONTO)
+    assert chip == Chip("Due " + "x" * 20 + "…", ChipTone.WARNING)
+    assert "\u200d" not in chip.text
+
+
 @pytest.mark.parametrize(
     ("day", "expected"),
     [
