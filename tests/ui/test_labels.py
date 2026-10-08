@@ -4,10 +4,11 @@ import math
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetricsF
+from PySide6.QtGui import QFontMetricsF, QTextLayout
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
+from mailbrief.ui import labels
 from mailbrief.ui.labels import (
     ElidedLabel,
     WrapLabel,
@@ -17,7 +18,7 @@ from mailbrief.ui.labels import (
     short_button_label,
     wrap_label,
 )
-from mailbrief.ui.theme import CAPTION_PX, SIDEBAR_WIDTH, apply_theme
+from mailbrief.ui.theme import CAPTION_PX, SIDEBAR_WIDTH, apply_theme, ui_font
 from mailbrief.ui.workspace import SidebarNav
 
 HOSTILE = '<b>Win</b> & <a href="x">link</a>'
@@ -177,3 +178,35 @@ def test_short_button_label_never_splits_an_emoji() -> None:
     short = short_button_label("Q&A " + "x" * 32 + FAMILY + " tail")
     assert short == "Q&&A " + "x" * 32 + "…"
     assert "\u200d" not in short
+
+
+def test_wrap_label_lays_its_text_out_once_per_width(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    label = WrapLabel("Some words that wrap across a narrow label")
+    qtbot.addWidget(label)
+    built: list[object] = []
+
+    def counting(*args: object) -> QTextLayout:
+        built.append(args)
+        return QTextLayout(*args)
+
+    monkeypatch.setattr(labels, "QTextLayout", counting)
+
+    def builds(width: int = 200) -> int:
+        before = len(built)
+        label.heightForWidth(width)
+        return len(built) - before
+
+    assert builds() == 1
+    assert builds() == 0  # Cached.
+    label.setText("other text")
+    assert builds() == 1
+    label.setFont(ui_font(15))
+    assert builds() == 1
+    label.clear()  # QLabel.clear() bypasses the Python setText.
+    assert builds() == 1
+    assert label.heightForWidth(120) == label.heightForWidth(120)
+    short = label.heightForWidth(120)
+    label.setText("much longer text " * 20)
+    assert label.heightForWidth(120) > short

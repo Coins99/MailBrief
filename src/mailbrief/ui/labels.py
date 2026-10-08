@@ -125,16 +125,21 @@ class ElidedLabel(QLabel):
 
 # Average characters a wrapping label asks for, at most, before it wraps.
 _WRAP_CHARS = 40
+# Widths a wrapping label keeps laid out for its current text and font.
+_LAYOUT_CACHE: Final = 8
 
 
 class WrapLabel(QLabel):
     """Plain text that wraps at word boundaries, or anywhere inside a token too long for
     its line, so no unbroken string (an address, a link, a long word) widens its
     container. Its height follows its width; its accessible name is the whole text; it
-    has no tooltip and no links."""
+    has no tooltip and no links. Layouts are cached per width for the current text and
+    font."""
 
     def __init__(self, text: str = "") -> None:
         super().__init__()
+        self._layouts: dict[float, tuple[QTextLayout, float, float]] = {}
+        self._layout_key: tuple[str, str] | None = None
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
         policy = self.sizePolicy()
@@ -145,11 +150,20 @@ class WrapLabel(QLabel):
 
     def setText(self, text: str) -> None:
         super().setText(text)
+        self._layouts.clear()
         self.setAccessibleName(text)
         self.updateGeometry()
 
     def _layout(self, width: float) -> tuple[QTextLayout, float, float]:
         """The text laid out at ``width``: the layout, its height and its widest line."""
+        key = (self.text(), self.font().key())
+        if key != self._layout_key:  # Text or font changed, even by QLabel.clear().
+            self._layouts.clear()
+            self._layout_key = key
+        width = max(width, 1.0)
+        cached = self._layouts.get(width)
+        if cached is not None:
+            return cached
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         # QTextLayout breaks lines at U+2028, not at a newline character.
@@ -165,11 +179,14 @@ class WrapLabel(QLabel):
             line = layout.createLine()
             if not line.isValid():
                 break
-            line.setLineWidth(max(width, 1.0))
+            line.setLineWidth(width)
             line.setPosition(QPointF(0, height))
             height += line.height()
             widest = max(widest, line.naturalTextWidth())
         layout.endLayout()
+        if len(self._layouts) >= _LAYOUT_CACHE:
+            self._layouts.clear()
+        self._layouts[width] = (layout, height, widest)
         return layout, height, widest
 
     def _one_line(self) -> int:

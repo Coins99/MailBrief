@@ -88,7 +88,9 @@ wraps instead of widening its container. Line breaks in the text are kept, and t
 so an address wraps after its `@` and a path after a slash before anywhere else.
 `hasHeightForWidth()` is True and `heightForWidth(w)` includes the contents margins;
 `sizeHint()` is at most 40 average characters wide with its matching height;
-`minimumSizeHint()` is 0 wide and one line high. It paints in the palette's
+`minimumSizeHint()` is 0 wide and one line high. Layouts are cached per width for the
+current text and font, at most 8 widths; a change of text or font, even by
+`QLabel.clear()`, drops them. It paints in the palette's
 `WindowText`, so the stylesheet's `tone` colours apply. `setText` keeps `text()` and makes
 the whole text the accessible name; no tooltip, no links.
 
