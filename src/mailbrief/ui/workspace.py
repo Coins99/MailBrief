@@ -543,17 +543,18 @@ class ThreePaneWorkspace(QWidget):
             self._pending_scroll = scroll
             QTimer.singleShot(0, self._restore_scroll)
 
-    def set_today(self, today: date) -> None:
-        """On a new day, recount the list's deadline chips from ``today``, in place: the
-        selection, the detail pane and keyboard focus stay as they are, and nothing is read
-        from storage. Nothing else in the brief depends on the day."""
-        digest, zone = self._digest, self._owner_zone
-        if digest is None or zone is None or today == self._today:
+    def set_today(self, today: date, owner_zone: ZoneInfo) -> None:
+        """On a new day (or in a new zone), recount the list's deadline chips from
+        ``today`` in ``owner_zone``, in place: the selection, the detail pane and keyboard
+        focus stay as they are, and nothing is read from storage. Nothing else in the brief
+        depends on the day."""
+        digest = self._digest
+        if digest is None or (today, owner_zone) == (self._today, self._owner_zone):
             return
-        self._today = today
+        self._today, self._owner_zone = today, owner_zone
         if digest.items:
             self.brief_list.brief_model.update_rows(
-                build_rows(digest, self._proposals, today, zone)
+                build_rows(digest, self._proposals, today, owner_zone)
             )
 
     def _restore_scroll(self) -> None:

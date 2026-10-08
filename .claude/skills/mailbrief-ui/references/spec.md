@@ -163,7 +163,7 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   today)` builds the rows (chips counted from `today`), the heading and the coverage,
   shows "No analyzed messages in this brief." when empty, and, for the same saved brief
   (account, day and save time), keeps the selected email and the detail's scroll
-  position. `set_today(today)` recounts the list's chips for a new day in place
+  position. `set_today(today, owner_zone)` recounts the list's chips for a new day in place
   (`BriefListModel.update_rows`, `dataChanged`, no model reset), so the selection, the
   detail pane and keyboard focus stay; nothing else in the brief depends on the day.
   `clear(message)` shows no brief.

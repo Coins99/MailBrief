@@ -879,7 +879,7 @@ class MainWindow(QMainWindow):
         today = self._local_today()
         if self._day is not None and today != self._day:
             self._render_checked()
-            self.workspace.set_today(today)
+            self.workspace.set_today(today, self.zone)
             self._day_refresh_pending = True
         self._day = today
         if self._day_refresh_pending:
@@ -1850,9 +1850,11 @@ class MainWindow(QMainWindow):
             self.workspace.clear("Saved brief unavailable until local storage can be opened.")
             return
         self._ready = True
-        self._day = self._local_today()  # The day the views below are built for.
         self.status.setText("Ready. Sync to review today's messages.")
         await self._load_owner_preferences()
+        # The day the views below are built for, in the owner's zone (just applied): in the
+        # system's zone it can already be tomorrow, and that midnight would go unnoticed.
+        self._day = self._local_today()
         if saved is not None:
             await self._show_digest(saved)
         else:
