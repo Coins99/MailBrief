@@ -21,6 +21,7 @@ from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter
+from mailbrief.domain.analysis import DeadlinePrecision
 from mailbrief.domain.digests import SyncStatus
 from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.ports.errors import AuthenticationRequiredError
@@ -362,6 +363,89 @@ async def test_a_new_day_dates_the_check_time_and_recounts_the_chips(qtbot: QtBo
     assert window.workspace.header.status.text() == "Checked Gmail Oct 9 at 23:50"
     assert chip_texts(window, "priya") == ["Due Oct 9 17:00"]
     assert window.workspace.brief_list.selected_key() == "sam"  # The same email.
+    await finish(window)  # The actions and Briefs reload for the new day.
+
+
+def open_texts(window: MainWindow) -> list[str]:
+    listing = window.actions_panel.lists[ActionFilter.OPEN]
+    return [listing.item(row).text() for row in range(listing.count())]
+
+
+async def test_a_new_day_reloads_the_actions(qtbot: QtBot) -> None:
+    """An action made on Fri and due that day: after midnight it is carried over and
+    overdue."""
+    backend = mockup_backend()
+    backend.actions = {
+        ActionFilter.OPEN: (
+            make_action(
+                title="Send the deck",
+                created_at_utc=toronto(2026, 10, 9, 18, 0),
+                updated_at_utc=toronto(2026, 10, 9, 18, 0),
+                deadline_text="Friday",
+                deadline_precision=DeadlinePrecision.DATE,
+                deadline_date=date(2026, 10, 9),
+                deadline_timezone="America/Toronto",
+            ),
+        )
+    }
+    clock = [toronto(2026, 10, 9, 23, 50)]
+    window = await window_at(qtbot, backend, clock)
+    [before] = open_texts(window)
+    assert "overdue" not in before and "carried over" not in before
+
+    clock[0] = toronto(2026, 10, 10, 0, 5)
+    window._minute_tick()
+    await finish(window)
+
+    [after] = open_texts(window)
+    assert "overdue" in after and "carried over" in after
+
+
+async def test_a_new_day_reloads_the_briefs_page(qtbot: QtBot) -> None:
+    backend = mockup_backend()
+    clock = [toronto(2026, 10, 9, 23, 50)]
+    window = await window_at(qtbot, backend, clock)
+    window.workspace.sidebar.page_requested.emit("briefs")
+    await finish(window)
+    before = window.history_panel.saved.count()
+    earlier = backend.saved.model_copy(update={"local_date": date(2026, 10, 5)})
+    backend.briefs[(earlier.account_id, earlier.local_date)] = earlier
+
+    clock[0] = toronto(2026, 10, 10, 0, 5)
+    window._minute_tick()
+    await finish(window)
+
+    assert window.workspace.current_page() == "briefs"
+    assert window.history_panel.saved.count() == before + 1
+
+
+def reload_pending(window: MainWindow) -> bool:
+    """Read fresh each time: mypy would narrow the attribute across calls that change it."""
+    return window._day_refresh_pending
+
+
+async def test_a_busy_window_holds_the_new_day_reload_until_it_is_free(qtbot: QtBot) -> None:
+    backend = mockup_backend()
+    clock = [toronto(2026, 10, 9, 23, 50)]
+    window = await window_at(qtbot, backend, clock)
+    release = asyncio.Event()
+
+    async def hold() -> None:
+        await release.wait()
+
+    window.start(hold)
+    calls = backend.list_calls
+    clock[0] = toronto(2026, 10, 10, 0, 5)
+    window._minute_tick()
+    assert reload_pending(window)  # Held: something else is running.
+    assert backend.list_calls == calls
+    release.set()
+    await finish(window)
+
+    window._minute_tick()  # The next minute, the same day: it runs now.
+    assert not reload_pending(window)
+    await finish(window)
+    assert backend.list_calls > calls
 
 
 async def test_the_day_timer_ticks_each_minute_and_stops_on_close(window: MainWindow) -> None:

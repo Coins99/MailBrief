@@ -5,8 +5,9 @@ The theme is applied first: under Fusion, buttons take focus by Tab on every pla
 """
 
 import asyncio
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import QPoint
@@ -203,6 +204,33 @@ async def test_a_brief_that_opens_late_leaves_the_owner_where_they_went(
     release.set()
     await finish(window)
     assert window.workspace.current_page() == "drafts"  # Today has the brief, unshown.
+
+
+async def test_midnight_keeps_focus_on_a_detail_button(window: MainWindow) -> None:
+    """The chips recount in place: the selected email's detail, and the button with focus
+    in it, stay."""
+    toronto = ZoneInfo("America/Toronto")
+    window.zone = toronto
+    clock = [datetime(2026, 10, 9, 23, 50, tzinfo=toronto)]  # The Fri 17:00 deadline's day.
+    window.now = lambda: clock[0]
+    window._minute_tick()  # From the fixture's Oct 6 to Oct 9.
+    await finish(window)
+    rows = window.workspace.brief_list.brief_model.rows()
+    priya = next(row for row in rows if row.item is not None and row.item.message_key == "priya")
+    assert [chip.text for chip in priya.chips] == ["Due Fri 17:00"]
+    button = detail_buttons(window)[0]
+    button.setFocus()
+    assert QApplication.focusWidget() is button
+
+    clock[0] = datetime(2026, 10, 10, 0, 5, tzinfo=toronto)
+    window._minute_tick()
+
+    rows = window.workspace.brief_list.brief_model.rows()
+    priya = next(row for row in rows if row.item is not None and row.item.message_key == "priya")
+    assert [chip.text for chip in priya.chips] == ["Due Oct 9 17:00"]
+    assert QApplication.focusWidget() is button  # The same button, not a rebuilt one.
+    await finish(window)  # The actions and Briefs reload; focus still stays.
+    assert QApplication.focusWidget() is button
 
 
 async def test_tab_runs_header_sidebar_brief_then_detail(window: MainWindow) -> None:

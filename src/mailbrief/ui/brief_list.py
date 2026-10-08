@@ -102,14 +102,18 @@ def with_address(name: str | None, address: str) -> str:
     return f"{shown} <{address}>"
 
 
-def deadline_chip(item: DigestItem, zone: ZoneInfo, today: date) -> Chip | None:
-    """A short deadline in the digest's zone, or None when the email states none. A timed
-    deadline within the week from ``today`` gives its weekday; any other, past ones
+def deadline_chip(
+    item: DigestItem, zone: ZoneInfo, today: date, owner_zone: ZoneInfo
+) -> Chip | None:
+    """A short deadline in the digest's ``zone`` (as the detail pane shows it), or None when
+    the email states none. A timed deadline within the week from ``today``, judged by its
+    date in ``owner_zone`` (where ``today`` is), gives its weekday; any other, past ones
     included, its date."""
     text: str | None = None
     if item.deadline_precision is DeadlinePrecision.DATETIME and item.deadline_at_utc:
         local = item.deadline_at_utc.astimezone(zone)
-        if today <= local.date() <= today + timedelta(days=_WEEKDAY_DAYS):
+        owner_day = item.deadline_at_utc.astimezone(owner_zone).date()
+        if today <= owner_day <= today + timedelta(days=_WEEKDAY_DAYS):
             text = f"Due {local:%a %H:%M}"
         else:
             text = f"Due {local:%b} {local.day} {local:%H:%M}"
@@ -138,10 +142,14 @@ def proposal_chip(proposals: Sequence[ActionProposal]) -> Chip | None:
 
 
 def build_rows(
-    digest: DailyDigest, proposals: Mapping[str, Sequence[ActionProposal]], today: date
+    digest: DailyDigest,
+    proposals: Mapping[str, Sequence[ActionProposal]],
+    today: date,
+    owner_zone: ZoneInfo,
 ) -> list[BriefRow]:
     """A header row whenever the section changes, then each item in digest order. Deadline
-    chips count from ``today``, the owner's current day, whatever day the brief covers."""
+    chips count from ``today``, the owner's current day in ``owner_zone``, whatever day the
+    brief covers."""
     zone = ZoneInfo(digest.timezone_name)
     rows: list[BriefRow] = []
     section = None
@@ -152,7 +160,7 @@ def build_rows(
         chips = tuple(
             chip
             for chip in (
-                deadline_chip(item, zone, today),
+                deadline_chip(item, zone, today, owner_zone),
                 proposal_chip(proposals.get(item.message_key, ())),
             )
             if chip is not None
@@ -179,6 +187,15 @@ class BriefListModel(QAbstractListModel):
         self.beginResetModel()
         self._rows = list(rows)
         self.endResetModel()
+
+    def update_rows(self, rows: Sequence[BriefRow]) -> None:
+        """Replace rows that match the current ones one for one (the same brief, its chips
+        recounted) in place: no reset, so the selection, the detail and focus stay."""
+        if len(rows) != len(self._rows):
+            raise ValueError("update_rows needs the same rows")
+        self._rows = list(rows)
+        if self._rows:
+            self.dataChanged.emit(self.index(0), self.index(len(self._rows) - 1))
 
     def rows(self) -> tuple[BriefRow, ...]:
         return tuple(self._rows)

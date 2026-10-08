@@ -26,10 +26,15 @@ Run each check on Windows and on macOS, and note the date, platform and build.
 
 - [ ] The review step and the selected email show each sender as "Name <address>" (the
       address alone when there is no name, or when the name looks like an address).
+- [ ] In a narrow review step, a cut address keeps the end of its domain: "bill…@" and the
+      whole domain, else "…@…" and the domain's last part, never its first part alone.
 - [ ] A timed deadline within the coming week reads "Due Fri 17:00"; a later or past one
       reads "Due Oct 23 17:00", counted from today, even on an older brief.
-- [ ] Left open past midnight, the header's "Checked Gmail at 23:50" becomes "Checked
-      Gmail Oct 7 at 23:50" within a minute, and the deadline chips recount.
+- [ ] Left open past midnight, within a minute: the header's "Checked Gmail at 23:50"
+      becomes "Checked Gmail Oct 7 at 23:50"; the deadline chips recount without moving
+      the selection or keyboard focus; the Actions page shows yesterday's actions as
+      carried over (and overdue when they were due); and the Briefs page, if it shows,
+      reloads. During a sync, that reload waits until the sync ends.
 
 ## Screen readers
 

@@ -482,10 +482,13 @@ class MainWindow(QMainWindow):
         self._automatic_active = False
         # When the running sync finished, once its review opens: the review and consent may
         # follow it by many minutes. The header shows the last such time, ``_checked``, with
-        # its date once it isn't today; ``_day`` is the owner's day at the last minute tick.
+        # its date once it isn't today; ``_day`` is the owner's day the views were built
+        # for, then at each minute tick.
         self._synced_at: datetime | None = None
         self._checked: datetime | None = None
         self._day: date | None = None
+        # A new day's reload of the actions and Briefs, waiting for the window to be free.
+        self._day_refresh_pending = False
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
@@ -869,14 +872,24 @@ class MainWindow(QMainWindow):
         self.workspace.header.set_status(text)
 
     def _minute_tick(self) -> None:
-        """When the owner's day has changed, the check time gains its date and the brief is
-        shown again, the same email selected, with its deadline chips counted from today."""
+        """When the owner's day has changed since the views were built: the check time
+        gains its date and the brief's chips recount in place at once, and the actions and
+        the Briefs page reload through ``start()``. While another operation runs, that
+        reload is held and retried on each tick until it starts."""
         today = self._local_today()
-        if today == self._day:
-            return
+        if self._day is not None and today != self._day:
+            self._render_checked()
+            self.workspace.set_today(today)
+            self._day_refresh_pending = True
         self._day = today
-        self._render_checked()
-        self.workspace.set_today(today)
+        if self._day_refresh_pending:
+            self._day_refresh_pending = not self.start(self._refresh_for_new_day, cancellable=False)
+
+    async def _refresh_for_new_day(self) -> None:
+        """What counts from the day: the actions' due labels, and the Briefs page's missed
+        days and the days it can brief. Each keeps what it showed if it can't be read."""
+        await self._refresh_actions()
+        await self._reload_history()
 
     def _set_counts(self, **counts: int | None) -> None:
         self._counts.update(counts)
@@ -1837,6 +1850,7 @@ class MainWindow(QMainWindow):
             self.workspace.clear("Saved brief unavailable until local storage can be opened.")
             return
         self._ready = True
+        self._day = self._local_today()  # The day the views below are built for.
         self.status.setText("Ready. Sync to review today's messages.")
         await self._load_owner_preferences()
         if saved is not None:

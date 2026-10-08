@@ -35,6 +35,7 @@ from mailbrief.ui.run_view import (
     TRACKED_REPLY,
     ShortlistDelegate,
     ShortlistRow,
+    cut_address,
     indicator_colors,
     sender_line,
     shortlist_row,
@@ -46,8 +47,13 @@ from tests.ui.test_workflow import FakeBackend
 
 
 def sender_metrics() -> QFontMetrics:
-    """The sender line's metrics, as the delegate measures them (after the theme's font)."""
+    """The sender line's metrics, as the delegate measures them. Needs the application and
+    the theme's Inter: a test calling this takes ``qapp`` and ``themed`` and applies it."""
     return QFontMetrics(ui_font(TEXT_PX))
+
+
+LONG_NAME = ("Priya Shah, Finance " * 10)[:200]
+LOOKALIKE = "billing@paypal.com.secure-login.evil.example"
 
 
 @pytest.fixture
@@ -189,7 +195,10 @@ async def test_rows_carry_their_chips_and_keep_their_text(window: MainWindow) ->
         (EmailContact(name="", address="sam@example.com"), "sam@example.com"),
     ],
 )
-def test_a_review_row_never_hides_the_sender_s_address(sender: EmailContact, shown: str) -> None:
+def test_a_review_row_never_hides_the_sender_s_address(
+    qapp: QApplication, themed: None, sender: EmailContact, shown: str
+) -> None:
+    apply_theme(qapp, ThemeMode.DARK)
     ranked = RankedMessage(message=make_message(sender=sender), score=50, reasons=())
     row = shortlist_row(ranked, blocked=False, outside=False, declined=False)
     assert sender_line(sender_metrics(), row.name, row.address, 10_000) == shown
@@ -203,8 +212,7 @@ def sender_width(window: MainWindow, key: str) -> int:
 async def test_a_long_display_name_never_pushes_the_address_out(window: MainWindow) -> None:
     await reviewing(window)
     metrics, width = sender_metrics(), sender_width(window, "plain")
-    name = ("Priya Shah, Finance " * 10)[:200]
-    line = sender_line(metrics, name, "attacker@evil.example", width)
+    line = sender_line(metrics, LONG_NAME, "attacker@evil.example", width)
     assert line.endswith("… <attacker@evil.example>")  # The name gave way, not the address.
     assert line.startswith("Priya Shah") and metrics.horizontalAdvance(line) <= width
     # A short name fits whole.
@@ -214,13 +222,55 @@ async def test_a_long_display_name_never_pushes_the_address_out(window: MainWind
 
 
 @pytest.mark.parametrize("name", ["Priya Shah", None])
-def test_a_narrow_row_cuts_the_address_in_the_middle(name: str | None) -> None:
+def test_a_narrow_row_cuts_the_address_in_the_middle(
+    qapp: QApplication, themed: None, name: str | None
+) -> None:
+    apply_theme(qapp, ThemeMode.DARK)
     metrics = sender_metrics()
-    width = metrics.horizontalAdvance("attacker@evi")  # Less than the address alone.
-    line = sender_line(metrics, name, "attacker@evil.example", width)
-    assert "@" in line and "…" in line
-    assert line.startswith("att") and line.endswith("ple")  # Both ends stay.
-    assert "Priya" not in line
+    address = "attacker@evil.example"
+    # Room for the whole domain: the part before the "@" gives way.
+    width = metrics.horizontalAdvance("at…@evil.example")
+    line = sender_line(metrics, name, address, width)
+    assert line.endswith("…@evil.example") and metrics.horizontalAdvance(line) <= width
+    # Less: the domain's start gives way, never its end.
+    width = metrics.horizontalAdvance("…@…example")
+    line = sender_line(metrics, name, address, width)
+    assert line.startswith("…@…") and line.endswith("example")
+    assert "Priya" not in line and metrics.horizontalAdvance(line) <= width
+
+
+@pytest.mark.parametrize("name", [LONG_NAME, None])
+def test_every_sender_line_fits_and_keeps_its_at(
+    qapp: QApplication, themed: None, name: str | None
+) -> None:
+    apply_theme(qapp, ThemeMode.DARK)
+    metrics = sender_metrics()
+    for address in ("attacker@evil.example", LOOKALIKE):
+        for width in range(40, 401):
+            line = sender_line(metrics, name, address, width)
+            assert metrics.horizontalAdvance(line) <= width, (width, line)
+            assert "@" in line, (width, line)
+
+
+def test_a_cut_address_keeps_the_end_of_its_domain(qapp: QApplication, themed: None) -> None:
+    """Trust is read from the right of a domain, so only its start is ever cut."""
+    apply_theme(qapp, ThemeMode.DARK)
+    metrics = sender_metrics()
+    domain = LOOKALIKE.split("@")[1]
+    # The narrowest line that can end in the whole last label: below it, only "…@…" and
+    # the domain's last letters fit (at 40 px, "…@…").
+    whole_label = metrics.horizontalAdvance("…@…example")
+    for width in range(40, 401):
+        line = cut_address(metrics, LOOKALIKE, width)
+        assert metrics.horizontalAdvance(line) <= width, (width, line)
+        assert "@" in line, (width, line)
+        shown = line.split("@", 1)[1]
+        # The domain is whole, or its end: never a lookalike start without its real end.
+        assert shown == domain or domain.endswith(shown.removeprefix("…")), (width, line)
+        assert not shown.startswith("pay") or shown == domain, (width, line)
+        if width >= whole_label:
+            assert line.endswith("example"), (width, line)
+    assert cut_address(metrics, LOOKALIKE, 10_000) == LOOKALIKE
 
 
 async def test_clicks_and_space_toggle_only_checkable_rows(window: MainWindow) -> None:

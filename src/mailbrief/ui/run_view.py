@@ -8,6 +8,7 @@ clicks and Space; a blocked row has no check box and can never be checked, but i
 starts where a checkable row's does.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -46,6 +47,10 @@ _CHECK_GAP: Final = 10
 _CHIP_GAP: Final = 4
 # The check box: its corner radius and the check mark's stroke (logical px).
 _BOX_RADIUS: Final = 3
+# A cut address with neither its local part nor its domain's start; how many 1 px
+# shrinks a cut line gets to fit once joined.
+_CUT_AT: Final = "…@"
+_FIT_TRIES: Final = 8
 _MARK_WIDTH: Final = 1.5
 # No fill and no mark: an unchecked box is only its outline.
 NONE: Final = "transparent"
@@ -100,40 +105,67 @@ def _fits(metrics: QFontMetrics, text: str, width: int) -> bool:
     return metrics.horizontalAdvance(text) <= width
 
 
+def _shrink_to_fit(
+    metrics: QFontMetrics, build: Callable[[int], str | None], room: int, width: int
+) -> str | None:
+    """The first ``build(room)`` that fits ``width``, giving its cut part 1 px less room
+    each try: parts measured apart can round wider once joined. None when the part has no
+    room left, or still doesn't fit after a few tries."""
+    for shrink in range(_FIT_TRIES):
+        line = build(room - shrink) if room - shrink >= 0 else None
+        if line is None:
+            return None
+        if _fits(metrics, line, width):
+            return line
+    return None
+
+
 def cut_address(metrics: QFontMetrics, address: str, width: int) -> str:
-    """``address`` cut in the middle to fit ``width``, always keeping its "@": when a plain
-    middle cut would drop it, the part before the "@" is cut at its end and the domain at
-    its start, so both ends stay readable."""
+    """``address`` in ``width``, keeping the end of its domain, which says who sent it: the
+    whole address if it fits; else the part before the "@" cut at its end, then the whole
+    domain ("bill…@paypal.com.secure-login.evil.example"); else "…@" and the domain cut at
+    its start ("…@…login.evil.example"). The domain is only ever cut at its start, so a
+    lookalike prefix never shows without its real end. Below the width of "…@", "…@"."""
     if _fits(metrics, address, width):
         return address
-    middle = metrics.elidedText(address, Qt.TextElideMode.ElideMiddle, width)
-    if "@" in middle:
-        return middle
     local, _, domain = address.rpartition("@")
-    room = max(0, width - metrics.horizontalAdvance("@"))
-    start = metrics.elidedText(local, Qt.TextElideMode.ElideRight, room // 2)
-    end = metrics.elidedText(
-        domain, Qt.TextElideMode.ElideLeft, max(0, room - metrics.horizontalAdvance(start))
-    )
-    return f"{start}@{end}"
+    at_domain = "@" + domain
+
+    def local_cut(room: int) -> str | None:
+        cut = metrics.elidedText(local, Qt.TextElideMode.ElideRight, room)
+        return cut + at_domain if cut else None
+
+    line = _shrink_to_fit(metrics, local_cut, width - metrics.horizontalAdvance(at_domain), width)
+    if line is not None:
+        return line
+
+    def domain_end(room: int) -> str:
+        return _CUT_AT + metrics.elidedText(domain, Qt.TextElideMode.ElideLeft, room)
+
+    line = _shrink_to_fit(metrics, domain_end, width - metrics.horizontalAdvance(_CUT_AT), width)
+    return _CUT_AT if line is None else line
 
 
 def sender_line(metrics: QFontMetrics, name: str | None, address: str, width: int) -> str:
     """The review row's sender in ``width``, never without its address: the whole "Name
-    <address>" if it fits; else, with no name to show, the address cut in the middle; else
-    the name cut at its end before " <address>", if that fits; else the address alone, cut
-    in the middle. A long display name can't push the address out of view."""
+    <address>" if it fits; else, with no name to show, the address cut by ``cut_address``;
+    else the name cut at its end before " <address>", if that fits; else the address alone,
+    cut. A long display name can't push the address out of view, and the line is never
+    wider than ``width`` (from the width of "…@" up)."""
     full = with_address(name, address)
     if _fits(metrics, full, width):
         return full
     if full == address:
         return cut_address(metrics, address, width)
     suffix = f" <{address}>"
-    room = width - metrics.horizontalAdvance(suffix)
     shown = full[: -len(suffix)]  # The name as with_address shows it.
-    if room >= metrics.horizontalAdvance("…"):
-        return metrics.elidedText(shown, Qt.TextElideMode.ElideRight, room) + suffix
-    return cut_address(metrics, address, width)
+
+    def name_cut(room: int) -> str | None:
+        cut = metrics.elidedText(shown, Qt.TextElideMode.ElideRight, room)
+        return cut + suffix if cut else None
+
+    line = _shrink_to_fit(metrics, name_cut, width - metrics.horizontalAdvance(suffix), width)
+    return cut_address(metrics, address, width) if line is None else line
 
 
 def indicator_colors(checked: bool, tokens: Tokens) -> tuple[str, str, str]:

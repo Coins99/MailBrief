@@ -35,7 +35,7 @@ TODAY = date(2026, 10, 6)  # A Tuesday: the mockup brief's day.
 
 def test_rows_add_a_header_whenever_the_section_changes() -> None:
     brief = mockup_digest()
-    rows = build_rows(brief.digest, brief.proposals, TODAY)
+    rows = build_rows(brief.digest, brief.proposals, TODAY, TORONTO)
     assert [(row.kind, row.title) for row in rows] == [
         ("header", "Actions"),
         ("item", "Q3 budget: approval needed by Friday"),
@@ -114,7 +114,7 @@ def test_sender_falls_back_to_the_address() -> None:
     ],
 )
 def test_deadline_chip_text(overrides: dict[str, object], expected: str | None) -> None:
-    chip = deadline_chip(make_digest_item(**overrides), TORONTO, TODAY)
+    chip = deadline_chip(make_digest_item(**overrides), TORONTO, TODAY, TORONTO)
     if expected is None:
         assert chip is None
     else:
@@ -142,7 +142,31 @@ def test_a_timed_deadline_names_its_weekday_only_within_the_week(day: date, expe
         deadline_date=day,
         deadline_at_utc=due,
     )
-    assert deadline_chip(item, TORONTO, TODAY) == Chip(expected, ChipTone.WARNING)
+    assert deadline_chip(item, TORONTO, TODAY, TORONTO) == Chip(expected, ChipTone.WARNING)
+
+
+TOKYO, NEW_YORK = ZoneInfo("Asia/Tokyo"), ZoneInfo("America/New_York")
+
+
+@pytest.mark.parametrize(
+    ("due", "expected"),
+    [
+        # Tue Oct 13 10:00 in Tokyo is still Mon Oct 12 in New York: the sixth day, so it
+        # gets a weekday (in the brief's zone, as the detail pane shows it).
+        (datetime(2026, 10, 13, 10, tzinfo=TOKYO), "Due Tue 10:00"),
+        # Tue Oct 6 08:00 in Tokyo, the owner's today, was yesterday in New York: a date.
+        (datetime(2026, 10, 6, 8, tzinfo=TOKYO), "Due Oct 6 08:00"),
+    ],
+)
+def test_the_week_is_judged_in_the_owner_s_zone(due: datetime, expected: str) -> None:
+    """A Tokyo brief viewed in New York on Tue Oct 6."""
+    item = make_digest_item(
+        deadline_text="by then",
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_date=due.date(),
+        deadline_at_utc=due.astimezone(UTC),
+    )
+    assert deadline_chip(item, TOKYO, TODAY, NEW_YORK) == Chip(expected, ChipTone.WARNING)
 
 
 def test_a_date_only_deadline_keeps_its_date_however_far() -> None:
@@ -152,7 +176,7 @@ def test_a_date_only_deadline_keeps_its_date_however_far() -> None:
         deadline_date=date(2026, 10, 23),
         deadline_at_utc=None,
     )
-    assert deadline_chip(item, TORONTO, TODAY) == Chip("Due Oct 23", ChipTone.WARNING)
+    assert deadline_chip(item, TORONTO, TODAY, TORONTO) == Chip("Due Oct 23", ChipTone.WARNING)
 
 
 @pytest.mark.parametrize(
@@ -176,7 +200,7 @@ def view(qtbot: QtBot) -> BriefListView:
     view = BriefListView()
     qtbot.addWidget(view)
     brief = mockup_digest()
-    view.show_rows(build_rows(brief.digest, brief.proposals, TODAY))
+    view.show_rows(build_rows(brief.digest, brief.proposals, TODAY, TORONTO))
     view.resize(340, 600)
     view.show()
     return view
@@ -249,7 +273,7 @@ def test_empty_subject_reads_no_subject() -> None:
     blank = brief.digest.model_copy(
         update={"items": (brief.digest.items[0].model_copy(update={"subject": ""}),)}
     )
-    rows = build_rows(blank, {}, TODAY)
+    rows = build_rows(blank, {}, TODAY, TORONTO)
     assert rows[1].title == "(no subject)"
 
 
@@ -263,6 +287,6 @@ def test_every_section_uses_the_shared_titles() -> None:
             )
         }
     )
-    headers = [row.title for row in build_rows(digest, {}, TODAY) if row.kind == "header"]
+    headers = [row.title for row in build_rows(digest, {}, TODAY, TORONTO) if row.kind == "header"]
     assert headers == [SECTION_TITLES[section] for section in sections]
     assert "Decisions" in headers and "Replies in threads you track" in headers

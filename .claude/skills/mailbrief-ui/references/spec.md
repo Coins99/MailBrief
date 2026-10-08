@@ -43,10 +43,12 @@ All read colours from `current_tokens()` at paint time.
   detail pane use `sender_with_address`: "Name <address>", or the address alone when the
   name is empty, is the address (ignoring case) or contains "@", so a display name can
   never pass for someone else's address.
-- Deadline chip (WARNING), in the digest's zone, `deadline_chip(item, zone, today)` with
-  the owner's current local day as today (`build_rows(digest, proposals, today)`, from
-  `show_digest`), whatever day the brief covers: DATETIME from today to today + 6 days
-  `Due {local:%a %H:%M}`, any other DATETIME (past ones too) `Due {%b} {day} {%H:%M}`;
+- Deadline chip (WARNING), its text in the digest's zone (as the detail pane shows it),
+  `deadline_chip(item, zone, today, owner_zone)` with the owner's current local day as
+  today (`build_rows(digest, proposals, today, owner_zone)`, from `show_digest`), whatever
+  day the brief covers. "Within the week" is judged by the deadline's date in the owner's
+  zone: DATETIME from today to today + 6 days `Due {local:%a %H:%M}`, any other DATETIME
+  (past ones too) `Due {%b} {day} {%H:%M}`;
   DATE `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters with "…";
   NONE no chip.
 - Proposal chip (ACCENT), from the first pending proposal: NEW_DEADLINE "Proposes a new
@@ -161,8 +163,10 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   today)` builds the rows (chips counted from `today`), the heading and the coverage,
   shows "No analyzed messages in this brief." when empty, and, for the same saved brief
   (account, day and save time), keeps the selected email and the detail's scroll
-  position. `set_today(today)` shows the brief again for a new day, from what it holds,
-  keeping the selection. `clear(message)` shows no brief.
+  position. `set_today(today)` recounts the list's chips for a new day in place
+  (`BriefListModel.update_rows`, `dataChanged`, no model reset), so the selection, the
+  detail pane and keyboard focus stay; nothing else in the brief depends on the day.
+  `clear(message)` shows no brief.
 
 ## Main window (`ui/main_window.py`)
 
@@ -174,8 +178,12 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   (when the review opened, else when the run ended), in the owner's zone: "Checked Gmail
   at HH:MM" that day, "Checked Gmail Oct 7 at HH:MM" on a later one (`_render_checked`).
   Then outline Sync and review and Cancel. A one-minute `day_timer` calls `_minute_tick`:
-  when the owner's day has changed, the check time gains its date and the brief is shown
-  again (`set_today`) so its chips count from the new day. `closeEvent` stops the timer.
+  when the owner's day differs from the one the views were built for (`initialize` sets
+  it), the check time gains its date, the brief's chips recount in place (`set_today`),
+  and `_refresh_for_new_day` reloads the actions (their "overdue", "carried over" and
+  weekday labels) and, when it shows, the Briefs page, through `start()`. While another
+  operation runs, that reload waits (`_day_refresh_pending`) and is retried each tick.
+  `closeEvent` stops the timer.
 - Sidebar footer, top to bottom: Saved mail, Data, Settings, then the Gmail and AI lines
   (11px muted `WrapLabel`s, inset 10 px to line up with the row icons, read by their
   text), then outline Connect Gmail or Disconnect (12px): Connect shows only without a
@@ -222,8 +230,12 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   `ShortlistDelegate` paints it like a brief row: selection fill and 2px `accent_border`
   bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary
   (`sender_line`: the whole "Name <address>" when it fits; else the name cut at its end
-  before " <address>"; else the address alone, cut in the middle by `cut_address`, which
-  keeps its "@"; a long display name never hides the address), chips ("Tracked reply" and
+  before " <address>"; else the address alone, cut by `cut_address`; a long display name
+  never hides the address, and joined parts are re-measured, shrinking the cut part 1 px
+  at a time, so the line never overflows). `cut_address` keeps the end of the domain,
+  which says who sent it: the whole address; else the part before the "@" cut at its end
+  and the whole domain ("bill…@paypal.com.secure-login.evil.example"); else "…@" and the
+  domain cut at its start ("…@…login.evil.example"). Chips ("Tracked reply" and
   "Left out earlier" accent, "Excluded in Settings"
   warning). A cosmetic hairline separates rows; the last row has none, since the list's
   frame closes it.
