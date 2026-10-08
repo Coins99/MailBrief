@@ -40,6 +40,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-qt>=4.5.0",
+    "pytest-xdist>=3.8.0",
     "respx>=0.23.1",
     "ruff>=0.16.5",
     "time-machine>=3.5.0",
