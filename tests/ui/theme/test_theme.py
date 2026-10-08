@@ -5,7 +5,7 @@ import re
 
 import pytest
 from PySide6.QtCore import QMetaMethod
-from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QPalette
+from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetrics, QPalette
 from PySide6.QtWidgets import QApplication, QStyle
 
 from mailbrief.ui.theme import (
@@ -18,8 +18,10 @@ from mailbrief.ui.theme import (
     current_tokens,
     icon_pixmap,
     register_fonts,
+    release_font_cache,
     tokens_for,
     ui_font,
+    ui_metrics,
 )
 from mailbrief.ui.theme.style import ThemeStyle
 
@@ -165,3 +167,30 @@ def test_the_theme_style_never_underlines_mnemonics(qapp: QApplication, themed: 
     apply_theme(qapp)  # Applying again keeps the same style.
     qapp.setStyleSheet("")
     assert qapp.style() is style
+
+
+def test_a_changed_font_never_changes_the_cache(qapp: QApplication) -> None:
+    font = ui_font(13, medium=True)
+    font.setPixelSize(40)
+    assert ui_font(13, medium=True).pixelSize() == 13
+
+
+def test_metrics_are_cached_per_size_and_weight(qapp: QApplication) -> None:
+    assert ui_metrics(13) is ui_metrics(13)
+    assert ui_metrics(13) is not ui_metrics(13, medium=True)
+    assert ui_metrics(12).height() == QFontMetrics(ui_font(12)).height()
+
+
+def test_releasing_the_font_cache_measures_again(qapp: QApplication) -> None:
+    cached = ui_metrics(11)
+    release_font_cache()
+    assert ui_metrics(11) is not cached
+
+
+def test_registering_the_fonts_drops_cached_metrics(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cached = ui_metrics(11)
+    monkeypatch.setattr(assets, "_fonts_loaded", None)
+    register_fonts()
+    assert ui_metrics(11) is not cached

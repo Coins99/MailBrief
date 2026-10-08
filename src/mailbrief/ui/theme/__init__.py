@@ -6,7 +6,9 @@ from mailbrief.ui.theme.assets import (
     icon,
     icon_pixmap,
     register_fonts,
+    release_font_cache,
     ui_font,
+    ui_metrics,
 )
 from mailbrief.ui.theme.style import (
     apply_theme,
@@ -49,7 +51,9 @@ __all__ = [
     "icon",
     "icon_pixmap",
     "register_fonts",
+    "release_font_cache",
     "set_current_tokens",
     "tokens_for",
     "ui_font",
+    "ui_metrics",
 ]

@@ -20,6 +20,9 @@ Read AGENTS.md first; its invariants win. Component specs and the token table ar
 - Fonts are bundled Inter (`ui_font(px, medium=...)`); sizes are in pixels, never points.
   Metrics: `TEXT_PX` 13, `SMALL_PX` 12, `CAPTION_PX` 11, `TITLE_PX` 15, `RADIUS` 8,
   `SIDEBAR_WIDTH` 128.
+- Measure `ui_font()` text with `ui_metrics(px, medium=...)`, built once per size. `ui_font()`
+  returns a copy of a cached font; both caches are cleared when the fonts are registered
+  and when the app quits.
 - Icons are bundled Tabler outlines, coloured at render time: `icon(name, color, px)` or
   `icon_pixmap(...)`. Add a new icon only with its SVG and an `ICON_NAMES` entry.
 - Hairlines on cards and dividers are painted with cosmetic pens (`ui/hairline.py`:
