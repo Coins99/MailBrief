@@ -15,10 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-    # Twice the longest measured job, rounded up to 5 minutes. On 3e4ab01 (PR #34), Windows jobs
-    # took 16.5 and 22.7 minutes (Test 874 s and 1,227 s) and macOS jobs 6.6 and 9.3 minutes
-    # (Test 80 s and 123 s, Cocoa 211 s and 296 s).
-    timeout-minutes: 50
+    # Twice the longest measured job, rounded up to 5 minutes, and at least 20. On fb930da
+    # (PR #34), Windows jobs took 6.9 and 7.3 minutes (Test 264 s and 291 s) and macOS jobs 7.3
+    # and 8.7 minutes (Test 92 s and 125 s, Cocoa 254 s and 279 s).
+    timeout-minutes: 20
     env:
       QT_QPA_PLATFORM: offscreen
 
