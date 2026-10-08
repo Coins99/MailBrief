@@ -14,7 +14,6 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
-from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestItem, DigestStatus
@@ -29,6 +28,7 @@ from mailbrief.ui.workspace import (
     brief_title,
 )
 from tests.factories import make_digest_item
+from tests.ui.window_wait import show
 from tests.ui.workspace_fixtures import ZONE, mockup_digest
 
 SIZES = {"mockup": (680, 520), "desktop": (1100, 720)}
@@ -51,16 +51,6 @@ def build(qtbot: QtBot) -> ThreePaneWorkspace:
     workspace.sidebar.set_counts(5, 2, 3)
     workspace.sidebar.set_note("Gmail connected. AI asks before sending.")
     return workspace
-
-
-def show(qtbot: QtBot, workspace: ThreePaneWorkspace) -> None:
-    """Show ``workspace`` and wait until it is on screen (waitExposed is a context manager)."""
-    try:
-        with qtbot.waitExposed(workspace, timeout=2000):
-            workspace.show()
-    except QtTimeoutError:  # Some platforms never report exposure; go on once shown.
-        QApplication.processEvents()
-    QApplication.processEvents()
 
 
 @pytest.mark.parametrize("size", list(SIZES))

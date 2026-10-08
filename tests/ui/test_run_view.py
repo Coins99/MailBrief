@@ -44,6 +44,7 @@ from mailbrief.ui.theme import DARK, LIGHT, TEXT_PX, ThemeMode, Tokens, apply_th
 from tests.factories import make_message
 from tests.ui.test_main_window_layout import save_shot
 from tests.ui.test_workflow import FakeBackend
+from tests.ui.window_wait import settle
 
 
 def sender_metrics() -> QFontMetrics:
@@ -83,11 +84,6 @@ async def window(
     result.show()
     QApplication.processEvents()
     return result
-
-
-async def settle() -> None:
-    for _ in range(3):
-        await asyncio.sleep(0)
 
 
 async def reviewing(window: MainWindow) -> None:

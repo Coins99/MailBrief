@@ -1,11 +1,14 @@
-"""Act on the desktop's MainWindow once it is visible, without ever waiting forever."""
+"""Wait for the desktop's windows in tests: WindowWait, show(), settle() and drain_writes()."""
 
+import asyncio
 import time
 from collections.abc import Callable
 
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
+from pytestqt.exceptions import TimeoutError as QtTimeoutError
+from pytestqt.qtbot import QtBot
 
 from mailbrief.ui.main_window import MainWindow
 
@@ -77,3 +80,24 @@ class WindowWait:
         if self.failure is not None:
             pytest.fail(self.failure)
         return result
+
+
+async def settle() -> None:
+    """Let queued asyncio callbacks run: three passes of the event loop."""
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+async def drain_writes(window: MainWindow) -> None:
+    """Wait until every draft write the window queued has finished."""
+    await window.draft_writes.drain()
+
+
+def show(qtbot: QtBot, widget: QWidget) -> None:
+    """Show ``widget`` and wait until it is on screen (waitExposed is a context manager)."""
+    try:
+        with qtbot.waitExposed(widget, timeout=2000):
+            widget.show()
+    except QtTimeoutError:  # Some platforms never report exposure; go on once shown.
+        QApplication.processEvents()
+    QApplication.processEvents()
