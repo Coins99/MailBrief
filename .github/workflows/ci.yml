@@ -53,6 +53,18 @@ jobs:
       - name: Type check
         run: uv run mypy src tests
 
+      # CI runs on both sides of UTC so time-zone bugs show up: macOS in Toronto, Windows in Tokyo.
+      # TZ goes through GITHUB_ENV on macOS only: a job-wide TZ would reach Windows too.
+      - name: Use Toronto time on macOS
+        if: runner.os == 'macOS'
+        run: echo "TZ=America/Toronto" >> "$GITHUB_ENV"
+
+      - name: Use Tokyo time on Windows
+        if: runner.os == 'Windows'
+        run: |
+          tzutil /s "Tokyo Standard Time"
+          tzutil /g
+
       - name: Test
         # macOS runs its Qt tests in the next step, so its coverage gate waits for them.
         run: uv run pytest -n auto --durations=30 ${{ runner.os == 'macOS' && '--cov-fail-under=0' || '' }}

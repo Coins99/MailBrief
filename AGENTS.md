@@ -294,6 +294,8 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - Coverage: at least 80% overall and 90% for the synchronization, ranking, body, digest,
   drafts, drafting, preferences, history, threads, proposals, consent and data services.
   `scripts/check_coverage.py` enforces the 90% combined statement/branch service gate.
+- Tests run SQLite without disk flushes, CI runs tests in parallel (`pytest -n auto`), and CI
+  runs macOS in Toronto and Windows in Tokyo time.
 
 ## UI work
 
