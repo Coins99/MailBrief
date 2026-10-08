@@ -64,8 +64,9 @@ def test_saved_briefs_and_missed_days_are_listed(panel: BriefHistoryPanel) -> No
         "2026-09-05 · complete · 2 items · owner@example.com",
         "2026-09-03 · complete · 1 item · owner@example.com",
     ]
-    assert panel.missed.item(0).text() == "2026-09-04 · no brief"
-    assert panel.missed_note.isHidden()
+    missed = [panel.missed.item(row).text() for row in range(panel.missed.count())]
+    assert missed == ["2026-09-04 · no brief", "2026-09-02 · no brief"]
+    assert not panel.missed.isHidden() and panel.missed_note.isHidden()
     assert panel.saved.accessibleName() and panel.missed.accessibleName()
     # Today's brief is open-only: today is briefed with Sync and review.
     assert panel.open_button.isEnabled() and not panel.brief_button.isEnabled()
@@ -351,3 +352,17 @@ def test_the_missed_list_hides_when_no_day_was_missed(panel: BriefHistoryPanel) 
     assert not panel.missed_note.isHidden() and panel.missed_note.text() == NONE_MISSED
     panel.configure((summary(PAST),), (), None, TODAY)
     assert panel.missed.isHidden() and panel.missed_note.text() == NOT_CONNECTED
+
+
+def test_another_account_s_missed_days_aren_t_claimed_until_loaded(
+    panel: BriefHistoryPanel,
+) -> None:
+    panel.configure((summary(PAST),), (), "owner@example.com", TODAY)
+    assert panel.missed_note.text() == NONE_MISSED
+
+    panel.set_account("other@example.com")  # Its missed days haven't been read yet.
+
+    assert panel.missed_note.isHidden() and panel.missed_note.text() != NONE_MISSED
+    assert panel.missed.isHidden() and panel._missed == ()
+    panel.set_account(None)
+    assert not panel.missed_note.isHidden() and panel.missed_note.text() == NOT_CONNECTED

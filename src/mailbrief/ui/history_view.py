@@ -124,26 +124,18 @@ class BriefHistoryPanel(QWidget):
         today: date,
     ) -> None:
         """Show saved briefs and, for the connected account, its missed days."""
-        self._summaries, self._missed = summaries, missed
+        self._summaries = summaries
         self._account, self._today = account_email, today
         self.confirm_panel.hide()
         self.status.clear()
-        for widget in (self.saved, self.missed):
-            widget.blockSignals(True)
-            widget.clear()
+        self.saved.blockSignals(True)
+        self.saved.clear()
         for summary in summaries:
             self.saved.addItem(QListWidgetItem(summary_text(summary)))
-        for day in missed:
-            self.missed.addItem(QListWidgetItem(f"{day.isoformat()} · no brief"))
-        for widget in (self.saved, self.missed):
-            widget.blockSignals(False)
+        self.saved.blockSignals(False)
+        self._show_missed(missed)
         if not summaries:
             self.status.setText("No saved briefs yet.")
-        self.missed_note.setText(
-            NOT_CONNECTED if account_email is None else "" if missed else NONE_MISSED
-        )
-        self.missed_note.setVisible(bool(self.missed_note.text()))
-        self.missed.setVisible(bool(missed))  # The note says why there are none.
         if summaries:
             self.saved.setCurrentRow(0)
         self._update_buttons()
@@ -155,17 +147,30 @@ class BriefHistoryPanel(QWidget):
         if account_email == self._account:
             return
         self._account = account_email
-        self._missed = ()
-        self.missed.blockSignals(True)
-        self.missed.clear()
-        self.missed.blockSignals(False)
-        self.missed.hide()
-        self.missed_note.setText(NOT_CONNECTED if account_email is None else "")
-        self.missed_note.setVisible(bool(self.missed_note.text()))
+        self._show_missed(None)
         self.confirm_panel.hide()
         if self.status.text() in (NEEDS_CONNECTION, OTHER_ACCOUNT):
             self.status.clear()  # It was about the account that changed.
         self._update_buttons()
+
+    def _show_missed(self, missed: tuple[date, ...] | None) -> None:
+        """The missed-days list and its note, for ``self._account``. ``missed`` is None
+        until that account's days are loaded; the note then claims nothing about them."""
+        self._missed = missed or ()
+        self.missed.blockSignals(True)
+        self.missed.clear()
+        for day in self._missed:
+            self.missed.addItem(QListWidgetItem(f"{day.isoformat()} · no brief"))
+        self.missed.blockSignals(False)
+        if self._account is None:
+            note = NOT_CONNECTED
+        elif missed is None or missed:
+            note = ""
+        else:
+            note = NONE_MISSED
+        self.missed_note.setText(note)
+        self.missed_note.setVisible(bool(note))
+        self.missed.setVisible(bool(self._missed))  # The note says why there are none.
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
