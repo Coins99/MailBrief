@@ -1912,18 +1912,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._note_not_refreshed(exc)
 
-    def _show_page_unless_moved(self, origin: str, key: str) -> None:
+    def _show_page_unless_moved(self, origin: str, key: str) -> bool:
         """Show ``key`` once a load finishes, unless the owner moved from ``origin``, the
-        page shown when it was requested, in the meantime."""
-        if self.workspace.current_page() == origin:
-            self._show_page(key)
+        page shown when it was requested, in the meantime; returns whether it did."""
+        if self.workspace.current_page() != origin:
+            return False
+        self._show_page(key)
+        return True
 
     async def _open_history(self) -> None:
         origin = self.workspace.current_page()
         await self._load_history()
-        if self.workspace.current_page() == origin:
+        if self._show_page_unless_moved(origin, "briefs"):
             self.status.setText("Open a saved brief, or brief a missed day.")
-            self._show_page("briefs")
 
     def _request_open_brief(self, account_email: str, local_date: date) -> None:
         self.start(lambda: self._show_brief(account_email, local_date), cancellable=False)
