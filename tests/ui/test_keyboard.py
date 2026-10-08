@@ -20,8 +20,9 @@ from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import DailyDigest, SavedBriefSummary
 from mailbrief.ui.main_window import PAGE_SHORTCUTS, MainWindow
 from mailbrief.ui.theme import apply_theme
-from tests.ui.test_main_window_layout import BUSY, NOW, finish, mockup_backend, show
+from tests.ui.test_main_window_layout import BUSY, NOW, finish, mockup_backend
 from tests.ui.test_workflow import FakeBackend
+from tests.ui.window_wait import show
 
 # Tab from Sync and review on Today, with the mockup brief's first email shown.
 HEADER_AND_SIDEBAR = [

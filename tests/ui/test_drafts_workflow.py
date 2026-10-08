@@ -21,6 +21,7 @@ from mailbrief.ui.main_window import DraftWrites, MainWindow
 from tests.factories import make_action
 from tests.ui.brief_view import detail, shown_text
 from tests.ui.test_workflow import FakeBackend
+from tests.ui.window_wait import drain_writes
 
 ACTION = make_action(
     title="Send the deck",
@@ -59,10 +60,6 @@ def window(qtbot: QtBot, backend: FakeBackend) -> MainWindow:
 async def finish(window: MainWindow) -> None:
     assert window.task is not None
     await window.task
-
-
-async def settle(window: MainWindow) -> None:
-    await window.draft_writes.drain()
 
 
 async def open_new(window: MainWindow, kind: DraftKind = DraftKind.NOTE) -> None:
@@ -207,7 +204,7 @@ async def test_typing_autosaves_without_making_the_window_busy(
     editor.body.setPlainText("Dear team")
     qtbot.waitUntil(lambda: not window.draft_writes.idle, timeout=2_000)
     assert window.generate_button.isEnabled()  # Not busy.
-    await settle(window)
+    await drain_writes(window)
 
     (autosave,) = calls(backend, "autosave_draft")
     assert autosave[2:] == (1, DraftEdit(body="Dear team"))
@@ -228,7 +225,7 @@ async def test_waiting_autosaves_coalesce_to_the_newest(
         await asyncio.sleep(0)
 
     backend.draft_gate.set()
-    await settle(window)
+    await drain_writes(window)
 
     assert [call[2] for call in calls(backend, "autosave_draft")] == [1, 2]
     assert [call[3].body for call in calls(backend, "autosave_draft")] == ["one", "three"]  # type: ignore[attr-defined]
@@ -244,22 +241,22 @@ async def test_versions_wait_for_pending_autosaves(
     editor.body.setPlainText("Version me")
 
     editor.checkpoint_button.click()
-    await settle(window)
+    await drain_writes(window)
 
     assert [call[0] for call in backend.draft_calls[-2:]] == ["autosave_draft", "checkpoint_draft"]
     assert backend.draft_calls[-1][2] == 2  # The revision after the autosave.
     assert editor.status.text() == "Saved version 2."
 
     editor.versions_button.click()
-    await settle(window)
+    await drain_writes(window)
     assert editor.versions_list.count() == 2
     assert editor.version_preview.toPlainText() == "Version me"
     editor.versions_list.setCurrentRow(1)
-    await settle(window)
+    await drain_writes(window)
     editor.body.setPlainText("Changed")
     editor.restore_button.click()
     editor.confirm_button.click()
-    await settle(window)
+    await drain_writes(window)
 
     assert editor.body.toPlainText() == ""
     assert editor.status.text().startswith("Restored version 1.")
@@ -284,12 +281,12 @@ async def test_a_conflict_keeps_the_text_and_saves_it_as_a_new_draft(
 
     editor.body.setPlainText("My words")
     editor._autosave_now()
-    await settle(window)
+    await drain_writes(window)
 
     assert editor.in_conflict and editor.status.text() == CONFLICT
     assert editor.body.toPlainText() == "My words"
     editor.save_as_new_button.click()
-    await settle(window)
+    await drain_writes(window)
 
     assert calls(backend, "save_draft_as_new") == [
         ("save_draft_as_new", original, DraftEdit(body="My words"))
@@ -298,7 +295,7 @@ async def test_a_conflict_keeps_the_text_and_saves_it_as_a_new_draft(
     assert not window.draft_editor.in_conflict  # Read afresh: the conflict has ended.
     editor.body.setPlainText("My words, continued")
     editor._autosave_now()
-    await settle(window)
+    await drain_writes(window)
     assert calls(backend, "autosave_draft")[-1][1] == editor.draft.public_id
     assert window.drafts_panel.list.count() == 2
 
@@ -313,13 +310,13 @@ async def test_a_failed_autosave_keeps_the_text_and_retries(
     editor.body.setPlainText("private draft text")
     editor._autosave_now()
     with caplog.at_level(logging.WARNING, logger="mailbrief.desktop"):
-        await settle(window)
+        await drain_writes(window)
 
     assert editor.status.text() == NOT_SAVED
     assert editor.dirty
     assert "private" not in caplog.text
     editor._autosave_now()  # The retry timer or the next change does this.
-    await settle(window)
+    await drain_writes(window)
     assert editor.status.text().startswith("Saved ")
     assert backend.drafts[editor.draft.public_id].body == "private draft text"  # type: ignore[union-attr]
 
@@ -335,7 +332,7 @@ async def test_closing_saves_and_checkpoints_then_closes(
 
     editor.close_button.click()
     assert editor.isVisible()
-    await settle(window)
+    await drain_writes(window)
 
     assert [call[0] for call in backend.draft_calls[-2:]] == ["autosave_draft", "checkpoint_draft"]
     assert not editor.isVisible()
@@ -360,14 +357,14 @@ async def test_a_failed_close_keeps_the_editor_open(
         backend.change_elsewhere(editor.draft.public_id)
     else:
         editor._autosave_now()
-        await settle(window)
+        await drain_writes(window)
         if failure == "checkpoint":
             backend.draft_fail = OSError("disk")
         else:
             backend.change_elsewhere(editor.draft.public_id, "Keep me")
 
     editor.close_button.click()
-    await settle(window)
+    await drain_writes(window)
 
     assert editor.isVisible()
     assert editor.body.toPlainText() == "Keep me"
@@ -458,14 +455,14 @@ async def test_export_writes_utf8_atomically_and_warns_about_placeholders(
     target.write_text("old", encoding="utf-8")
 
     editor.export_to(str(target))
-    await settle(window)
+    await drain_writes(window)
 
     assert target.read_bytes() == "# Café\n\nBonjour [[name]]\n".encode()
     assert editor.status.text() == "Exported Café.md. 1 placeholder still needs filling."
     assert os.listdir(tmp_path) == ["Café.md"]  # No temporary file left behind.
     editor.body.setPlainText("Bonjour Alex")
     editor.export_to(str(tmp_path / "plain.txt"))
-    await settle(window)
+    await drain_writes(window)
     assert (tmp_path / "plain.txt").read_text(encoding="utf-8") == "Café\n\nBonjour Alex\n"
     assert editor.status.text() == "Exported plain.txt."
 
@@ -475,7 +472,7 @@ async def test_a_failed_export_says_so(window: MainWindow, tmp_path: Path) -> No
     await open_new(window)
 
     window.draft_editor.export_to(str(tmp_path / "missing" / "out.txt"))
-    await settle(window)
+    await drain_writes(window)
 
     assert window.draft_editor.status.text() == "Couldn't export. Check the folder and try again."
 
@@ -542,11 +539,11 @@ async def test_failed_draft_operations_keep_the_editor_usable(
     assert editor.draft is not None
     editor.body.setPlainText("Mine")
     editor._autosave_now()
-    await settle(window)
+    await drain_writes(window)
     if operation in ("preview", "restore"):
         editor.checkpoint_button.click()
         editor.versions_button.click()
-        await settle(window)
+        await drain_writes(window)
     if stale:
         backend.change_elsewhere(editor.draft.public_id)
     else:
@@ -563,7 +560,7 @@ async def test_failed_draft_operations_keep_the_editor_usable(
         editor.confirm_button.click()
     else:
         editor.save_as_new_requested.emit(DraftEdit(body="Mine"))
-    await settle(window)
+    await drain_writes(window)
 
     assert editor.status.text() == message
     assert editor.body.toPlainText() == "Mine"

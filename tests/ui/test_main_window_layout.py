@@ -17,7 +17,6 @@ import pytest
 from PySide6.QtCore import QSize, QUrl
 from PySide6.QtGui import QAccessible, QDesktopServices, QGuiApplication, QKeySequence, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QStyle
-from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter
@@ -34,6 +33,7 @@ from mailbrief.ui.theme import SIDEBAR_WIDTH, TITLE_PX, ThemeMode, apply_theme
 from tests.factories import make_action
 from tests.ui.brief_view import detail, select_item
 from tests.ui.test_workflow import FakeBackend
+from tests.ui.window_wait import settle, show
 from tests.ui.workspace_fixtures import ACCOUNT, FINANCE_ACTION, mockup_digest
 
 BUSY = "MailBrief is busy; try again in a moment."
@@ -56,21 +56,6 @@ def mockup_backend() -> FakeBackend:
 async def finish(window: MainWindow) -> None:
     assert window.task is not None
     await window.task
-
-
-async def settle() -> None:
-    for _ in range(3):
-        await asyncio.sleep(0)
-
-
-def show(qtbot: QtBot, window: MainWindow) -> None:
-    """Show ``window`` and wait until it is on screen (waitExposed is a context manager)."""
-    try:
-        with qtbot.waitExposed(window, timeout=2000):
-            window.show()
-    except QtTimeoutError:  # Some platforms never report exposure; go on once shown.
-        QApplication.processEvents()
-    QApplication.processEvents()
 
 
 @pytest.fixture

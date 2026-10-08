@@ -1,6 +1,5 @@
 """The Briefs panel, viewing a past brief, and briefing a missed day from the window."""
 
-import asyncio
 from datetime import UTC, date, datetime
 
 import pytest
@@ -19,6 +18,7 @@ from mailbrief.ui.history_view import (
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.brief_view import shown_text
 from tests.ui.test_workflow import FakeBackend, finish
+from tests.ui.window_wait import settle
 
 TODAY = date(2026, 9, 5)
 SAVED_DAY = date(2026, 9, 4)  # FakeBackend's saved brief: yesterday.
@@ -188,11 +188,6 @@ async def window(qtbot: QtBot, backend: FakeBackend) -> MainWindow:
 
 def heading(window: MainWindow) -> str:
     return shown_text(window).splitlines()[0]
-
-
-async def settle() -> None:
-    for _ in range(3):
-        await asyncio.sleep(0)
 
 
 async def review_and_approve(window: MainWindow) -> None:
