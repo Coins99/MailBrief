@@ -39,9 +39,13 @@ All read colours from `current_tokens()` at paint time.
 
 - Rows: a header row (from `SECTION_TITLES`) whenever the digest section changes, then
   item rows in digest order. `BriefRow(kind, title, item, sender, chips)`.
-- Sender: the contact's name, else its address.
+- Sender: the contact's name, else its address (`sender_text`). The review step and the
+  detail pane use `sender_with_address`: "Name <address>", or the address alone when the
+  name is empty, is the address (ignoring case) or contains "@", so a display name can
+  never pass for someone else's address.
 - Deadline chip (WARNING), in the digest's zone, `deadline_chip(item, zone, today)` with
-  the digest's `local_date` as today: DATETIME from today to today + 6 days
+  the owner's current local day as today (`build_rows(digest, proposals, today)`, from
+  `show_digest`), whatever day the brief covers: DATETIME from today to today + 6 days
   `Due {local:%a %H:%M}`, any other DATETIME (past ones too) `Due {%b} {day} {%H:%M}`;
   DATE `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters with "…";
   NONE no chip.
@@ -60,8 +64,9 @@ All read colours from `current_tokens()` at paint time.
 - View: objectName `briefList`, accessible name "Brief items", NoFrame,
   ScrollPerPixel, SingleSelection; `item_selected(DigestItem)`; `show_rows(rows)` selects
   the first item row; Return and Enter emit `activated` once and are consumed.
-  Page Up and Page Down (no modifier) scroll the detail pane by a page
-  (`set_page_scroll`, set by the workspace) instead of moving the selection.
+  While the whole list fits (its vertical scroll bar has no range), Page Up and Page
+  Down (no modifier) scroll the detail pane by a page (`set_page_scroll`, set by the
+  workspace); when the list scrolls, they page the list.
 
 ## Wrapping labels (`ui/labels.py`)
 
@@ -90,7 +95,8 @@ Its content is at most 720 px wide (`DETAIL_MAX_WIDTH`) and stays at the left on
 windows. Content margins 16, 14, 16, 14, spacing 8, in order (every mail- or AI-derived
 line is a `WrapLabel`):
 1. Subject (or "(no subject)"), 15px Medium.
-2. Sender, secondary. No received time is invented.
+2. Sender, secondary, `sender_with_address` (objectName `detailSender`). No received
+   time is invented.
 3. Summary.
 4. Action text, secondary, if present and different from the summary.
 5. Deadline: 14px clock icon (warning_fg) and a warning label. DATETIME
@@ -151,10 +157,12 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   margins 12, 10, 12, 10: one elided line of `coverage_short`, with `coverage_line` as
   its accessible name) and the `BriefDetailPane`; stretch 4:5, not collapsible, minimum
   widths 220 and 280. `add_page(key, widget)`, `show_page(key)` (KeyError for an unknown
-  key) and `current_page()`. `show_digest(digest, *, links, proposals, owner_zone)`
-  builds the rows, the heading and the coverage, shows "No analyzed messages in this
-  brief." when empty, and, for the same saved brief (account, day and save time), keeps
-  the selected email and the detail's scroll position. `clear(message)` shows no brief.
+  key) and `current_page()`. `show_digest(digest, *, links, proposals, owner_zone,
+  today)` builds the rows (chips counted from `today`), the heading and the coverage,
+  shows "No analyzed messages in this brief." when empty, and, for the same saved brief
+  (account, day and save time), keeps the selected email and the detail's scroll
+  position. `set_today(today)` shows the brief again for a new day, from what it holds,
+  keeping the selection. `clear(message)` shows no brief.
 
 ## Main window (`ui/main_window.py`)
 
@@ -162,8 +170,12 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   `statusStrip` (margins 12, 6, 12, 6): the status (a 12px secondary `WrapLabel`) and an
   outline Undo. No outer scroll area; the window opens at 1100 × 720 and its minimum
   width stays at most 900 px with the theme applied.
-- Header: "Checked Gmail at HH:MM" in the owner's zone after a run whose Inbox sync was
-  complete or partial, then outline Sync and review and Cancel.
+- Header: after a run whose Inbox sync was complete or partial, when that sync finished
+  (when the review opened, else when the run ended), in the owner's zone: "Checked Gmail
+  at HH:MM" that day, "Checked Gmail Oct 7 at HH:MM" on a later one (`_render_checked`).
+  Then outline Sync and review and Cancel. A one-minute `day_timer` calls `_minute_tick`:
+  when the owner's day has changed, the check time gains its date and the brief is shown
+  again (`set_today`) so its chips count from the new day. `closeEvent` stops the timer.
 - Sidebar footer, top to bottom: Saved mail, Data, Settings, then the Gmail and AI lines
   (11px muted `WrapLabel`s, inset 10 px to line up with the row icons, read by their
   text), then outline Connect Gmail or Disconnect (12px): Connect shows only without a
@@ -208,8 +220,9 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   ID under `UserRole`, flags, check state and app-text tooltip. `review()` adds a
   `ShortlistRow(subject, sender, chips, blocked)` under `ROW_ROLE`, and
   `ShortlistDelegate` paints it like a brief row: selection fill and 2px `accent_border`
-  bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary,
-  chips ("Tracked reply" and "Left out earlier" accent, "Excluded in Settings"
+  bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary
+  (`sender_with_address`: what the owner decides to send), chips ("Tracked reply" and
+  "Left out earlier" accent, "Excluded in Settings"
   warning). A cosmetic hairline separates rows; the last row has none, since the list's
   frame closes it.
 - Height: once `review()` fills the list, its maximum height is its rows' `sizeHintForRow`

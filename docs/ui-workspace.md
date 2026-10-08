@@ -19,6 +19,17 @@ Run each check on Windows and on macOS, and note the date, platform and build.
 - [ ] Ctrl+1 to Ctrl+5 (Cmd+1 to Cmd+5 on macOS) open Today, Actions, Waiting, Drafts
       and Briefs; Briefs says MailBrief is busy while a run is in progress.
 - [ ] The focus ring is visible on every stop, and Return or Enter opens a row once.
+- [ ] In the brief list, Page Up and Page Down scroll the selected email while the whole
+      list fits, and page the list when it scrolls.
+
+## Reading the brief
+
+- [ ] The review step and the selected email show each sender as "Name <address>" (the
+      address alone when there is no name, or when the name looks like an address).
+- [ ] A timed deadline within the coming week reads "Due Fri 17:00"; a later or past one
+      reads "Due Oct 23 17:00", counted from today, even on an older brief.
+- [ ] Left open past midnight, the header's "Checked Gmail at 23:50" becomes "Checked
+      Gmail Oct 7 at 23:50" within a minute, and the deadline chips recount.
 
 ## Screen readers
 

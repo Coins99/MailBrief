@@ -595,7 +595,7 @@ async def test_brief_displays_resolved_deadline(
             )
         }
     )
-    window.workspace.show_digest(digest, owner_zone=window.zone)
+    window.workspace.show_digest(digest, owner_zone=window.zone, today=digest.local_date)
     assert expected in shown_text(window)
 
 

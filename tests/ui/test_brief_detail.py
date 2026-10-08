@@ -52,6 +52,26 @@ def show(pane: BriefDetailPane, key: str) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("sender", "shown"),
+    [
+        # A display name that poses as someone else's address shows only the real one.
+        (
+            EmailContact(name="Priya Shah <priya@corp.example>", address="attacker@evil.example"),
+            "attacker@evil.example",
+        ),
+        (EmailContact(name="", address="sam@example.com"), "sam@example.com"),
+        (EmailContact(name=None, address="sam@example.com"), "sam@example.com"),
+    ],
+)
+def test_the_sender_line_never_hides_the_address(
+    pane: BriefDetailPane, sender: EmailContact, shown: str
+) -> None:
+    pane.show_item(make_digest_item(sender=sender), account_email=ACCOUNT, timezone_name=ZONE)
+    line = pane.findChild(QLabel, "detailSender")
+    assert line is not None and line.text() == shown
+
+
 def button(pane: QWidget, text: str, occurrence: int = 0) -> QPushButton:
     matches = [b for b in pane.findChildren(QPushButton) if b.text() == text]
     return matches[occurrence]
@@ -66,7 +86,7 @@ def test_mockup_item_reads_like_the_mockup(pane: BriefDetailPane) -> None:
     texts = label_texts(pane)
     assert pane.title is not None
     assert pane.title.text() == "Q3 budget: approval needed by Friday"
-    assert "Priya Shah" in texts
+    assert "Priya Shah <priya@example.com>" in texts  # The name and its address.
     assert "Due Fri Oct 9, 17:00" in texts
     assert "Continues: “Finance review prep”" in texts
     assert "Yours. Target Thu Oct 8, one working day before the deadline." in texts

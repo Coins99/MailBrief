@@ -86,6 +86,17 @@ def sender_text(contact: EmailContact) -> str:
     return contact.name or contact.address
 
 
+def sender_with_address(contact: EmailContact) -> str:
+    """ "Name <address>", so a display name can't pass for someone else. The address alone
+    when the name is empty or the address itself, or contains "@": a name that looks like
+    an address is how a sender poses as another."""
+    name = " ".join((contact.name or "").split())
+    address = contact.address
+    if not name or name.casefold() == address.casefold() or "@" in name:
+        return address
+    return f"{name} <{address}>"
+
+
 def deadline_chip(item: DigestItem, zone: ZoneInfo, today: date) -> Chip | None:
     """A short deadline in the digest's zone, or None when the email states none. A timed
     deadline within the week from ``today`` gives its weekday; any other, past ones
@@ -122,9 +133,10 @@ def proposal_chip(proposals: Sequence[ActionProposal]) -> Chip | None:
 
 
 def build_rows(
-    digest: DailyDigest, proposals: Mapping[str, Sequence[ActionProposal]]
+    digest: DailyDigest, proposals: Mapping[str, Sequence[ActionProposal]], today: date
 ) -> list[BriefRow]:
-    """A header row whenever the section changes, then each item in digest order."""
+    """A header row whenever the section changes, then each item in digest order. Deadline
+    chips count from ``today``, the owner's current day, whatever day the brief covers."""
     zone = ZoneInfo(digest.timezone_name)
     rows: list[BriefRow] = []
     section = None
@@ -135,7 +147,7 @@ def build_rows(
         chips = tuple(
             chip
             for chip in (
-                deadline_chip(item, zone, digest.local_date),
+                deadline_chip(item, zone, today),
                 proposal_chip(proposals.get(item.message_key, ())),
             )
             if chip is not None
@@ -323,7 +335,7 @@ def _flat(text: str) -> str:
 
 class BriefListView(QListView):
     """``item_selected(DigestItem)`` reports the selected email. With ``set_page_scroll``,
-    Page Up and Page Down scroll the selected email's detail instead of the selection."""
+    Page Up and Page Down scroll the selected email's detail while the whole list fits."""
 
     item_selected = Signal(object)
 
@@ -343,7 +355,8 @@ class BriefListView(QListView):
         self._page_scroll: QScrollBar | None = None
 
     def set_page_scroll(self, bar: QScrollBar | None) -> None:
-        """Page Up and Page Down scroll ``bar`` by a page (None: they move the selection)."""
+        """While the whole list fits, Page Up and Page Down scroll ``bar`` by a page; when
+        the list scrolls, or with None, they page the list."""
         self._page_scroll = bar
 
     def show_rows(self, rows: Sequence[BriefRow], *, select: str | None = None) -> None:
@@ -382,8 +395,10 @@ class BriefListView(QListView):
             bar is not None
             and event.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)
             and modifiers == Qt.KeyboardModifier.NoModifier
+            and self.verticalScrollBar().maximum() == 0
         ):
-            # The list fits on screen; the email being read is what needs paging.
+            # Only while the whole list fits: then the email being read is what needs
+            # paging. A list that scrolls pages itself.
             bar.triggerAction(
                 QAbstractSlider.SliderAction.SliderPageStepSub
                 if event.key() == Qt.Key.Key_PageUp

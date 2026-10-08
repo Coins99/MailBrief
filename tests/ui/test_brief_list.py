@@ -24,6 +24,7 @@ from mailbrief.ui.brief_list import (
     deadline_chip,
     proposal_chip,
     sender_text,
+    sender_with_address,
 )
 from tests.factories import make_digest_item, make_proposal
 from tests.ui.workspace_fixtures import ZONE, mockup_digest
@@ -34,7 +35,7 @@ TODAY = date(2026, 10, 6)  # A Tuesday: the mockup brief's day.
 
 def test_rows_add_a_header_whenever_the_section_changes() -> None:
     brief = mockup_digest()
-    rows = build_rows(brief.digest, brief.proposals)
+    rows = build_rows(brief.digest, brief.proposals, TODAY)
     assert [(row.kind, row.title) for row in rows] == [
         ("header", "Actions"),
         ("item", "Q3 budget: approval needed by Friday"),
@@ -51,6 +52,24 @@ def test_rows_add_a_header_whenever_the_section_changes() -> None:
     assert rows[4].chips == (Chip("Due Oct 9", ChipTone.WARNING),)
     assert rows[6].chips == (Chip("Proposes a new deadline", ChipTone.ACCENT),)
     assert rows[2].chips == ()
+
+
+@pytest.mark.parametrize(
+    ("name", "address", "expected"),
+    [
+        ("Priya Shah", "priya@example.com", "Priya Shah <priya@example.com>"),
+        ("Priya Shah <priya@corp.example>", "attacker@evil.example", "attacker@evil.example"),
+        ("priya@corp.example", "attacker@evil.example", "attacker@evil.example"),
+        ("", "sam@example.com", "sam@example.com"),
+        (None, "sam@example.com", "sam@example.com"),
+        ("SAM@example.com", "sam@example.com", "sam@example.com"),  # The address itself.
+        ("  Priya\n Shah ", "priya@example.com", "Priya Shah <priya@example.com>"),
+    ],
+)
+def test_sender_with_address_never_hides_the_address(
+    name: str | None, address: str, expected: str
+) -> None:
+    assert sender_with_address(EmailContact(name=name, address=address)) == expected
 
 
 def test_sender_falls_back_to_the_address() -> None:
@@ -157,7 +176,7 @@ def view(qtbot: QtBot) -> BriefListView:
     view = BriefListView()
     qtbot.addWidget(view)
     brief = mockup_digest()
-    view.show_rows(build_rows(brief.digest, brief.proposals))
+    view.show_rows(build_rows(brief.digest, brief.proposals, TODAY))
     view.resize(340, 600)
     view.show()
     return view
@@ -230,7 +249,7 @@ def test_empty_subject_reads_no_subject() -> None:
     blank = brief.digest.model_copy(
         update={"items": (brief.digest.items[0].model_copy(update={"subject": ""}),)}
     )
-    rows = build_rows(blank, {})
+    rows = build_rows(blank, {}, TODAY)
     assert rows[1].title == "(no subject)"
 
 
@@ -244,6 +263,6 @@ def test_every_section_uses_the_shared_titles() -> None:
             )
         }
     )
-    headers = [row.title for row in build_rows(digest, {}) if row.kind == "header"]
+    headers = [row.title for row in build_rows(digest, {}, TODAY) if row.kind == "header"]
     assert headers == [SECTION_TITLES[section] for section in sections]
     assert "Decisions" in headers and "Replies in threads you track" in headers

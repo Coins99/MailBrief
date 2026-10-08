@@ -28,7 +28,7 @@ from mailbrief.ui.brief_list import (
     ChipTone,
     chip_height,
     paint_chips,
-    sender_text,
+    sender_with_address,
 )
 from mailbrief.ui.hairline import hairline_pen
 from mailbrief.ui.theme import TEXT_PX, Tokens, current_tokens, ui_font
@@ -74,7 +74,7 @@ def shortlist_row(
         chips.append(Chip(EXCLUDED, ChipTone.WARNING))
     return ShortlistRow(
         subject=message.subject or NO_SUBJECT,
-        sender=sender_text(message.sender),
+        sender=sender_with_address(message.sender),  # What the owner decides to send.
         chips=tuple(chips),
         blocked=blocked,
     )

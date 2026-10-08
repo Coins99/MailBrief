@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
+from mailbrief.domain.messages import EmailContact, RankedMessage
 from mailbrief.services.ranking import DECLINED_TEXT, OUTSIDE_REPLY_TEXT
 from mailbrief.ui.brief_list import Chip, ChipTone
 from mailbrief.ui.main_window import MainWindow
@@ -34,8 +35,10 @@ from mailbrief.ui.run_view import (
     ShortlistDelegate,
     ShortlistRow,
     indicator_colors,
+    shortlist_row,
 )
 from mailbrief.ui.theme import DARK, LIGHT, ThemeMode, Tokens, apply_theme
+from tests.factories import make_message
 from tests.ui.test_main_window_layout import save_shot
 from tests.ui.test_workflow import FakeBackend
 
@@ -160,12 +163,29 @@ async def test_rows_carry_their_chips_and_keep_their_text(window: MainWindow) ->
     assert rows["blocked"].chips == (Chip(EXCLUDED, ChipTone.WARNING),)
     assert rows["blocked"].blocked and not rows["plain"].blocked
     assert rows["plain"].subject == "Approval needed by Friday"
+    assert rows["plain"].sender == "Alex <alex@example.com>"  # The name and its address.
     # The item's own text, the one read aloud, is unchanged.
     assert item(window, "outside").text().endswith(OUTSIDE_REPLY_TEXT)
     assert item(window, "declined").text().endswith(DECLINED_TEXT)
     assert item(window, "blocked").text().endswith("excluded in Settings")
     window.cancel()
     await finish(window)
+
+
+@pytest.mark.parametrize(
+    ("sender", "shown"),
+    [
+        (
+            EmailContact(name="Priya Shah <priya@corp.example>", address="attacker@evil.example"),
+            "attacker@evil.example",
+        ),
+        (EmailContact(name="", address="sam@example.com"), "sam@example.com"),
+    ],
+)
+def test_a_review_row_never_hides_the_sender_s_address(sender: EmailContact, shown: str) -> None:
+    ranked = RankedMessage(message=make_message(sender=sender), score=50, reasons=())
+    row = shortlist_row(ranked, blocked=False, outside=False, declined=False)
+    assert row.sender == shown
 
 
 async def test_clicks_and_space_toggle_only_checkable_rows(window: MainWindow) -> None:

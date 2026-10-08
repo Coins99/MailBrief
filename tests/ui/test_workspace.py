@@ -5,7 +5,7 @@ With MAILBRIEF_UI_SHOTS set to a folder, each render is saved there as
 """
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.exceptions import TimeoutError as QtTimeoutError
 from pytestqt.qtbot import QtBot
 
-from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestStatus
+from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestItem, DigestStatus
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
 from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
@@ -28,10 +28,12 @@ from mailbrief.ui.workspace import (
     brief_meta,
     brief_title,
 )
+from tests.factories import make_digest_item
 from tests.ui.workspace_fixtures import ZONE, mockup_digest
 
 SIZES = {"mockup": (680, 520), "desktop": (1100, 720)}
 OWNER_ZONE = ZoneInfo(ZONE)
+TODAY = date(2026, 10, 6)  # The mockup brief's day.
 
 
 def build(qtbot: QtBot) -> ThreePaneWorkspace:
@@ -39,7 +41,11 @@ def build(qtbot: QtBot) -> ThreePaneWorkspace:
     qtbot.addWidget(workspace)
     brief = mockup_digest()
     workspace.show_digest(
-        brief.digest, links=brief.links, proposals=brief.proposals, owner_zone=OWNER_ZONE
+        brief.digest,
+        links=brief.links,
+        proposals=brief.proposals,
+        owner_zone=OWNER_ZONE,
+        today=TODAY,
     )
     workspace.header.set_status("Checked Gmail at 09:14")
     workspace.sidebar.set_counts(5, 2, 3)
@@ -112,7 +118,7 @@ def test_empty_brief_says_so(qtbot: QtBot) -> None:
     empty = DailyDigest.model_validate(
         {**mockup_digest().digest.model_dump(), "items": (), "status": DigestStatus.EMPTY}
     )
-    workspace.show_digest(empty, owner_zone=OWNER_ZONE)
+    workspace.show_digest(empty, owner_zone=OWNER_ZONE, today=TODAY)
     assert workspace.brief_list.model().rowCount() == 0
     assert workspace.detail.title is None
     texts = [label.text() for label in workspace.detail.findChildren(QLabel)]
@@ -297,18 +303,50 @@ def test_the_heading_shows_the_brief(qtbot: QtBot) -> None:
     assert heading.meta.accessibleName().startswith("owner@example.com. Saved 2026-10-06T09:14")
 
 
-def short_workspace(qtbot: QtBot) -> ThreePaneWorkspace:
-    """At its minimum height the first email's detail doesn't fit, so it scrolls."""
-    workspace = build(qtbot)
-    workspace.resize(680, workspace.minimumSizeHint().height())
+def workspace_with(
+    qtbot: QtBot, items: tuple[DigestItem, ...], size: tuple[int, int]
+) -> ThreePaneWorkspace:
+    workspace = ThreePaneWorkspace()
+    qtbot.addWidget(workspace)
+    digest = brief_with(items=items)
+    workspace.show_digest(digest, owner_zone=OWNER_ZONE, today=TODAY)
+    workspace.resize(*size)
     show(qtbot, workspace)
-    assert workspace.detail.verticalScrollBar().maximum() > 0
     return workspace
 
 
-def test_page_down_in_the_list_scrolls_the_selected_email(qtbot: QtBot) -> None:
-    workspace = short_workspace(qtbot)
+def long_brief(count: int) -> tuple[DigestItem, ...]:
+    return tuple(
+        make_digest_item(message_key=f"m{number}", position=number, subject=f"Email {number}")
+        for number in range(count)
+    )
+
+
+def three_with_a_long_detail() -> tuple[DigestItem, ...]:
+    """Three emails; the first one's detail is taller than the pane."""
+    first, second, third = mockup_digest().digest.items[:3]
+    first = first.model_copy(update={"action_text": "Read the attached notes. " * 38})
+    return tuple(
+        item.model_copy(update={"position": number})
+        for number, item in enumerate((first, second, third))
+    )
+
+
+def test_page_keys_page_a_list_that_scrolls(qtbot: QtBot) -> None:
+    workspace = workspace_with(qtbot, long_brief(20), (680, 420))
+    view, detail = workspace.brief_list, workspace.detail.verticalScrollBar()
+    assert view.verticalScrollBar().maximum() > 0  # 20 rows don't fit.
+    first = view.currentIndex().row()
+    QTest.keyClick(view, Qt.Key.Key_PageDown)
+    assert view.currentIndex().row() > first  # The list paged…
+    assert detail.value() == 0  # …and the detail stayed put.
+
+
+def test_page_keys_scroll_the_detail_while_the_list_fits(qtbot: QtBot) -> None:
+    workspace = workspace_with(qtbot, three_with_a_long_detail(), (680, 520))
     view, bar = workspace.brief_list, workspace.detail.verticalScrollBar()
+    assert view.verticalScrollBar().maximum() == 0  # Three rows fit.
+    assert bar.maximum() > 0  # The first email's detail doesn't.
     selected = view.selected_key()
     QTest.keyClick(view, Qt.Key.Key_PageDown)
     assert bar.value() > 0
@@ -318,7 +356,7 @@ def test_page_down_in_the_list_scrolls_the_selected_email(qtbot: QtBot) -> None:
 
 
 def test_page_up_from_a_detail_button_scrolls_the_pane(qtbot: QtBot) -> None:
-    workspace = short_workspace(qtbot)
+    workspace = workspace_with(qtbot, three_with_a_long_detail(), (680, 520))
     bar = workspace.detail.verticalScrollBar()
     QTest.keyClick(workspace.brief_list, Qt.Key.Key_PageDown)
     scrolled = bar.value()
@@ -350,7 +388,7 @@ def test_showing_the_same_brief_again_keeps_selection_and_scroll(qtbot: QtBot) -
 
     def again(digest: DailyDigest) -> None:
         workspace.show_digest(
-            digest, links=brief.links, proposals=brief.proposals, owner_zone=OWNER_ZONE
+            digest, links=brief.links, proposals=brief.proposals, owner_zone=OWNER_ZONE, today=TODAY
         )
 
     select(keys[1])
@@ -421,7 +459,7 @@ def test_unbroken_mail_text_never_widens_the_workspace(
         workspace = ThreePaneWorkspace()
         qtbot.addWidget(workspace)
         workspace.show_digest(
-            digest, links=brief.links, proposals=brief.proposals, owner_zone=OWNER_ZONE
+            digest, links=brief.links, proposals=brief.proposals, owner_zone=OWNER_ZONE, today=TODAY
         )
         workspace.resize(*SIZES["mockup"])
         show(qtbot, workspace)

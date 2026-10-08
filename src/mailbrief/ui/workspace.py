@@ -491,6 +491,9 @@ class ThreePaneWorkspace(QWidget):
         self._proposals: Mapping[str, Sequence[ActionProposal]] = {}
         # The detail's scroll position to restore once its new content has a range.
         self._pending_scroll: int | None = None
+        # The owner's zone and day the brief was last shown for, to show it again on a new day.
+        self._owner_zone: ZoneInfo | None = None
+        self._today: date | None = None
         self.brief_list.item_selected.connect(self._show_item)
         self.detail.verticalScrollBar().rangeChanged.connect(self._restore_scroll)
 
@@ -513,9 +516,11 @@ class ThreePaneWorkspace(QWidget):
         links: Mapping[str, Sequence[ThreadLink]] | None = None,
         proposals: Mapping[str, Sequence[ActionProposal]] | None = None,
         owner_zone: ZoneInfo,
+        today: date,
     ) -> None:
-        """Show ``digest``. Showing the same saved brief again keeps the selected email and
-        the detail's scroll position; another brief starts at its first email."""
+        """Show ``digest``, its deadline chips counted from ``today`` (the owner's current
+        day). Showing the same saved brief again keeps the selected email and the detail's
+        scroll position; another brief starts at its first email."""
         previous = self._digest
         same = previous is not None and _identity(previous) == _identity(digest)
         select = self.brief_list.selected_key() if same else None
@@ -523,18 +528,29 @@ class ThreePaneWorkspace(QWidget):
         self._digest = digest
         self._links = links or {}
         self._proposals = proposals or {}
+        self._owner_zone, self._today = owner_zone, today
         self.heading.show_brief(digest, owner_zone)
         self.coverage.setText(coverage_short(digest), coverage_line(digest))
         if not digest.items:
             self.brief_list.show_rows([])
             self.detail.show_empty(EMPTY_BRIEF)
             return
-        self.brief_list.show_rows(build_rows(digest, self._proposals), select=select)
+        self.brief_list.show_rows(build_rows(digest, self._proposals, today), select=select)
         if same and scroll:
             # The new content gets its scroll range once it is laid out: from the next turn
             # of the event loop, or when the range changes, whichever has one first.
             self._pending_scroll = scroll
             QTimer.singleShot(0, self._restore_scroll)
+
+    def set_today(self, today: date) -> None:
+        """On a new day, show the brief again (the same email selected) so its deadline
+        chips count from ``today``; nothing is read from storage."""
+        digest, zone = self._digest, self._owner_zone
+        if digest is None or zone is None or today == self._today:
+            return
+        self.show_digest(
+            digest, links=self._links, proposals=self._proposals, owner_zone=zone, today=today
+        )
 
     def _restore_scroll(self) -> None:
         bar = self.detail.verticalScrollBar()
@@ -548,6 +564,7 @@ class ThreePaneWorkspace(QWidget):
         self._links = {}
         self._proposals = {}
         self._pending_scroll = None
+        self._owner_zone = self._today = None
         self.brief_list.show_rows([])
         self.coverage.setText("")
         self.heading.hide()

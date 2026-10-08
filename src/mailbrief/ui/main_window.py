@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol, assert_never
 
 from pydantic import SecretStr
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -480,9 +480,12 @@ class MainWindow(QMainWindow):
         # Whether the running operation is an automatic refresh (ADR 0017): its failures are
         # reported as such, and it never opens a panel or dialog.
         self._automatic_active = False
-        # When the running sync finished, once its review opens: the header's "Checked
-        # Gmail at" time, which the review and consent may follow by many minutes.
-        self._checked_at: datetime | None = None
+        # When the running sync finished, once its review opens: the review and consent may
+        # follow it by many minutes. The header shows the last such time, ``_checked``, with
+        # its date once it isn't today; ``_day`` is the owner's day at the last minute tick.
+        self._synced_at: datetime | None = None
+        self._checked: datetime | None = None
+        self._day: date | None = None
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
@@ -511,6 +514,11 @@ class MainWindow(QMainWindow):
         # When an automatic run is due, by the owner's schedule; it stops with the window.
         self.scheduler = RefreshScheduler(self, clock=lambda: self.now())
         self.scheduler.due.connect(self._refresh_due)
+        # Once a minute, so a new day dates the check time and recounts the deadline chips.
+        self.day_timer = QTimer(self)
+        self.day_timer.setInterval(60_000)
+        self.day_timer.timeout.connect(self._minute_tick)
+        self.day_timer.start()
         self.settings_dialog.save_requested.connect(self._request_save_preferences)
         self.settings_dialog.key_requested.connect(self._request_save_key)
         self.settings_dialog.remove_key_requested.connect(
@@ -840,10 +848,35 @@ class MainWindow(QMainWindow):
         if is_gmail_link(url):
             QDesktopServices.openUrl(QUrl(url))
 
+    def _local_today(self) -> date:
+        return self.now().astimezone(self.zone).date()
+
     def _stamp_checked(self) -> None:
         """When the run's sync finished: when its review opened, else (no review) now."""
-        checked = self.now() if self._checked_at is None else self._checked_at
-        self.workspace.header.set_status(f"Checked Gmail at {checked.astimezone(self.zone):%H:%M}")
+        self._checked = self.now() if self._synced_at is None else self._synced_at
+        self._render_checked()
+
+    def _render_checked(self) -> None:
+        """The header's check time: "Checked Gmail at 09:14" today in the owner's zone,
+        "Checked Gmail Oct 7 at 23:50" on any other day."""
+        if self._checked is None:
+            return
+        local = self._checked.astimezone(self.zone)
+        if local.date() == self._local_today():
+            text = f"Checked Gmail at {local:%H:%M}"
+        else:
+            text = f"Checked Gmail {local:%b} {local.day} at {local:%H:%M}"
+        self.workspace.header.set_status(text)
+
+    def _minute_tick(self) -> None:
+        """When the owner's day has changed, the check time gains its date and the brief is
+        shown again, the same email selected, with its deadline chips counted from today."""
+        today = self._local_today()
+        if today == self._day:
+            return
+        self._day = today
+        self._render_checked()
+        self.workspace.set_today(today)
 
     def _set_counts(self, **counts: int | None) -> None:
         self._counts.update(counts)
@@ -952,7 +985,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log_failure(exc)
             proposals = None
-        self.workspace.show_digest(digest, links=links, proposals=proposals, owner_zone=self.zone)
+        self.workspace.show_digest(
+            digest,
+            links=links,
+            proposals=proposals,
+            owner_zone=self.zone,
+            today=self._local_today(),
+        )
 
     async def _refresh_actions(self) -> None:
         now = self.now()
@@ -1702,6 +1741,7 @@ class MainWindow(QMainWindow):
         """The owner's zone for every local day and time shown, and the drafting defaults."""
         self.zone = owner_zone(preferences)
         self.cached_dialog.zone = self.zone
+        self._render_checked()  # In the new zone.
         self.draft_editor.ai_panel.set_defaults(preferences.draft_tone, preferences.draft_length)
         self.scheduler.configure(
             preferences.refresh_on_launch, preferences.refresh_interval_minutes
@@ -1919,7 +1959,7 @@ class MainWindow(QMainWindow):
     async def _generate(self, local_date: date | None = None) -> None:
         """Brief today (Sync and review), or a past day chosen on the Briefs page. However
         it ends, the next automatic run is an interval later (ADR 0017)."""
-        self._checked_at = None  # Until this run's review opens.
+        self._synced_at = None  # Until this run's review opens.
         try:
             await self._generate_brief(local_date)
         finally:
@@ -2027,7 +2067,7 @@ class MainWindow(QMainWindow):
     async def _automatic_refresh(self) -> None:
         """One automatic run. However it ends, the next is an interval later."""
         self._automatic_active = True
-        self._checked_at = None  # No review: its sync has just finished when it returns.
+        self._synced_at = None  # No review: its sync has just finished when it returns.
         self.status.setText(_AUTOMATIC + "checking Gmail…")
         try:
             result = await self.backend.generate_automatic(self._cancel, self._progress)
@@ -2166,7 +2206,7 @@ class MainWindow(QMainWindow):
         Replies in tracked threads that aren't in today's Inbox (``outside_ids``) are labelled
         as such and are otherwise like any other message. Messages the owner left out of an
         earlier review (``declined_ids``) start unchecked, with "you left this out earlier"."""
-        self._checked_at = self.now()  # The sync has finished; the owner may take a while.
+        self._synced_at = self.now()  # The sync has finished; the owner may take a while.
         if not candidates:
             return ()
         self._review = asyncio.get_running_loop().create_future()
@@ -2297,6 +2337,7 @@ class MainWindow(QMainWindow):
             return
         self._closing = True
         self.scheduler.stop()
+        self.day_timer.stop()
         self.auto_send_dialog.reject()
         self.settings_dialog.reject()
         self.cached_dialog.reject()

@@ -8,7 +8,7 @@ With MAILBRIEF_UI_SHOTS set to a folder, the window is also saved there as
 import asyncio
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
@@ -22,6 +22,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import SyncStatus
+from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.ports.errors import AuthenticationRequiredError
 from mailbrief.ui.actions_view import ActionsPanel
 from mailbrief.ui.drafts_view import DraftsPanel
@@ -309,6 +310,65 @@ async def test_the_header_gives_the_time_the_sync_finished(window: MainWindow) -
     window.approve_button.click()
     await finish(window)
     assert window.workspace.header.status.text() == "Checked Gmail at 09:00"
+
+
+TORONTO = ZoneInfo("America/Toronto")
+
+
+def toronto(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=TORONTO).astimezone(UTC)
+
+
+async def window_at(qtbot: QtBot, backend: FakeBackend, clock: list[datetime]) -> MainWindow:
+    """A loaded window whose clock is ``clock[0]``, in Toronto (the mockup's zone)."""
+    backend.owner_preferences = OwnerPreferences(revision=1, time_zone="America/Toronto")
+    window = MainWindow(backend)
+    window.now = lambda: clock[0]
+    qtbot.addWidget(window)
+    window.start(window.initialize)
+    await finish(window)
+    return window
+
+
+def chip_texts(window: MainWindow, key: str) -> list[str]:
+    row = next(
+        row
+        for row in window.workspace.brief_list.brief_model.rows()
+        if row.item is not None and row.item.message_key == key
+    )
+    return [chip.text for chip in row.chips]
+
+
+async def test_deadline_chips_count_from_today_not_the_brief_s_day(qtbot: QtBot) -> None:
+    """A brief from Mon Oct 5, read on Mon Oct 12: its Fri Oct 9 deadline has passed."""
+    backend = mockup_backend()
+    backend.saved = backend.saved.model_copy(update={"local_date": date(2026, 10, 5)})
+    window = await window_at(qtbot, backend, [toronto(2026, 10, 12, 9, 0)])
+    assert chip_texts(window, "priya") == ["Due Oct 9 17:00"]
+
+
+async def test_a_new_day_dates_the_check_time_and_recounts_the_chips(qtbot: QtBot) -> None:
+    clock = [toronto(2026, 10, 9, 23, 50)]  # Fri, the deadline's own day.
+    window = await window_at(qtbot, mockup_backend(), clock)
+    select_item(window, "sam")
+    window._stamp_checked()
+    window._minute_tick()  # The day it starts on: nothing changes.
+    assert window.workspace.header.status.text() == "Checked Gmail at 23:50"
+    assert chip_texts(window, "priya") == ["Due Fri 17:00"]
+
+    clock[0] = toronto(2026, 10, 10, 0, 5)  # Past midnight.
+    window._minute_tick()
+
+    assert window.workspace.header.status.text() == "Checked Gmail Oct 9 at 23:50"
+    assert chip_texts(window, "priya") == ["Due Oct 9 17:00"]
+    assert window.workspace.brief_list.selected_key() == "sam"  # The same email.
+
+
+async def test_the_day_timer_ticks_each_minute_and_stops_on_close(window: MainWindow) -> None:
+    assert window.day_timer.isActive() and window.day_timer.interval() == 60_000
+    window.close()
+    assert not window.day_timer.isActive()
+    await window.shutdown()
 
 
 def last_call(backend: FakeBackend) -> tuple[object, ...]:

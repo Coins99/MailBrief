@@ -30,7 +30,7 @@ from mailbrief.domain.actions import (
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
 from mailbrief.domain.digests import DigestItem
-from mailbrief.ui.brief_list import NO_SUBJECT, sender_text
+from mailbrief.ui.brief_list import NO_SUBJECT, sender_with_address
 from mailbrief.ui.deadline_text import deadline_text
 from mailbrief.ui.hairline import HairlineFrame
 from mailbrief.ui.labels import button_label, plain_label, short_button_label, wrap_label
@@ -157,7 +157,9 @@ class BriefDetailPane(QScrollArea):
         layout = self._fresh()
         self.title = wrap_label(item.subject or NO_SUBJECT, px=TITLE_PX, medium=True)
         layout.addWidget(self.title)
-        layout.addWidget(wrap_label(sender_text(item.sender), tone="secondary", px=TEXT_PX))
+        sender = wrap_label(sender_with_address(item.sender), tone="secondary", px=TEXT_PX)
+        sender.setObjectName("detailSender")
+        layout.addWidget(sender)
         layout.addWidget(wrap_label(item.summary, px=TEXT_PX))
         if item.action_text and item.action_text != item.summary:
             layout.addWidget(wrap_label(item.action_text, tone="secondary", px=TEXT_PX))
