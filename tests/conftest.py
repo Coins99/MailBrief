@@ -2,12 +2,16 @@
 
 import os
 import socket
+import sqlite3
+from contextlib import suppress
 from typing import Any
 
 import pytest
 
 # Ensure Qt runs in offscreen mode in headless test environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+REAL_CONNECT = sqlite3.connect
 
 NETWORK_BLOCKED = "Tests must not use the network."
 _LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1", "", None})
@@ -50,3 +54,25 @@ def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+
+@pytest.fixture(autouse=True)
+def sqlite_without_disk_flushes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop SQLite flushing each commit to disk on every connection a test opens.
+
+    This applies to tests only: the app keeps SQLite's default of flushing every commit to
+    disk. It wraps `sqlite3.connect`, which every SQLite connection goes through: the app's
+    engine (by way of aiosqlite), Alembic, migrations, backups and recovery. Test databases
+    are thrown away, so a crash can't lose anything they need. `journal_mode` is never
+    changed, because it is stored in the database file.
+    """
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        connection: sqlite3.Connection = REAL_CONNECT(*args, **kwargs)
+        # Setting the pragma reads the file. One that isn't a usable database is left for the
+        # code under test to meet, at the point where it would in the app.
+        with suppress(sqlite3.DatabaseError):
+            connection.execute("PRAGMA synchronous=OFF")
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)

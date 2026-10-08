@@ -199,4 +199,4 @@ async def test_idle_browser_connection_does_not_delay_completion() -> None:
         writer.close()
 
     assert grant.code == "idle-code"
-    assert elapsed < 2.0
+    assert elapsed < 2.5  # Half the 5-second read timeout an idle connection would wait out.

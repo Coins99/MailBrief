@@ -5,6 +5,7 @@ line, and it stops when the window does."""
 import asyncio
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtGui import QCloseEvent
@@ -887,6 +888,8 @@ async def test_settings_show_the_permission_from_the_active_consent(
     )
     window.settings_dialog.reject()
 
+    # No grant time falls on the same date in every zone, so pin the window's.
+    window.zone = ZoneInfo("UTC")
     backend.permission = make_auto_send(
         limit=2, granted_at_utc=datetime(2026, 9, 29, 15, tzinfo=UTC)
     )

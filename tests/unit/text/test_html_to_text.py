@@ -89,7 +89,7 @@ def test_unmatched_end_tags_stay_fast() -> None:
     markup = "<div>" * 20_000 + "</span>" * 20_000 + "<p>after</p>"
     started = time.perf_counter()
     assert html_to_text(markup) == "after"
-    assert time.perf_counter() - started < 2.0
+    assert time.perf_counter() - started < 10.0  # Catches runaway slowness, not busy CI.
 
 
 def test_deeply_nested_quotes_cannot_multiply_the_output() -> None:

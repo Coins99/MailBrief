@@ -15,12 +15,21 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-    # Windows pull-request runs reached 25–29 minutes with the workspace UI tests; the follow-up PR speeds them up.
-    timeout-minutes: 45
+    # Twice the longest measured job, rounded up to 5 minutes, and at least 20. On fb930da
+    # (PR #34), Windows jobs took 6.9 and 7.3 minutes (Test 264 s and 291 s) and macOS jobs 7.3
+    # and 8.7 minutes (Test 92 s and 125 s, Cocoa 254 s and 279 s).
+    timeout-minutes: 20
     env:
       QT_QPA_PLATFORM: offscreen
 
     steps:
+      - name: Exclude CI folders from Defender
+        if: runner.os == 'Windows'
+        # Real-time scanning of every file uv unpacks and every test database slows Windows runs.
+        continue-on-error: true
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:TEMP, "$env:LOCALAPPDATA\uv"
+
       - name: Check out repository
         uses: actions/checkout@v7
 
@@ -46,9 +55,21 @@ jobs:
       - name: Type check
         run: uv run mypy src tests
 
+      # CI runs on both sides of UTC so time-zone bugs show up: macOS in Toronto, Windows in Tokyo.
+      # TZ goes through GITHUB_ENV on macOS only: a job-wide TZ would reach Windows too.
+      - name: Use Toronto time on macOS
+        if: runner.os == 'macOS'
+        run: echo "TZ=America/Toronto" >> "$GITHUB_ENV"
+
+      - name: Use Tokyo time on Windows
+        if: runner.os == 'Windows'
+        run: |
+          tzutil /s "Tokyo Standard Time"
+          tzutil /g
+
       - name: Test
         # macOS runs its Qt tests in the next step, so its coverage gate waits for them.
-        run: uv run pytest ${{ runner.os == 'macOS' && '--cov-fail-under=0' || '' }}
+        run: uv run pytest -n auto --durations=30 ${{ runner.os == 'macOS' && '--cov-fail-under=0' || '' }}
 
       - name: Qt tests on the Cocoa platform
         if: runner.os == 'macOS'
@@ -56,7 +77,8 @@ jobs:
           MACOS_GUI_AVAILABLE: "1"
           QT_QPA_PLATFORM: cocoa
         # Adds these tests' coverage to the main run's; the 80% gate applies to the total.
-        run: uv run pytest --cov-append tests/ui tests/unit/test_app.py
+        # Serial: the keyboard tests need one active window at a time.
+        run: uv run pytest --cov-append --durations=30 tests/ui tests/unit/test_app.py
 
       - name: Verify required service coverage
         run: uv run python scripts/check_coverage.py
