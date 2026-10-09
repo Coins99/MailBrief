@@ -24,15 +24,21 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.messages import RankedMessage
 from mailbrief.ui.brief_list import (
+    CHIP_GAP,
     NO_SUBJECT,
+    ROW_PAD_H,
+    ROW_PAD_V,
     Chip,
     ChipTone,
-    chip_height,
     paint_chips,
+    paint_lines,
+    paint_selection,
+    paint_separator,
+    row_height,
     with_address,
 )
-from mailbrief.ui.hairline import hairline_pen
-from mailbrief.ui.theme import TEXT_PX, Tokens, current_tokens, ui_font
+from mailbrief.ui.hairline import hairline_pen, paint_focus_ring
+from mailbrief.ui.theme import TEXT_PX, Tokens, current_tokens, ui_metrics
 
 # The item's own ID stays under Qt.UserRole; the row to paint sits beside it.
 ROW_ROLE: Final = Qt.ItemDataRole.UserRole + 1
@@ -41,10 +47,7 @@ TRACKED_REPLY: Final = "Tracked reply"
 LEFT_OUT: Final = "Left out earlier"
 EXCLUDED: Final = "Excluded in Settings"
 
-_PAD_V: Final = 8
-_PAD_H: Final = 12
 _CHECK_GAP: Final = 10
-_CHIP_GAP: Final = 4
 # The check box: its corner radius and the check mark's stroke (logical px).
 _BOX_RADIUS: Final = 3
 # A cut address with neither its local part nor its domain's start; how many 1 px
@@ -85,20 +88,6 @@ def shortlist_row(
         chips=tuple(chips),
         blocked=blocked,
     )
-
-
-def _metrics(px: int, *, medium: bool = False) -> QFontMetrics:
-    return QFontMetrics(ui_font(px, medium=medium))
-
-
-def _single_line() -> int:
-    return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter) | int(
-        Qt.TextFlag.TextSingleLine
-    )
-
-
-def _flat(text: str) -> str:
-    return " ".join(text.split())
 
 
 def _fits(metrics: QFontMetrics, text: str, width: int) -> bool:
@@ -224,12 +213,12 @@ class ShortlistDelegate(QStyledItemDelegate):
         """Where the row's text starts: after the check box, blocked or not."""
         check = self.check_rect(option, index)
         rect: QRect = option.rect
-        return check.right() + _CHECK_GAP if check.isValid() else rect.left() + _PAD_H
+        return check.right() + _CHECK_GAP if check.isValid() else rect.left() + ROW_PAD_H
 
     def text_width(self, option: QStyleOptionViewItem, index: _Index) -> int:
         """How wide the row's subject and sender lines are."""
         rect: QRect = option.rect
-        return max(0, rect.right() - _PAD_H - self.text_left(option, index))
+        return max(0, rect.right() - ROW_PAD_H - self.text_left(option, index))
 
     def _view(self) -> QWidget | None:
         parent = self.parent()
@@ -248,11 +237,7 @@ class ShortlistDelegate(QStyledItemDelegate):
         rect: QRect = option.rect
         state: QStyle.StateFlag = option.state
         painter.save()
-        if state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(rect, QColor(tokens.selection))
-            painter.fillRect(
-                QRect(rect.left(), rect.top(), 2, rect.height()), QColor(tokens.accent_border)
-            )
+        paint_selection(painter, rect, state, tokens)
         if not row.blocked:
             checked = index.data(Qt.ItemDataRole.CheckStateRole)
             paint_indicator(
@@ -263,55 +248,27 @@ class ShortlistDelegate(QStyledItemDelegate):
         # Blocked rows line up with checkable ones, with nothing to check.
         left = self.text_left(option, index)
         width = self.text_width(option, index)
-        top = rect.top() + _PAD_V
-        title_font = ui_font(TEXT_PX, medium=True)
-        title_metrics = QFontMetrics(title_font)
-        painter.setFont(title_font)
-        painter.setPen(QColor(tokens.text_muted if row.blocked else tokens.text))
-        painter.drawText(
-            QRect(left, top, width, title_metrics.height()),
-            _single_line(),
-            title_metrics.elidedText(_flat(row.subject), Qt.TextElideMode.ElideRight, width),
+        top = paint_lines(
+            painter,
+            left,
+            rect.top() + ROW_PAD_V,
+            width,
+            row.subject,
+            sender_line(ui_metrics(TEXT_PX), row.name, row.address, width),
+            title_color=tokens.text_muted if row.blocked else tokens.text,
+            sender_color=tokens.text_muted if row.blocked else tokens.text_secondary,
         )
-        top += title_metrics.height()
-        sender_font = ui_font(TEXT_PX)
-        sender_metrics = QFontMetrics(sender_font)
-        painter.setFont(sender_font)
-        painter.setPen(QColor(tokens.text_muted if row.blocked else tokens.text_secondary))
-        painter.drawText(
-            QRect(left, top, width, sender_metrics.height()),
-            _single_line(),
-            sender_line(sender_metrics, row.name, row.address, width),
-        )
-        top += sender_metrics.height()
         if row.chips:
-            paint_chips(painter, row.chips, left, top + _CHIP_GAP)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            paint_chips(painter, row.chips, left, top + CHIP_GAP)
         if index.row() < index.model().rowCount() - 1:  # The list's frame closes the last row.
-            painter.setPen(hairline_pen(tokens.hairline))
-            bottom = rect.bottom()
-            painter.drawLine(QPointF(rect.left(), bottom), QPointF(rect.right(), bottom))
-        if state & QStyle.StateFlag.State_HasFocus and (
-            state & QStyle.StateFlag.State_KeyboardFocusChange
-        ):
-            painter.setPen(hairline_pen(tokens.accent_fg))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(QRectF(rect).adjusted(1, 1, -1, -1))
+            paint_separator(painter, rect, tokens)
+        paint_focus_ring(painter, rect, state, tokens.accent_fg)
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: _Index) -> QSize:
         row = index.data(ROW_ROLE)
         if not isinstance(row, ShortlistRow):
             return super().sizeHint(option, index)
-        height = (
-            _PAD_V
-            + _metrics(TEXT_PX, medium=True).height()
-            + _metrics(TEXT_PX).height()
-            + _PAD_V
-            + 1  # The hairline.
-        )
-        if row.chips:
-            height += _CHIP_GAP + chip_height()
         # No width of its own: in list mode a row takes the viewport's width, so it never
         # outgrows the viewport when the vertical scroll bar appears.
-        return QSize(0, height)
+        return QSize(0, row_height(bool(row.chips)))

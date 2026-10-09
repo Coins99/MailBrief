@@ -12,12 +12,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidgetItem,
     QMenu,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from mailbrief.domain.drafts import KIND_NAMES, DraftKind, DraftSummary
+from mailbrief.ui.labels import outline_button
 from mailbrief.ui.lists import ActivatingList
 from mailbrief.ui.theme import TITLE_PX, ui_font
 
@@ -73,7 +73,7 @@ class DraftsPanel(QWidget):
         layout.addWidget(self.empty, 1)
         self.list.hide()
         buttons = QHBoxLayout()
-        self.new_button = QPushButton("Ne&w")
+        self.new_button = outline_button("Ne&w", "newDraftButton", mnemonic=True)
         self.new_menu = QMenu(self.new_button)
         for kind in NEW_KINDS:
             menu_action = self.new_menu.addAction(KIND_NAMES[kind])
@@ -81,11 +81,9 @@ class DraftsPanel(QWidget):
                 lambda _checked=False, chosen=kind: self._request_new(chosen)
             )
         self.new_button.setMenu(self.new_menu)
-        self.open_button = QPushButton("&Open")
-        self.delete_button = QPushButton("Delete draf&t")
+        self.open_button = outline_button("&Open", "openDraftButton", mnemonic=True)
+        self.delete_button = outline_button("Delete draf&t", "deleteDraftButton", mnemonic=True)
         for button in (self.new_button, self.open_button, self.delete_button):
-            button.setProperty("variant", "outline")
-            button.setAutoDefault(False)
             buttons.addWidget(button)
         buttons.addStretch(1)  # Buttons keep their own width.
         layout.addLayout(buttons)

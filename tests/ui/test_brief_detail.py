@@ -20,10 +20,10 @@ from mailbrief.ui.brief_detail import (
     DISMISS,
     BriefDetailPane,
     item_deadline_text,
-    outline_button,
     suggestion_meta,
 )
 from mailbrief.ui.hairline import HairlineFrame
+from mailbrief.ui.labels import outline_button
 from mailbrief.ui.theme import SMALL_PX
 from tests.factories import make_digest_item, make_proposal, make_suggestion
 from tests.ui.workspace_fixtures import ACCOUNT, DECK_ACTION, FINANCE_ACTION, ZONE, mockup_digest

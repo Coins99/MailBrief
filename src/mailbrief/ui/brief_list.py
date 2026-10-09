@@ -40,18 +40,33 @@ from mailbrief.domain.actions import ActionProposal, ProposalState
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind
 from mailbrief.domain.digests import SECTION_TITLES, DailyDigest, DigestItem
 from mailbrief.domain.messages import EmailContact
-from mailbrief.ui.hairline import hairline_pen
-from mailbrief.ui.theme import CAPTION_PX, RADIUS, SMALL_PX, TEXT_PX, current_tokens, ui_font
+from mailbrief.ui.hairline import hairline_pen, paint_focus_ring
+from mailbrief.ui.labels import cut_text
+from mailbrief.ui.theme import (
+    CAPTION_PX,
+    RADIUS,
+    SMALL_PX,
+    TEXT_PX,
+    Tokens,
+    current_tokens,
+    ui_font,
+    ui_metrics,
+)
 
 NO_SUBJECT: Final = "(no subject)"
 _UNRESOLVED_CHARS: Final = 24
 # A timed deadline up to this many days after the brief's day is named by its weekday.
 _WEEKDAY_DAYS: Final = 6
 
-# Item rows: padding, the chip row's gap, chip padding and spacing (logical px).
-_PAD_V: Final = 8
-_PAD_H: Final = 12
-_CHIP_GAP: Final = 4
+# Two-line rows, in the brief list and the run page's shortlist: padding, and the gap above
+# the chip row (logical px).
+ROW_PAD_V: Final = 8
+ROW_PAD_H: Final = 12
+CHIP_GAP: Final = 4
+SINGLE_LINE: Final = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter) | int(
+    Qt.TextFlag.TextSingleLine
+)
+# Chip padding and spacing (logical px).
 _CHIP_PAD_V: Final = 1
 _CHIP_PAD_H: Final = 6
 _CHIP_SPACING: Final = 6
@@ -121,10 +136,7 @@ def deadline_chip(
         day = item.deadline_date
         text = f"Due {day:%b} {day.day}"
     elif item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
-        phrase = item.deadline_text
-        if len(phrase) > _UNRESOLVED_CHARS:
-            phrase = phrase[: _UNRESOLVED_CHARS - 1] + "…"
-        text = f"Due {phrase}"
+        text = f"Due {cut_text(item.deadline_text, _UNRESOLVED_CHARS)}"
     return None if text is None else Chip(text, ChipTone.WARNING)
 
 
@@ -228,22 +240,17 @@ class BriefListModel(QAbstractListModel):
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
 
-def _metrics(px: int, *, medium: bool = False) -> QFontMetrics:
-    return QFontMetrics(ui_font(px, medium=medium))
-
-
 def chip_height() -> int:
-    return _metrics(CAPTION_PX).height() + 2 * _CHIP_PAD_V
+    return ui_metrics(CAPTION_PX).height() + 2 * _CHIP_PAD_V
 
 
 def paint_chips(painter: QPainter, chips: Sequence[Chip], left: int, top: int) -> None:
     """Rounded chips in a row from ``left``: warning or accent colours, caption text."""
     tokens = current_tokens()
-    font = ui_font(CAPTION_PX)
-    metrics = QFontMetrics(font)
+    metrics = ui_metrics(CAPTION_PX)
     height = chip_height()
     radius = min(RADIUS, height / 2)
-    painter.setFont(font)
+    painter.setFont(ui_font(CAPTION_PX))
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     x = left
     for chip in chips:
@@ -261,6 +268,79 @@ def paint_chips(painter: QPainter, chips: Sequence[Chip], left: int, top: int) -
         x += width + _CHIP_SPACING
 
 
+def flat(text: str) -> str:
+    """One line: elision measures the string as drawn, so line breaks become spaces."""
+    return " ".join(text.split())
+
+
+def elided(text: str, metrics: QFontMetrics, width: int) -> str:
+    """``text`` on one line, cut at the right with "…" to fit ``width``."""
+    return metrics.elidedText(flat(text), Qt.TextElideMode.ElideRight, width)
+
+
+def row_height(has_chips: bool) -> int:
+    """A two-line row's height: padding, the title and sender lines, the hairline, and the
+    chip row when there is one."""
+    height = (
+        ROW_PAD_V
+        + ui_metrics(TEXT_PX, medium=True).height()
+        + ui_metrics(TEXT_PX).height()
+        + ROW_PAD_V
+        + 1  # The hairline.
+    )
+    if has_chips:
+        height += CHIP_GAP + chip_height()
+    return height
+
+
+def paint_selection(
+    painter: QPainter, rect: QRect, state: QStyle.StateFlag, tokens: Tokens
+) -> None:
+    """A selected row's fill, and the 2 px accent bar at its left."""
+    if state & QStyle.StateFlag.State_Selected:
+        painter.fillRect(rect, QColor(tokens.selection))
+        painter.fillRect(
+            QRect(rect.left(), rect.top(), 2, rect.height()), QColor(tokens.accent_border)
+        )
+
+
+def paint_lines(
+    painter: QPainter,
+    left: int,
+    top: int,
+    width: int,
+    title: str,
+    sender: str,
+    *,
+    title_color: str,
+    sender_color: str,
+) -> int:
+    """The title, 13 px Medium and elided to ``width``, then ``sender`` as given, 13 px
+    (callers fit it to ``width``). Returns the y below the sender line."""
+    title_metrics = ui_metrics(TEXT_PX, medium=True)
+    painter.setFont(ui_font(TEXT_PX, medium=True))
+    painter.setPen(QColor(title_color))
+    painter.drawText(
+        QRect(left, top, width, title_metrics.height()),
+        SINGLE_LINE,
+        elided(title, title_metrics, width),
+    )
+    top += title_metrics.height()
+    sender_metrics = ui_metrics(TEXT_PX)
+    painter.setFont(ui_font(TEXT_PX))
+    painter.setPen(QColor(sender_color))
+    painter.drawText(QRect(left, top, width, sender_metrics.height()), SINGLE_LINE, sender)
+    return top + sender_metrics.height()
+
+
+def paint_separator(painter: QPainter, rect: QRect, tokens: Tokens) -> None:
+    """The cosmetic hairline along a row's bottom edge."""
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(hairline_pen(tokens.hairline))
+    bottom = rect.bottom()
+    painter.drawLine(QPointF(rect.left(), bottom), QPointF(rect.right(), bottom))
+
+
 class BriefItemDelegate(QStyledItemDelegate):
     """Paints header and item rows with ``drawText`` only."""
 
@@ -273,56 +353,31 @@ class BriefItemDelegate(QStyledItemDelegate):
         state: QStyle.StateFlag = option.state
         painter.save()
         if row.kind == "header":
-            font = ui_font(SMALL_PX)
-            painter.setFont(font)
+            painter.setFont(ui_font(SMALL_PX))
             painter.setPen(QColor(tokens.text_muted))
-            height = QFontMetrics(font).height()
-            target = QRect(rect.left() + _PAD_H, rect.top() + _HEADER_ABOVE, 0, height)
-            target.setRight(rect.right() - _PAD_H)
-            painter.drawText(target, _single_line(), row.title)
+            height = ui_metrics(SMALL_PX).height()
+            target = QRect(rect.left() + ROW_PAD_H, rect.top() + _HEADER_ABOVE, 0, height)
+            target.setRight(rect.right() - ROW_PAD_H)
+            painter.drawText(target, SINGLE_LINE, row.title)
             painter.restore()
             return
-        if state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(rect, QColor(tokens.selection))
-            painter.fillRect(
-                QRect(rect.left(), rect.top(), 2, rect.height()), QColor(tokens.accent_border)
-            )
+        paint_selection(painter, rect, state, tokens)
         width = max(0, rect.width() - _ELIDE_MARGIN)
-        left = rect.left() + _PAD_H
-        top = rect.top() + _PAD_V
-        title_font = ui_font(TEXT_PX, medium=True)
-        title_metrics = QFontMetrics(title_font)
-        painter.setFont(title_font)
-        painter.setPen(QColor(tokens.text))
-        painter.drawText(
-            QRect(left, top, width, title_metrics.height()),
-            _single_line(),
-            title_metrics.elidedText(_flat(row.title), Qt.TextElideMode.ElideRight, width),
+        left = rect.left() + ROW_PAD_H
+        top = paint_lines(
+            painter,
+            left,
+            rect.top() + ROW_PAD_V,
+            width,
+            row.title,
+            elided(row.sender, ui_metrics(TEXT_PX), width),
+            title_color=tokens.text,
+            sender_color=tokens.text_secondary,
         )
-        top += title_metrics.height()
-        sender_font = ui_font(TEXT_PX)
-        sender_metrics = QFontMetrics(sender_font)
-        painter.setFont(sender_font)
-        painter.setPen(QColor(tokens.text_secondary))
-        painter.drawText(
-            QRect(left, top, width, sender_metrics.height()),
-            _single_line(),
-            sender_metrics.elidedText(_flat(row.sender), Qt.TextElideMode.ElideRight, width),
-        )
-        top += sender_metrics.height()
         if row.chips:
-            top += _CHIP_GAP
-            paint_chips(painter, row.chips, left, top)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.setPen(hairline_pen(tokens.hairline))
-        bottom = rect.bottom()
-        painter.drawLine(QPointF(rect.left(), bottom), QPointF(rect.right(), bottom))
-        if state & QStyle.StateFlag.State_HasFocus and (
-            state & QStyle.StateFlag.State_KeyboardFocusChange
-        ):
-            painter.setPen(hairline_pen(tokens.accent_fg))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(QRectF(rect).adjusted(1, 1, -1, -1))
+            paint_chips(painter, row.chips, left, top + CHIP_GAP)
+        paint_separator(painter, rect, tokens)
+        paint_focus_ring(painter, rect, state, tokens.accent_fg)
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: _Index) -> QSize:
@@ -331,28 +386,8 @@ class BriefItemDelegate(QStyledItemDelegate):
         if not isinstance(row, BriefRow):
             return QSize(width, 0)
         if row.kind == "header":
-            return QSize(width, _HEADER_ABOVE + _metrics(SMALL_PX).height() + _HEADER_BELOW)
-        height = (
-            _PAD_V
-            + _metrics(TEXT_PX, medium=True).height()
-            + _metrics(TEXT_PX).height()
-            + _PAD_V
-            + 1  # The hairline.
-        )
-        if row.chips:
-            height += _CHIP_GAP + chip_height()
-        return QSize(width, height)
-
-
-def _single_line() -> int:
-    return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter) | int(
-        Qt.TextFlag.TextSingleLine
-    )
-
-
-def _flat(text: str) -> str:
-    """One line: elision measures the string as drawn, so line breaks become spaces."""
-    return " ".join(text.split())
+            return QSize(width, _HEADER_ABOVE + ui_metrics(SMALL_PX).height() + _HEADER_BELOW)
+        return QSize(width, row_height(bool(row.chips)))
 
 
 class BriefListView(QListView):

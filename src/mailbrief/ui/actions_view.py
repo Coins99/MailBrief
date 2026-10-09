@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
-    QPushButton,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -25,6 +24,7 @@ from mailbrief.domain.actions import Action, ActionFilter, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.labels import outline_button
 from mailbrief.ui.lists import ActivatingList
 from mailbrief.ui.proposals_view import pending_proposals
 from mailbrief.ui.theme import TITLE_PX, ui_font
@@ -150,18 +150,18 @@ class ActionsPanel(QWidget):
         self.tabs.currentChanged.connect(lambda _index: self._update_buttons())
         layout.addWidget(self.tabs)
         buttons = QHBoxLayout()
-        self.edit_button = QPushButton("&Edit…")
-        self.complete_button = QPushButton("Com&plete")
-        self.delete_button = QPushButton("De&lete")
-        self.source_button = QPushButton("Open s&ource")
+        self.edit_button = outline_button("&Edit…", "editButton", mnemonic=True)
+        self.complete_button = outline_button("Com&plete", "completeButton", mnemonic=True)
+        self.delete_button = outline_button("De&lete", "deleteButton", mnemonic=True)
+        self.source_button = outline_button("Open s&ource", "sourceButton", mnemonic=True)
         # K: the window's Sync and review already takes S.
-        self.seen_button = QPushButton("Mar&k seen")
+        self.seen_button = outline_button("Mar&k seen", "seenButton", mnemonic=True)
         self.seen_button.setToolTip("Clear the new-in-thread and you-replied notes.")
         # R: the other letters of "Proposals" are taken by Complete, Delete, Open source and
         # the window's Sync and review.
-        self.proposals_button = QPushButton("P&roposals…")
+        self.proposals_button = outline_button("P&roposals…", "proposalsButton", mnemonic=True)
         self.proposals_button.setToolTip("Review follow-up replies that propose an update.")
-        self.draft_button = QPushButton("Dra&ft…")
+        self.draft_button = outline_button("Dra&ft…", "draftButton", mnemonic=True)
         self.draft_menu = QMenu(self.draft_button)
         self.reply_draft = self.draft_menu.addAction("Reply to its email")
         self.reply_draft.triggered.connect(lambda: self._request_draft(DraftKind.REPLY))
@@ -184,8 +184,6 @@ class ActionsPanel(QWidget):
             self.proposals_button,
             self.draft_button,
         ):
-            button.setProperty("variant", "outline")
-            button.setAutoDefault(False)
             buttons.addWidget(button)
         buttons.addStretch(1)  # Buttons keep their own width.
         layout.addLayout(buttons)

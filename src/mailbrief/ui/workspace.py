@@ -45,7 +45,11 @@ from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus
 from mailbrief.services.history import coverage_line, coverage_short
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
-from mailbrief.ui.hairline import HairlineDivider, HairlineSplitter, hairline_pen
+from mailbrief.ui.hairline import (
+    HairlineDivider,
+    HairlineSplitter,
+    paint_focus_ring,
+)
 from mailbrief.ui.labels import ElidedLabel, button_label, plain_label
 from mailbrief.ui.theme import (
     CAPTION_PX,
@@ -98,14 +102,22 @@ def brief_title(digest: DailyDigest) -> str:
 
 def brief_meta(digest: DailyDigest, zone: ZoneInfo) -> tuple[str, str]:
     """The brief's account, save time and coverage: a short line to show, and the full
-    sentence for its accessible name."""
-    saved = digest.generated_at_utc.astimezone(zone)
+    sentence for its accessible name.
+
+    The save time is in the brief's own zone, like its coverage footer. When the owner's
+    zone, ``zone``, would show another time, the brief's zone is named.
+    """
+    saved = digest.generated_at_utc.astimezone(ZoneInfo(digest.timezone_name))
     if saved.date() > digest.local_date:
         when = f"{saved:%b} {saved.day} {saved:%H:%M}"
     else:
         when = f"{saved:%H:%M}"
-    short = [f"{digest.account_id} · saved {when}"]
-    full = f"{digest.account_id}. Saved {saved.isoformat(timespec='minutes')}."
+    # Compare offsets, not names: two names for one zone (Asia/Calcutta, Asia/Kolkata),
+    # or zones that agree at that moment, show the same time and need no name.
+    owner_offset = digest.generated_at_utc.astimezone(zone).utcoffset()
+    named = "" if saved.utcoffset() == owner_offset else f" ({digest.timezone_name})"
+    short = [f"{digest.account_id} · saved {when}{named}"]
+    full = f"{digest.account_id}. Saved {saved.isoformat(timespec='minutes')}{named}."
     coverage = digest.coverage
     if coverage is not None:
         if coverage.failed:
@@ -212,23 +224,11 @@ class _NavDelegate(QStyledItemDelegate):
         if isinstance(count, int):
             painter.setPen(QColor(tokens.text_secondary))
             painter.drawText(label, flags | int(Qt.AlignmentFlag.AlignRight), str(count))
-        if _keyboard_focus(state):
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            painter.setPen(hairline_pen(tokens.accent_fg))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(QRectF(rect).adjusted(1, 1, -1, -1))
+        paint_focus_ring(painter, rect, state, tokens.accent_fg)
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: _Index) -> QSize:
         return QSize(option.rect.width(), _NAV_ROW)
-
-
-def _keyboard_focus(state: QStyle.StateFlag) -> bool:
-    """The focus ring shows once the keyboard has moved focus, not on first show."""
-    return bool(
-        state & QStyle.StateFlag.State_HasFocus
-        and state & QStyle.StateFlag.State_KeyboardFocusChange
-    )
 
 
 class _NavList(QListView):

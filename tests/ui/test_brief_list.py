@@ -23,6 +23,7 @@ from mailbrief.ui.brief_list import (
     build_rows,
     deadline_chip,
     proposal_chip,
+    row_height,
     sender_text,
     sender_with_address,
 )
@@ -121,6 +122,18 @@ def test_deadline_chip_text(overrides: dict[str, object], expected: str | None) 
         assert chip == Chip(expected, ChipTone.WARNING)
         if overrides["deadline_precision"] is DeadlinePrecision.UNRESOLVED:
             assert len(expected) <= len("Due ") + 24
+
+
+def test_an_unresolved_deadline_is_cut_at_a_grapheme_boundary() -> None:
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
+    item = make_digest_item(
+        deadline_text="x" * 20 + family + " later",
+        deadline_precision=DeadlinePrecision.UNRESOLVED,
+        deadline_at_utc=None,
+    )
+    chip = deadline_chip(item, TORONTO, TODAY, TORONTO)
+    assert chip == Chip("Due " + "x" * 20 + "…", ChipTone.WARNING)
+    assert "\u200d" not in chip.text
 
 
 @pytest.mark.parametrize(
@@ -244,6 +257,8 @@ def test_chips_make_a_row_taller(view: BriefListView) -> None:
     without = delegate.sizeHint(option, view.model().index(2, 0))
     header = delegate.sizeHint(option, view.model().index(0, 0))
     assert with_chip.height() > without.height() > header.height() > 0
+    assert with_chip.height() == row_height(True)
+    assert without.height() == row_height(False)
 
 
 def test_selection_reports_the_email(view: BriefListView) -> None:

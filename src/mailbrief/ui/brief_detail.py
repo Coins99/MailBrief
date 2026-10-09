@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -33,9 +33,13 @@ from mailbrief.domain.digests import DigestItem
 from mailbrief.ui.brief_list import NO_SUBJECT, sender_with_address
 from mailbrief.ui.deadline_text import deadline_text
 from mailbrief.ui.hairline import HairlineFrame
-from mailbrief.ui.labels import button_label, plain_label, short_button_label, wrap_label
+from mailbrief.ui.labels import (
+    outline_button,
+    plain_label,
+    wrap_label,
+)
 from mailbrief.ui.proposals_view import effect_text
-from mailbrief.ui.theme import SMALL_PX, TEXT_PX, TITLE_PX, current_tokens, icon, icon_pixmap
+from mailbrief.ui.theme import SMALL_PX, TEXT_PX, TITLE_PX, current_tokens, icon_pixmap
 
 # What a suggestion or proposal request asks for.
 ACCEPT = "accept"
@@ -76,23 +80,6 @@ def is_gmail_link(url: str) -> bool:
     """Only https links on mail.google.com are ever offered for opening."""
     parts = urlsplit(url)
     return parts.scheme == "https" and parts.hostname == "mail.google.com"
-
-
-def outline_button(
-    text: str, name: str, icon_name: str | None = None, *, shorten: bool = False
-) -> QPushButton:
-    """An outline button named ``name``. With ``shorten``, long mail-derived text is cut to
-    one short line and the full text becomes the accessible name, never a tooltip."""
-    button = QPushButton(short_button_label(text) if shorten else button_label(text))
-    button.setObjectName(name)
-    if shorten:
-        button.setAccessibleName(text)
-    button.setProperty("variant", "outline")
-    button.setAutoDefault(False)
-    if icon_name is not None:
-        button.setIcon(icon(icon_name, current_tokens().text, _ICON_PX))
-        button.setIconSize(QSize(_ICON_PX, _ICON_PX))
-    return button
 
 
 class BriefDetailPane(QScrollArea):
@@ -275,7 +262,7 @@ class BriefDetailPane(QScrollArea):
     def _footer(self, item: DigestItem, account_email: str) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(8)
-        reply = outline_button("Draft a reply", "replyButton", "pencil")
+        reply = outline_button("Draft a reply", "replyButton", icon_name="pencil")
         reply.clicked.connect(
             lambda _checked=False, key=item.message_key: self.reply_requested.emit(
                 account_email, key
@@ -284,7 +271,9 @@ class BriefDetailPane(QScrollArea):
         row.addWidget(reply)
         source = str(item.source_url)
         if is_gmail_link(source):
-            open_gmail = outline_button("Open in Gmail", "openInGmailButton", "external-link")
+            open_gmail = outline_button(
+                "Open in Gmail", "openInGmailButton", icon_name="external-link"
+            )
             open_gmail.clicked.connect(
                 lambda _checked=False, url=source: self.source_requested.emit(url)
             )

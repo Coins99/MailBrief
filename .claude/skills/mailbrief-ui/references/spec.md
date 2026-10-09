@@ -34,6 +34,10 @@ All read colours from `current_tokens()` at paint time.
   antialiasing.
 - `HairlineSplitter(QSplitter)`: `handleWidth(5)` so it can be grabbed; its handle fills
   with panel and draws one cosmetic hairline at its centre.
+- `paint_focus_ring(painter, rect, state, color)`: the focus ring of the sidebar, brief
+  list and shortlist delegates, a 1px cosmetic rect inset by 1, painted only when
+  `keyboard_focus(state)` is true (focus that the keyboard moved, not focus on first
+  show).
 
 ## Brief list (`ui/brief_list.py`)
 
@@ -49,7 +53,8 @@ All read colours from `current_tokens()` at paint time.
   day the brief covers. "Within the week" is judged by the deadline's date in the owner's
   zone: DATETIME from today to today + 6 days `Due {local:%a %H:%M}`, any other DATETIME
   (past ones too) `Due {%b} {day} {%H:%M}`;
-  DATE `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters with "…";
+  DATE `Due {%b} {day}`; UNRESOLVED `Due ` + the phrase cut to 24 characters at a grapheme
+  boundary (`cut_text`), with "…";
   NONE no chip.
 - Proposal chip (ACCENT), from the first pending proposal: NEW_DEADLINE "Proposes a new
   deadline"; CANCELLED or DELIVERED "Proposes completing an action".
@@ -63,6 +68,9 @@ All read colours from `current_tokens()` at paint time.
   (text_secondary); chips after a 4px gap, 11px, padding 1 × 6, radius `min(8, h/2)`, 6px
   apart, warning or accent fg/bg; a cosmetic hairline at the bottom; with focus, a 1px
   cosmetic accent_fg rect inset by 1. Title and sender elide to the row width minus 24.
+- Shared with the run page's shortlist: `paint_selection`, `paint_lines`,
+  `paint_separator`, `row_height`, `elided`, `flat`, `SINGLE_LINE`, `ROW_PAD_V`,
+  `ROW_PAD_H` and `CHIP_GAP`; the focus ring is `paint_focus_ring()` from hairline.py.
 - View: objectName `briefList`, accessible name "Brief items", NoFrame,
   ScrollPerPixel, SingleSelection; `item_selected(DigestItem)`; `show_rows(rows)` selects
   the first item row; Return and Enter emit `activated` once and are consumed.
@@ -80,7 +88,9 @@ wraps instead of widening its container. Line breaks in the text are kept, and t
 so an address wraps after its `@` and a path after a slash before anywhere else.
 `hasHeightForWidth()` is True and `heightForWidth(w)` includes the contents margins;
 `sizeHint()` is at most 40 average characters wide with its matching height;
-`minimumSizeHint()` is 0 wide and one line high. It paints in the palette's
+`minimumSizeHint()` is 0 wide and one line high. Layouts are cached per width for the
+current text and font, at most 8 widths; a change of text or font, even by
+`QLabel.clear()`, drops them. It paints in the palette's
 `WindowText`, so the stylesheet's `tone` colours apply. `setText` keeps `text()` and makes
 the whole text the accessible name; no tooltip, no links.
 
@@ -115,9 +125,10 @@ line is a `WrapLabel`):
 9. Footer: "Draft a reply" (pencil) and, only for https links on mail.google.com,
    "Open in Gmail" (external-link).
 10. A stretch.
-Buttons: `button_label()` text, `variant="outline"`, `setAutoDefault(False)`, and an
-objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton`,
-`dismissProposalButton`, `replyButton` and `openInGmailButton`.
+Buttons are made with `outline_button()` (`button_label()` text, `variant="outline"`,
+`setAutoDefault(False)`) and have an objectName: `acceptButton`, `dismissButton`,
+`addToButton`, `applyProposalButton`, `dismissProposalButton`, `replyButton` and
+`openInGmailButton`.
 
 ## Workspace (`ui/workspace.py`)
 
@@ -148,10 +159,12 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
 - `BriefHeading` (`briefHeading`), at the top of the list pane, margins 12, 10, 12, 4,
   hidden until a brief is shown: `title` (13px Medium, `brief_title`: "Tue Oct 6", plus
   " · Partial" or " · Empty") and `meta` (11px muted, elided, `brief_meta`): "{account} ·
-  saved HH:MM" ("saved Oct 7 HH:MM" when saved on a later day), plus " · N failed",
-  " · N deferred" and " · Inbox sync incomplete". Its accessible name is the full
-  sentence: account, save time in the owner's zone, the coverage counts and whether the
-  Inbox sync was complete.
+  saved HH:MM" ("saved Oct 7 HH:MM" when saved on a later day in the brief's zone), plus
+  " · N failed", " · N deferred" and " · Inbox sync incomplete". The save time is in the
+  brief's own zone, like its coverage footer, with that zone named in parentheses when the
+  owner's zone would show a different time. Its accessible name is the full sentence:
+  account, save time in the brief's zone, the coverage counts and whether the Inbox sync
+  was complete.
 - `ThreePaneWorkspace`: objectName `workspace`. HeaderBar, a horizontal divider, then
   SidebarNav, a vertical divider and `pages`, a QStackedWidget. Page `today`
   (`todayPage`): `today_top` (a QVBoxLayout for banners) above a `HairlineSplitter`
@@ -227,7 +240,7 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
 - The shortlist stays a `QListWidget`: each item keeps its text (what is read aloud), its
   ID under `UserRole`, flags, check state and app-text tooltip. `review()` adds a
   `ShortlistRow(subject, name, address, chips, blocked)` under `ROW_ROLE`, and
-  `ShortlistDelegate` paints it like a brief row: selection fill and 2px `accent_border`
+  `ShortlistDelegate` paints it with the brief list's row helpers: selection fill and 2px `accent_border`
   bar, focus ring only after keyboard focus, subject 13px Medium, sender 13px secondary
   (`sender_line`: the whole "Name <address>" when it fits; else the name cut at its end
   before " <address>"; else the address alone, cut by `cut_address`; a long display name
@@ -282,12 +295,14 @@ objectName: `acceptButton`, `dismissButton`, `addToButton`, `applyProposalButton
   (`State_KeyboardFocusChange`), not on first show.
 - Suggestion cards: 4px between title and meta, 8px before each button row.
 - Long mail-derived button text ("Add to …", a proposal's effect) goes through
-  `short_button_label` (40 characters, then "…"), with the full text as the button's
+  `short_button_label` (40 characters, cut at a grapheme boundary, then "…"), with the full text as the button's
   accessible name; each "Add to" button has its own row.
 - Settings is a `_NavButton` painted like a page row (icon at `_ICON_X`, label at
   `_LABEL_X`), so it lines up with the pages.
 - `register_fonts()` returns False instead of raising; `apply_theme` then keeps Qt's font
-  and still applies the colours, and `main()` runs unthemed if the theme fails.
+  and still applies the colours. `apply_theme` is all or nothing. On failure it puts back
+  the stylesheet, style, palette and font it found, sets tokens from the restored palette
+  (`palette_tokens`) and raises; `main()` logs the failure and runs unthemed.
 
 ## Tests
 

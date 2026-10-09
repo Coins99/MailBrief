@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Final
 
 from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 FONT_FAMILY: Final = "Inter"
@@ -39,15 +39,39 @@ def register_fonts() -> bool:
     global _fonts_loaded
     if _fonts_loaded is None:
         _fonts_loaded = all(QFontDatabase.addApplicationFont(str(path)) != -1 for path in _FONTS)
+        release_font_cache()
     return _fonts_loaded
 
 
-def ui_font(px: int, *, medium: bool = False) -> QFont:
-    """Inter at a pixel size; point sizes would scale differently on each platform."""
+@functools.cache
+def _font(px: int, medium: bool) -> QFont:
     font = QFont(FONT_FAMILY)
     font.setPixelSize(px)
     font.setWeight(QFont.Weight.Medium if medium else QFont.Weight.Normal)
     return font
+
+
+def ui_font(px: int, *, medium: bool = False) -> QFont:
+    """Inter at a pixel size; point sizes would scale differently on each platform. A copy,
+    so a caller that changes it never changes the cached font."""
+    return QFont(_font(px, medium))
+
+
+@functools.cache
+def _metrics(px: int, medium: bool) -> QFontMetrics:
+    return QFontMetrics(_font(px, medium))
+
+
+def ui_metrics(px: int, *, medium: bool = False) -> QFontMetrics:
+    """The metrics of ``ui_font(px, medium=medium)``, built once per size and weight."""
+    return _metrics(px, medium)
+
+
+def release_font_cache() -> None:
+    """Drop the cached fonts and metrics: when the bundled fonts are registered, so nothing
+    measured with a fallback font is reused, and when the app is about to quit."""
+    _font.cache_clear()
+    _metrics.cache_clear()
 
 
 @functools.cache

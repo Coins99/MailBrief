@@ -8,7 +8,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile
-from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
 
@@ -17,14 +16,7 @@ from mailbrief.storage.recovery import BackupValidationError, restore_backup_hol
 from mailbrief.ui.diagnostics import configure_logging, log_failure, logger
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
-from mailbrief.ui.theme import (
-    DARK,
-    LIGHT,
-    ThemeMode,
-    Tokens,
-    apply_theme,
-    set_current_tokens,
-)
+from mailbrief.ui.theme import ThemeMode, apply_theme
 
 
 def create_application(arguments: Sequence[str] | None = None) -> QApplication:
@@ -36,12 +28,6 @@ def create_application(arguments: Sequence[str] | None = None) -> QApplication:
 
     application = QApplication(list(arguments) if arguments is not None else sys.argv)
     return application
-
-
-def palette_tokens(application: QApplication) -> Tokens:
-    """The tokens that suit the palette in effect: light on a light window colour."""
-    window = application.palette().color(QPalette.ColorRole.Window)
-    return LIGHT if window.lightness() > 127 else DARK
 
 
 async def run_desktop(theme_failure: Exception | None = None) -> None:
@@ -135,12 +121,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     try:
         apply_theme(application, ThemeMode.DARK)
     except Exception as exc:
-        # The theme is cosmetic: run unthemed rather than not at all, painting with the
-        # tokens that suit the palette in effect, so text stays readable on it. The package
-        # check reports missing fonts or icons; desktop.log isn't open yet, so the failure
-        # is logged once it is.
+        # The theme is cosmetic: apply_theme has put back what was there, with tokens that
+        # suit it, so the app runs unthemed rather than not at all. desktop.log isn't open
+        # yet, so the failure is logged once it is.
         theme_failure = exc
-        set_current_tokens(palette_tokens(application))
     application.setQuitOnLastWindowClosed(False)
     with QEventLoop(application) as loop:
         asyncio.set_event_loop(loop)

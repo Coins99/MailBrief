@@ -1,11 +1,19 @@
 """Cosmetic hairlines: cards, dividers and the splitter handle paint with token colours."""
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication, QLabel
+import pytest
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtWidgets import QApplication, QLabel, QStyle
 from pytestqt.qtbot import QtBot
 
-from mailbrief.ui.hairline import HairlineDivider, HairlineFrame, HairlineSplitter, hairline_pen
+from mailbrief.ui.hairline import (
+    HairlineDivider,
+    HairlineFrame,
+    HairlineSplitter,
+    hairline_pen,
+    keyboard_focus,
+    paint_focus_ring,
+)
 from mailbrief.ui.theme import DARK, apply_theme
 
 
@@ -53,3 +61,42 @@ def test_card_divider_and_splitter_paint_hairlines(
     assert row.count(QColor(DARK.hairline)) == 1
     assert row[(pixels - 1) // 2] == QColor(DARK.hairline)
     assert row[0] == row[-1] == QColor(DARK.panel)
+
+
+FOCUS = QStyle.StateFlag.State_HasFocus
+KEYBOARD = QStyle.StateFlag.State_KeyboardFocusChange
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (QStyle.StateFlag.State_None, False),
+        (FOCUS, False),
+        (KEYBOARD, False),
+        (FOCUS | KEYBOARD, True),
+    ],
+)
+def test_the_focus_ring_needs_keyboard_focus(state: QStyle.StateFlag, expected: bool) -> None:
+    assert keyboard_focus(state) is expected
+
+
+def ring_image(state: QStyle.StateFlag) -> QImage:
+    image = QImage(20, 20, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    paint_focus_ring(painter, QRect(0, 0, 20, 20), state, DARK.accent_fg)
+    painter.end()
+    return image
+
+
+def transparent(image: QImage) -> bool:
+    return all(
+        image.pixelColor(x, y).alpha() == 0
+        for x in range(image.width())
+        for y in range(image.height())
+    )
+
+
+def test_the_focus_ring_paints_only_after_keyboard_movement(qapp: QApplication) -> None:
+    assert transparent(ring_image(FOCUS))
+    assert not transparent(ring_image(FOCUS | KEYBOARD))

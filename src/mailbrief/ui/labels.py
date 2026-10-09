@@ -1,8 +1,9 @@
 """Safe text widgets: mail and AI text is always plain text, never rich text or a link."""
 
 import math
+from typing import Final
 
-from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtCore import QPointF, QSize, Qt, QTextBoundaryFinder
 from PySide6.QtGui import (
     QFontMetricsF,
     QPainter,
@@ -11,9 +12,10 @@ from PySide6.QtGui import (
     QTextLayout,
     QTextOption,
 )
-from PySide6.QtWidgets import QLabel, QSizePolicy
+from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy
 
-from mailbrief.ui.theme.assets import ui_font
+from mailbrief.ui.theme.assets import icon, ui_font
+from mailbrief.ui.theme.style import current_tokens
 
 
 def plain_label(
@@ -48,13 +50,81 @@ def button_label(text: str) -> str:
     return text.replace("&", "&&")
 
 
+_ELLIPSIS: Final = "…"
+
+
+def cut_text(text: str, limit: int) -> str:
+    """``text`` when it has at most ``limit`` characters; otherwise its start, cut at a
+    grapheme boundary, then "…", at most ``limit`` characters in all. A cut never splits an
+    emoji sequence, a flag or a letter from its accent."""
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    if len(text) <= limit:
+        return text
+    # QTextBoundaryFinder counts UTF-16 code units; Python counts code points.
+    units = [0]
+    for character in text:
+        units.append(units[-1] + (2 if ord(character) > 0xFFFF else 1))
+    index_of = {unit: index for index, unit in enumerate(units)}
+    finder = QTextBoundaryFinder(QTextBoundaryFinder.BoundaryType.Grapheme, text)
+    cut = 0
+    position = finder.toNextBoundary()
+    while position != -1 and index_of[position] <= limit - 1:
+        cut = index_of[position]
+        position = finder.toNextBoundary()
+    return text[:cut] + _ELLIPSIS
+
+
 def short_button_label(text: str, limit: int = 40) -> str:
     """Button text of at most ``limit`` characters, on one line, escaped like
     ``button_label``. Give the button the full text as its accessible name."""
-    flat = " ".join(text.split())
-    if len(flat) > limit:
-        flat = flat[: limit - 1] + "…"
-    return button_label(flat)
+    return button_label(cut_text(" ".join(text.split()), limit))
+
+
+OUTLINE_ICON_PX: Final = 14
+
+
+def outline_button(
+    text: str,
+    name: str,
+    *,
+    mnemonic: bool = False,
+    shorten: bool = False,
+    px: int | None = None,
+    icon_name: str | None = None,
+    accessible_name: str | None = None,
+) -> QPushButton:
+    """An outline button named ``name``; every outline button is made here.
+
+    ``text`` is escaped with button_label, so mail text can't create a mnemonic. App text
+    that carries its own ``&`` mnemonic passes ``mnemonic=True``. With ``shorten``, long
+    mail-derived text is cut by short_button_label and the full text becomes the
+    accessible name, never a tooltip. ``px`` sets the font size, ``icon_name`` adds a
+    bundled icon in the text colour, and ``accessible_name`` is what screen readers say
+    (without it, Qt reads the button's text).
+    """
+    if mnemonic and shorten:
+        raise ValueError("A shortened label can't carry a mnemonic.")
+    if mnemonic:
+        shown = text
+    elif shorten:
+        shown = short_button_label(text)
+    else:
+        shown = button_label(text)
+    button = QPushButton(shown)
+    button.setObjectName(name)
+    button.setProperty("variant", "outline")
+    button.setAutoDefault(False)
+    if shorten:
+        button.setAccessibleName(text)
+    if accessible_name is not None:
+        button.setAccessibleName(accessible_name)
+    if px is not None:
+        button.setFont(ui_font(px))
+    if icon_name is not None:
+        button.setIcon(icon(icon_name, current_tokens().text, OUTLINE_ICON_PX))
+        button.setIconSize(QSize(OUTLINE_ICON_PX, OUTLINE_ICON_PX))
+    return button
 
 
 class ElidedLabel(QLabel):
@@ -102,16 +172,21 @@ class ElidedLabel(QLabel):
 
 # Average characters a wrapping label asks for, at most, before it wraps.
 _WRAP_CHARS = 40
+# Widths a wrapping label keeps laid out for its current text and font.
+_LAYOUT_CACHE: Final = 8
 
 
 class WrapLabel(QLabel):
     """Plain text that wraps at word boundaries, or anywhere inside a token too long for
     its line, so no unbroken string (an address, a link, a long word) widens its
     container. Its height follows its width; its accessible name is the whole text; it
-    has no tooltip and no links."""
+    has no tooltip and no links. Layouts are cached per width for the current text and
+    font."""
 
     def __init__(self, text: str = "") -> None:
         super().__init__()
+        self._layouts: dict[float, tuple[QTextLayout, float, float]] = {}
+        self._layout_key: tuple[str, str] | None = None
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
         policy = self.sizePolicy()
@@ -122,11 +197,20 @@ class WrapLabel(QLabel):
 
     def setText(self, text: str) -> None:
         super().setText(text)
+        self._layouts.clear()
         self.setAccessibleName(text)
         self.updateGeometry()
 
     def _layout(self, width: float) -> tuple[QTextLayout, float, float]:
         """The text laid out at ``width``: the layout, its height and its widest line."""
+        key = (self.text(), self.font().key())
+        if key != self._layout_key:  # Text or font changed, even by QLabel.clear().
+            self._layouts.clear()
+            self._layout_key = key
+        width = max(width, 1.0)
+        cached = self._layouts.get(width)
+        if cached is not None:
+            return cached
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         # QTextLayout breaks lines at U+2028, not at a newline character.
@@ -142,11 +226,14 @@ class WrapLabel(QLabel):
             line = layout.createLine()
             if not line.isValid():
                 break
-            line.setLineWidth(max(width, 1.0))
+            line.setLineWidth(width)
             line.setPosition(QPointF(0, height))
             height += line.height()
             widest = max(widest, line.naturalTextWidth())
         layout.endLayout()
+        if len(self._layouts) >= _LAYOUT_CACHE:
+            self._layouts.clear()
+        self._layouts[width] = (layout, height, widest)
         return layout, height, widest
 
     def _one_line(self) -> int:

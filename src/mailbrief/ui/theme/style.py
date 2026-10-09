@@ -1,9 +1,11 @@
 """Fusion style, palette and stylesheet built from the design tokens."""
 
+import contextlib
 import dataclasses
 import string
+from collections.abc import Callable
 
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QProxyStyle,
@@ -14,8 +16,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mailbrief.ui.theme.assets import register_fonts, release_icon_cache, ui_font
-from mailbrief.ui.theme.tokens import DARK, TEXT_PX, ThemeMode, Tokens, tokens_for
+from mailbrief.ui.theme.assets import (
+    register_fonts,
+    release_font_cache,
+    release_icon_cache,
+    ui_font,
+)
+from mailbrief.ui.theme.tokens import DARK, LIGHT, TEXT_PX, ThemeMode, Tokens, tokens_for
 
 QSS = """\
 QWidget#workspace, QWidget#sidebar { background: $panel; }
@@ -111,27 +118,69 @@ class ThemeStyle(QProxyStyle):
 _style: ThemeStyle | None = None
 
 
+def palette_tokens(application: QApplication) -> Tokens:
+    """The tokens that suit the palette in effect: light on a light window colour."""
+    window = application.palette().color(QPalette.ColorRole.Window)
+    return LIGHT if window.lightness() > 127 else DARK
+
+
 def apply_theme(app: QApplication, mode: ThemeMode = ThemeMode.DARK) -> Tokens:
     """Apply Fusion (as ThemeStyle), the bundled font, the palette and the stylesheet for
-    ``mode``.
+    ``mode``, all or nothing.
 
-    Without the bundled font the app keeps Qt's font; the colours still apply.
+    Without the bundled font the app keeps Qt's font; the colours still apply. If a step
+    fails, the stylesheet, style, palette and font in effect before are put back, the
+    tokens follow the restored palette, and the error is raised for the caller to log.
     """
-    tokens = tokens_for(mode)
-    # A stylesheet wraps the style in a proxy that hides its name; clear it first.
-    app.setStyleSheet("")
-    global _style
-    if not isinstance(app.style(), ThemeStyle):
-        _style = ThemeStyle(QStyleFactory.create("Fusion"))
-        app.setStyle(_style)
-    if register_fonts():
-        app.setFont(ui_font(TEXT_PX))
-    app.setPalette(build_palette(tokens))
-    app.setStyleSheet(build_stylesheet(tokens))
-    set_current_tokens(tokens)
-    global _cache_hooked
+    global _style, _cache_hooked
+    stylesheet, palette, font = app.styleSheet(), app.palette(), app.font()
+    replaced: str | None = None  # The style's name, when this call replaces it.
+    try:
+        tokens = tokens_for(mode)
+        # A stylesheet wraps the style in a proxy that hides its name; clear it first.
+        app.setStyleSheet("")
+        if not isinstance(app.style(), ThemeStyle):
+            current = app.style()
+            base = current.baseStyle() if isinstance(current, QProxyStyle) else current
+            replaced = base.name()
+            _style = ThemeStyle(QStyleFactory.create("Fusion"))
+            app.setStyle(_style)
+        if register_fonts():
+            app.setFont(ui_font(TEXT_PX))
+        app.setPalette(build_palette(tokens))
+        app.setStyleSheet(build_stylesheet(tokens))
+        set_current_tokens(tokens)
+    except BaseException:
+        _restore(app, stylesheet, palette, font, replaced)
+        raise
     if not _cache_hooked:
-        # Release the cached icon pixmaps while Qt can still free them.
+        # Release the cached icon pixmaps, fonts and metrics while Qt can still free them.
         app.aboutToQuit.connect(release_icon_cache)
+        app.aboutToQuit.connect(release_font_cache)
         _cache_hooked = True
     return tokens
+
+
+def _restore(
+    app: QApplication, stylesheet: str, palette: QPalette, font: QFont, replaced: str | None
+) -> None:
+    """Put back what apply_theme found. Each step runs even if one before it fails, and no
+    failure here hides the error that made apply_theme fail."""
+    global _style
+    with contextlib.suppress(Exception):
+        app.setStyleSheet("")  # So app.style() below is the style itself, not a proxy.
+    if replaced is not None:
+        with contextlib.suppress(Exception):
+            app.setStyle(replaced)
+    with contextlib.suppress(Exception):
+        if not isinstance(app.style(), ThemeStyle):
+            _style = None  # ThemeStyle is no longer the app's style.
+    steps: tuple[Callable[[], object], ...] = (
+        lambda: app.setPalette(palette),
+        lambda: app.setFont(font),
+        lambda: app.setStyleSheet(stylesheet),
+        lambda: set_current_tokens(palette_tokens(app)),
+    )
+    for step in steps:
+        with contextlib.suppress(Exception):
+            step()

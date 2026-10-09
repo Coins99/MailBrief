@@ -21,7 +21,7 @@ from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.analysis import DeadlinePrecision
-from mailbrief.domain.digests import SyncStatus
+from mailbrief.domain.digests import SavedBriefSummary, SyncStatus
 from mailbrief.domain.preferences import OwnerPreferences
 from mailbrief.ports.errors import AuthenticationRequiredError
 from mailbrief.ui.actions_view import ActionsPanel
@@ -168,6 +168,26 @@ async def test_briefs_loads_then_shows_its_page(window: MainWindow, backend: Fak
     assert window.workspace.sidebar.current_key() == "briefs"
     assert window.history_panel.saved.count() == len(await backend.list_briefs())
     assert window.status.text() == "Open a saved brief, or brief a missed day."
+
+
+async def test_briefs_stays_away_when_the_owner_moved_while_it_loaded(
+    window: MainWindow, backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = asyncio.Event()
+    load = backend.list_briefs
+
+    async def held() -> tuple[SavedBriefSummary, ...]:
+        await release.wait()
+        return await load()
+
+    monkeypatch.setattr(backend, "list_briefs", held)
+    window.workspace.sidebar.page_requested.emit("briefs")
+    await settle()  # The load has started, from Today.
+    window.workspace.sidebar.page_requested.emit("drafts")  # Before Briefs has loaded.
+    release.set()
+    await finish(window)
+    assert window.workspace.current_page() == "drafts"
+    assert window.status.text() != "Open a saved brief, or brief a missed day."
 
 
 async def test_opening_a_saved_brief_lands_on_today_with_the_banner(

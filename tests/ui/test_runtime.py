@@ -182,8 +182,8 @@ def test_a_theme_failure_never_stops_the_desktop(
     from mailbrief.paths import AppPaths
     from mailbrief.ui.theme import DARK, LIGHT, current_tokens
 
-    def broken_theme(*args: object) -> None:
-        raise RuntimeError("Bundled fonts could not be loaded.")
+    def broken_stylesheet(*args: object) -> str:
+        raise RuntimeError("Theme stylesheet failed.")
 
     qt = QApplication.instance()
     assert isinstance(qt, QApplication)
@@ -192,7 +192,8 @@ def test_a_theme_failure_never_stops_the_desktop(
     palette.setColor(QPalette.ColorRole.Window, QColor(window_colour))
     qt.setPalette(palette)
     backend = FakeBackend()
-    monkeypatch.setattr(app, "apply_theme", broken_theme)
+    # A real step of the real apply_theme fails, so the tokens below prove its rollback.
+    monkeypatch.setattr("mailbrief.ui.theme.style.build_stylesheet", broken_stylesheet)
     monkeypatch.setattr(app, "DesktopRuntime", lambda path: backend)
     monkeypatch.setattr(
         AppPaths,

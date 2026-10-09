@@ -2,23 +2,28 @@
 
 import math
 
+import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetricsF
+from PySide6.QtGui import QFontMetricsF, QTextLayout
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
+from mailbrief.ui import labels
 from mailbrief.ui.labels import (
     ElidedLabel,
     WrapLabel,
     button_label,
+    cut_text,
+    outline_button,
     plain_label,
     short_button_label,
     wrap_label,
 )
-from mailbrief.ui.theme import CAPTION_PX, SIDEBAR_WIDTH, apply_theme
+from mailbrief.ui.theme import CAPTION_PX, SIDEBAR_WIDTH, apply_theme, ui_font
 from mailbrief.ui.workspace import SidebarNav
 
 HOSTILE = '<b>Win</b> & <a href="x">link</a>'
+FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
 
 
 def test_plain_label_is_plain_wrapped_text(qtbot: QtBot) -> None:
@@ -144,3 +149,105 @@ def test_a_path_wraps_after_its_slashes(qtbot: QtBot) -> None:
     assert len(lines) > 1
     assert all(not text or text.endswith("/") for text in lines[:-1])
     assert "​" not in label.text()
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "expected"),
+    [
+        ("a" * 50, 40, "a" * 39 + "…"),
+        ("x" * 36 + FAMILY + "tail", 40, "x" * 36 + "…"),  # A ZWJ sequence across the cut.
+        ("y" * 38 + "\U0001f1e8\U0001f1e6" + "zz", 40, "y" * 38 + "…"),  # A flag.
+        ("z" * 38 + "e\u0301" + "more", 40, "z" * 38 + "…"),  # A letter and its accent.
+        ("\U0001f600" * 30, 24, "\U0001f600" * 23 + "…"),  # Two UTF-16 units each.
+        ("short", 40, "short"),
+        ("x" * 40, 40, "x" * 40),
+    ],
+)
+def test_cut_text_cuts_at_a_grapheme_boundary(text: str, limit: int, expected: str) -> None:
+    result = cut_text(text, limit)
+    assert result == expected
+    assert len(result) <= limit
+    assert "\u200d" not in result or "\u200d" in expected
+
+
+def test_cut_text_needs_room_for_the_ellipsis() -> None:
+    with pytest.raises(ValueError):
+        cut_text("anything", 0)
+
+
+def test_short_button_label_never_splits_an_emoji() -> None:
+    short = short_button_label("Q&A " + "x" * 32 + FAMILY + " tail")
+    assert short == "Q&&A " + "x" * 32 + "…"
+    assert "\u200d" not in short
+
+
+def test_wrap_label_lays_its_text_out_once_per_width(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    label = WrapLabel("Some words that wrap across a narrow label")
+    qtbot.addWidget(label)
+    built: list[object] = []
+
+    def counting(*args: object) -> QTextLayout:
+        built.append(args)
+        return QTextLayout(*args)
+
+    monkeypatch.setattr(labels, "QTextLayout", counting)
+
+    def builds(width: int = 200) -> int:
+        before = len(built)
+        label.heightForWidth(width)
+        return len(built) - before
+
+    assert builds() == 1
+    assert builds() == 0  # Cached.
+    label.setText("other text")
+    assert builds() == 1
+    label.setFont(ui_font(15))
+    assert builds() == 1
+    label.clear()  # QLabel.clear() bypasses the Python setText.
+    assert builds() == 1
+    assert label.heightForWidth(120) == label.heightForWidth(120)
+    short = label.heightForWidth(120)
+    label.setText("much longer text " * 20)
+    assert label.heightForWidth(120) > short
+
+
+def test_outline_button_is_an_outline_button(qtbot: QtBot) -> None:
+    button = outline_button("Accept", "acceptButton")
+    qtbot.addWidget(button)
+    assert button.property("variant") == "outline"
+    assert not button.autoDefault()
+    assert button.objectName() == "acceptButton"
+
+
+def test_outline_button_text_is_escaped_unless_it_carries_a_mnemonic(qtbot: QtBot) -> None:
+    assert outline_button("Q&A", "x").text() == "Q&&A"
+    assert outline_button("&Open", "x", mnemonic=True).text() == "&Open"
+
+
+def test_a_shortened_outline_button_keeps_the_whole_text_for_screen_readers(
+    qtbot: QtBot,
+) -> None:
+    title = "Add to “" + "A & B " * 20 + "”"
+    button = outline_button(title, "addToButton", shorten=True)
+    qtbot.addWidget(button)
+    assert len(button.text().replace("&&", "&")) <= 40 and button.text().endswith("…")
+    assert "&&" in button.text()
+    assert button.accessibleName() == title
+    assert button.toolTip() == ""
+
+
+def test_outline_button_takes_a_size_and_an_icon(qtbot: QtBot) -> None:
+    sized = outline_button("Connect", "x", px=12)
+    assert sized.font().pixelSize() == 12
+    iconic = outline_button("Draft a reply", "replyButton", icon_name="pencil")
+    assert not iconic.icon().isNull()
+    assert (iconic.iconSize().width(), iconic.iconSize().height()) == (14, 14)
+    named = outline_button("&Connect Gmail", "x", mnemonic=True, accessible_name="Connect Gmail")
+    assert named.accessibleName() == "Connect Gmail"
+
+
+def test_a_shortened_outline_button_can_t_carry_a_mnemonic() -> None:
+    with pytest.raises(ValueError):
+        outline_button("&Open", "x", mnemonic=True, shorten=True)

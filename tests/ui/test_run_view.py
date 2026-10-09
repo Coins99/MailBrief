@@ -25,7 +25,7 @@ from pytestqt.qtbot import QtBot
 from mailbrief.domain.briefs import BriefRunResult, BriefStatus
 from mailbrief.domain.messages import EmailContact, RankedMessage
 from mailbrief.services.ranking import DECLINED_TEXT, OUTSIDE_REPLY_TEXT
-from mailbrief.ui.brief_list import Chip, ChipTone
+from mailbrief.ui.brief_list import Chip, ChipTone, row_height
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.run_view import (
     EXCLUDED,
@@ -180,6 +180,9 @@ async def test_rows_carry_their_chips_and_keep_their_text(window: MainWindow) ->
     assert item(window, "outside").text().endswith(OUTSIDE_REPLY_TEXT)
     assert item(window, "declined").text().endswith(DECLINED_TEXT)
     assert item(window, "blocked").text().endswith("excluded in Settings")
+    # Shortlist rows are as tall as the brief list's: with chips and without.
+    assert delegate(window).sizeHint(*row_option(window, "outside")).height() == row_height(True)
+    assert delegate(window).sizeHint(*row_option(window, "plain")).height() == row_height(False)
     window.cancel()
     await finish(window)
 

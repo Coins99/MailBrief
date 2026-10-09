@@ -135,14 +135,14 @@ from mailbrief.ui.drafts_view import OPEN as OPEN_DRAFT
 from mailbrief.ui.drafts_view import DraftsPanel
 from mailbrief.ui.hairline import HairlineDivider, HairlineFrame
 from mailbrief.ui.history_view import NEEDS_CONNECTION, BriefHistoryPanel
-from mailbrief.ui.labels import plain_label, wrap_label
+from mailbrief.ui.labels import outline_button, plain_label, wrap_label
 from mailbrief.ui.preferences import DesktopPreferences
 from mailbrief.ui.preferences_view import AUTO_DISCONNECTED, region_zones
 from mailbrief.ui.proposals_view import ProposalsDialog
 from mailbrief.ui.run_view import ROW_ROLE, ShortlistDelegate, shortlist_row
 from mailbrief.ui.scheduler import RefreshScheduler
 from mailbrief.ui.settings_view import SettingsDialog
-from mailbrief.ui.theme import CAPTION_PX, SMALL_PX, TITLE_PX, ui_font
+from mailbrief.ui.theme import CAPTION_PX, SMALL_PX, TITLE_PX
 from mailbrief.ui.workspace import ThreePaneWorkspace
 
 
@@ -318,26 +318,6 @@ def _ready_text(ready: int) -> str:
     if ready == 1:
         return "1 new message is ready to review."
     return f"{ready} new messages are ready to review."
-
-
-def _outline_button(
-    text: str, name: str, *, px: int | None = None, accessible_name: str | None = None
-) -> QPushButton:
-    """An app-authored outline button; ``text`` may carry its ``&`` mnemonic. Without
-    ``accessible_name``, Qt reads the button's text, so a label that changes stays read."""
-    button = QPushButton(text)
-    button.setObjectName(name)
-    _outline(button)
-    if accessible_name is not None:
-        button.setAccessibleName(accessible_name)
-    if px is not None:
-        button.setFont(ui_font(px))
-    return button
-
-
-def _outline(button: QPushButton) -> None:
-    button.setProperty("variant", "outline")
-    button.setAutoDefault(False)
 
 
 _RUN_WIDTH = 760
@@ -543,9 +523,9 @@ class MainWindow(QMainWindow):
         workspace = self.workspace = ThreePaneWorkspace()
         sidebar = workspace.sidebar
         # The header: when Gmail was last checked, then Sync and review and Cancel.
-        self.generate_button = _outline_button("&Sync and review", "generateButton")
+        self.generate_button = outline_button("&Sync and review", "generateButton", mnemonic=True)
         self.generate_button.setToolTip("Refresh today's Inbox or retry an incomplete run.")
-        self.cancel_button = _outline_button("&Cancel", "cancelButton")
+        self.cancel_button = outline_button("&Cancel", "cancelButton", mnemonic=True)
         workspace.header.add_widget(self.generate_button)
         workspace.header.add_widget(self.cancel_button)
         # The sidebar's rows, under the names the rest of the window uses.
@@ -558,11 +538,19 @@ class MainWindow(QMainWindow):
         self.connection.setObjectName("connectionStatus")
         self.ai = wrap_label("AI: checking configuration…", tone="muted", px=CAPTION_PX)
         self.ai.setObjectName("aiStatus")
-        self.connect_button = _outline_button(
-            "&Connect Gmail", "connectButton", px=SMALL_PX, accessible_name="Connect Gmail"
+        self.connect_button = outline_button(
+            "&Connect Gmail",
+            "connectButton",
+            mnemonic=True,
+            px=SMALL_PX,
+            accessible_name="Connect Gmail",
         )
-        self.disconnect_button = _outline_button(
-            "&Disconnect", "disconnectButton", px=SMALL_PX, accessible_name="Disconnect Gmail"
+        self.disconnect_button = outline_button(
+            "&Disconnect",
+            "disconnectButton",
+            mnemonic=True,
+            px=SMALL_PX,
+            accessible_name="Disconnect Gmail",
         )
         for line in (self.connection, self.ai):
             line.setContentsMargins(10, 0, 0, 0)  # In line with the rows' icons.
@@ -577,12 +565,14 @@ class MainWindow(QMainWindow):
         viewing.setSpacing(8)
         self.viewing_label = wrap_label("", tone="secondary", px=SMALL_PX)
         self.viewing_label.setObjectName("viewingLabel")
-        self.latest_button = _outline_button("Back to &latest", "latestButton")
+        self.latest_button = outline_button("Back to &latest", "latestButton", mnemonic=True)
         viewing.addWidget(self.viewing_label, 1)
         viewing.addWidget(self.latest_button)
         workspace.today_top.addWidget(self.viewing)
         self.viewing.hide()
-        self.retry_button = _outline_button("&Retry loading saved data", "retryButton")
+        self.retry_button = outline_button(
+            "&Retry loading saved data", "retryButton", mnemonic=True
+        )
         self.retry_button.clicked.connect(lambda: self.start(self.initialize))
         retry = QHBoxLayout()
         retry.setContentsMargins(12, 8, 12, 8)
@@ -635,14 +625,13 @@ class MainWindow(QMainWindow):
         assert card_layout is not None
         card_layout.addWidget(self.disclosure)
         consent_layout.addWidget(disclosure_card)
-        self.approve_button = QPushButton("&Approve transmission to Groq")
-        self.approve_button.setObjectName("approveButton")
-        self.decline_button = QPushButton("&Decline")
-        self.decline_button.setObjectName("declineButton")
+        self.approve_button = outline_button(
+            "&Approve transmission to Groq", "approveButton", mnemonic=True
+        )
+        self.decline_button = outline_button("&Decline", "declineButton", mnemonic=True)
         answers = QHBoxLayout()
         answers.setSpacing(8)
         for answer in (self.approve_button, self.decline_button):
-            _outline(answer)
             answers.addWidget(answer)
         answers.addStretch(1)
         consent_layout.addLayout(answers)
@@ -698,7 +687,7 @@ class MainWindow(QMainWindow):
         self.status = wrap_label("Loading saved brief…", tone="secondary", px=SMALL_PX)
         self.status.setObjectName("statusText")
         strip_layout.addWidget(self.status, 1)
-        self.undo_button = _outline_button("&Undo", "undoButton")
+        self.undo_button = outline_button("&Undo", "undoButton", mnemonic=True)
         self.undo_button.hide()
         self.undo_button.clicked.connect(lambda: self.start(self._undo_last, cancellable=False))
         strip_layout.addWidget(self.undo_button)
@@ -1923,18 +1912,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._note_not_refreshed(exc)
 
-    def _show_page_unless_moved(self, origin: str, key: str) -> None:
+    def _show_page_unless_moved(self, origin: str, key: str) -> bool:
         """Show ``key`` once a load finishes, unless the owner moved from ``origin``, the
-        page shown when it was requested, in the meantime."""
-        if self.workspace.current_page() == origin:
-            self._show_page(key)
+        page shown when it was requested, in the meantime; returns whether it did."""
+        if self.workspace.current_page() != origin:
+            return False
+        self._show_page(key)
+        return True
 
     async def _open_history(self) -> None:
         origin = self.workspace.current_page()
         await self._load_history()
-        if self.workspace.current_page() == origin:
+        if self._show_page_unless_moved(origin, "briefs"):
             self.status.setText("Open a saved brief, or brief a missed day.")
-            self._show_page("briefs")
 
     def _request_open_brief(self, account_email: str, local_date: date) -> None:
         self.start(lambda: self._show_brief(account_email, local_date), cancellable=False)
