@@ -472,18 +472,19 @@ async def test_malformed_envelopes_are_invalid_output(
     assert response.candidates == ()
 
 
-async def test_a_short_rate_limit_is_waited_out_once(
-    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
+@pytest.mark.parametrize("seconds", [2, 60], ids=["short", "one-token-window"])
+async def test_a_rate_limit_up_to_a_minute_is_waited_out_once(
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps, seconds: int
 ) -> None:
     limited = httpx.Response(
-        429, headers={"Retry-After": "2"}, json=error_body("rate_limit_exceeded")
+        429, headers={"Retry-After": str(seconds)}, json=error_body("rate_limit_exceeded")
     )
     route = respx_mock.post(CHAT_URL).mock(side_effect=[limited, good_answer()])
 
     response = await provider.analyze([make_request()])
 
     assert route.call_count == 2
-    assert sleeps.delays == [2.0]
+    assert sleeps.delays == [float(seconds)]
     assert len(response.candidates) == 1
 
 
@@ -754,10 +755,24 @@ async def test_a_token_window_smaller_than_the_last_call_paces_the_next_call(
     assert route.call_count == 2
 
 
+async def test_a_token_window_reset_a_minute_away_is_waited_out(
+    respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
+) -> None:
+    route = respx_mock.post(CHAT_URL).mock(
+        side_effect=[low_window_answer("1000", "60s"), good_answer()]
+    )
+
+    await provider.analyze([make_request()])
+    await provider.analyze([make_request()])
+
+    assert sleeps.delays == [60.0]
+    assert route.call_count == 2
+
+
 async def test_a_token_window_reset_beyond_the_ceiling_stops_before_sending(
     respx_mock: respx.MockRouter, provider: GroqProvider, sleeps: RecordedSleeps
 ) -> None:
-    route = respx_mock.post(CHAT_URL).mock(return_value=low_window_answer("1000", "45s"))
+    route = respx_mock.post(CHAT_URL).mock(return_value=low_window_answer("1000", "61s"))
 
     await provider.analyze([make_request()])
     with pytest.raises(ProviderRateLimitError):

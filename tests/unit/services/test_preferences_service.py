@@ -250,7 +250,7 @@ def test_each_limit_names_its_source(monkeypatch: pytest.MonkeyPatch) -> None:
         AILimit("ai_batch_size", 5, "environment"),
         AILimit("ai_body_character_limit", 2_000, "saved"),
         AILimit("ai_max_output_tokens", 4_000, "default"),
-        AILimit("ai_max_requests_per_run", 10, "default"),
+        AILimit("ai_max_requests_per_run", 20, "default"),
         AILimit("ai_timeout_seconds", 120, "default"),
     )
 

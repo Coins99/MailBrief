@@ -53,3 +53,12 @@ See [the implementation plan](../groq-migration-plan.md) and
 - The prompt version is `groq-2026-09-28.1`, so results cached under the earlier prompt
   are not reused. Nothing sent to Groq about the email changes, so the schema version (6)
   and the consent disclosure (version 2) stay as they were.
+
+## Amendment (2026-10-10)
+
+The default request cap per run is 20, up from 10: retries and second attempts count, so
+10 left no room for a retry when a brief sends its maximum of 10 messages. The longest
+wait MailBrief honors is 60 seconds, up from 30: Groq's token window is one minute, and
+on the free plan's 8,000 tokens a minute a brief often has to wait for it. A longer wait
+still stops the run. A limit saved in Preferences, or an explicit
+`MAILBRIEF_AI_MAX_REQUESTS_PER_RUN`, still wins over the default.

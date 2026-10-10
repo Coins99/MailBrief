@@ -25,6 +25,18 @@ the seven newer remote review-fix commits were merged into the Groq migration.
 
 ## Automated verification
 
+Windows, Python 3.13.15, dependencies from `uv.lock`, after the Groq merge (0d83330):
+
+- Initial focused Groq, analysis, brief, configuration and CLI tests: 159 passed.
+- Final full suite: **920 passed, 1 skipped** (Unix-domain-socket test on Windows).
+- Overall branch coverage: **95.57%**; synchronization 92%, ranking 97%, bodies and
+  digest 100%; Groq provider 96%.
+- Ruff formatting and lint: passed.
+- Strict mypy: passed for native, Windows and macOS targets (139 source files each).
+
+That Windows environment had locked package files, so verification used
+`UV_PROJECT_ENVIRONMENT=out/groq-venv` and `uv sync --locked --all-groups --link-mode copy`.
+
 macOS (Darwin), Python 3.13.15, dependencies from `uv.lock`, at the head of PR #12:
 
 - Full suite: **1009 passed, 2 skipped** (the two Qt GUI tests need a WindowServer
@@ -34,11 +46,11 @@ macOS (Darwin), Python 3.13.15, dependencies from `uv.lock`, at the head of PR #
 - Ruff formatting and lint: passed.
 - Strict mypy: passed for native, Windows and macOS targets (139 source files each).
 
+CI ran the same checks on Windows and macOS for PR #12, and both passed.
+
 Tests use mocked HTTP, synthetic messages and an in-memory credential vault. The full
 run reported 21 MSAL deprecation warnings and one SQLAlchemy connection-cleanup warning,
-with no failures. The prior environment had locked package files, so verification used
-`UV_PROJECT_ENVIRONMENT=out/groq-venv` and `uv sync --locked --all-groups --link-mode copy`.
-Test temporary files, cache and coverage output are under ignored `out/`.
+with no failures. Test temporary files, cache and coverage output are under ignored `out/`.
 
 The pre-migration baseline had 868 passing tests and 95.40% coverage. Its fixes for
 attempted-request reporting and per-run limits remain covered by the Groq tests.

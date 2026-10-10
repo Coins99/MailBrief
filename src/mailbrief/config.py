@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     ai_max_output_tokens: int = Field(
         default=4_000, ge=AI_OUTPUT_TOKENS_MIN, le=AI_OUTPUT_TOKENS_MAX
     )
-    ai_max_requests_per_run: int = Field(default=10, ge=1, le=AI_REQUESTS_MAX)
+    # Twice the largest brief, so a full brief can absorb one retry per message.
+    ai_max_requests_per_run: int = Field(default=20, ge=1, le=AI_REQUESTS_MAX)
     ai_timeout_seconds: float = Field(default=120, ge=AI_TIMEOUT_MIN, le=AI_TIMEOUT_MAX)
 
     @field_validator("graph_base_url")

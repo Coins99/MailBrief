@@ -86,7 +86,7 @@ def test_show_on_a_fresh_database_prints_the_defaults_and_creates_nothing(
         "  Messages per AI request: 1 (default)",
         "  Body characters sent: 4000 (default)",
         "  Output tokens: 4000 (default)",
-        "  Requests per run: 10 (default)",
+        "  Requests per run: 20 (default)",
         "  Timeout (seconds): 120 (default)",
     ]
     assert not path.exists()
