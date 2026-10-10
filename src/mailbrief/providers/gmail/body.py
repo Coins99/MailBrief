@@ -15,6 +15,7 @@ from email.message import Message
 from mailbrief.domain.bodies import MAX_EXTRACTED_CHARS, BodySource, MessageBody
 from mailbrief.ports.errors import ProviderResponseError
 from mailbrief.text.html_to_text import convert_html
+from mailbrief.text.prepare import readable_length
 
 MAX_SEPARATE_PART_BYTES = 1_000_000
 # Last-resort bound per decoded part. Responses are already capped at 2 MB and separately
@@ -171,13 +172,15 @@ async def _read_all(
 
 async def _resolve(segment: _Segment, counts: _Counts, fetch_part: PartFetcher) -> tuple[str, bool]:
     plain = await _read_all(segment.plain, counts, fetch_part)
-    if len(plain) >= STUB_PLAIN_CHARS or not segment.html:
+    # Links don't count, so a plain version that is mostly tracking links is a stub too.
+    plain_length = readable_length(plain)
+    if plain_length >= STUB_PLAIN_CHARS or not segment.html:
         return plain, False
     html, cut = convert_html(
         await _read_all(segment.html, counts, fetch_part), max_chars=MAX_EXTRACTED_CHARS
     )
     counts.truncated = counts.truncated or cut
-    if html and (not plain or len(html) > 3 * len(plain)):
+    if html and (not plain or readable_length(html) > 3 * plain_length):
         return html, True
     return plain, False
 

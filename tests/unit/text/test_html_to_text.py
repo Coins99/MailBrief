@@ -4,7 +4,13 @@ import time
 
 import pytest
 
-from mailbrief.text.html_to_text import MAX_QUOTE_DEPTH, convert_html, html_to_text
+from mailbrief.text.html_to_text import (
+    DEFAULT_MAX_CHARS,
+    MAX_QUOTE_DEPTH,
+    _TextBuilder,
+    convert_html,
+    html_to_text,
+)
 
 
 def test_blocks_lists_and_tables_become_lines() -> None:
@@ -108,6 +114,37 @@ def test_conversion_stops_at_the_size_limit_and_says_so() -> None:
 
 def test_blank_lines_do_not_pile_up() -> None:
     assert html_to_text("<br>" * 100_000 + "<p></p>" * 50_000 + "end") == "end"
+
+
+def test_pre_keeps_its_line_breaks_but_not_its_spacing() -> None:
+    assert html_to_text("<pre>one\n    two   indented\nthree</pre>") == "one\ntwo indented\nthree"
+
+
+def test_pre_line_breaks_end_with_the_pre() -> None:
+    markup = "<div><pre>one\ntwo</div><p>three\nfour</p>"
+    assert html_to_text(markup) == "one\ntwo\n\nthree four"
+
+
+def test_hidden_pre_stays_hidden() -> None:
+    markup = (
+        '<pre style="display:none">secret\nlines</pre><pre hidden>more</pre>'
+        "<div hidden><pre>nested\nsecret</pre></div><p>Shown\ntext</p>"
+    )
+    assert html_to_text(markup) == "Shown text"
+
+
+def test_pre_newlines_finish_fast_and_do_not_pile_up() -> None:
+    builder = _TextBuilder(DEFAULT_MAX_CHARS)
+    started = time.perf_counter()
+    builder.feed("<pre>" + "\n" * 100_000 + "x</pre>")
+    builder.close()
+    assert time.perf_counter() - started < 10.0  # Catches runaway slowness, not busy CI.
+    assert builder.text() == "x"
+    empty_run = longest = 0
+    for _, fragments in builder._lines:
+        empty_run = 0 if fragments else empty_run + 1
+        longest = max(longest, empty_run)
+    assert longest <= 2
 
 
 @pytest.mark.parametrize(

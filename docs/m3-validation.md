@@ -37,14 +37,21 @@ Across all runs, sync completed, nothing crashed, and no email text was saved or
 - Whitespace could use up the text limit.
 - Four crafted inputs caused slowdowns or crashes.
 
+## Fixed after M3
+
+Fixed in PR #40:
+
+- R1: a forward with a non-English separator line and a changed subject lost its forwarded
+  content. Any phrase of up to 80 characters between two runs of 8 or more dashes now marks a
+  forward, which covers Gmail's separator in every language and Thunderbird's.
+- R2: a plain-text version that was mostly tracking links was chosen over a rich HTML
+  version. Links no longer count toward a plain-text version's length.
+- R3: preformatted (`<pre>`) text was flattened onto one line. Its line breaks are now kept;
+  spaces within a line still collapse.
+
 ## Known limitations
 
-These are still open; a follow-up PR is planned after M4.
-
-- R1: a forward with a non-English separator line and a changed subject loses its
-  forwarded content.
-- R2: a plain-text version that is mostly tracking links is chosen over a rich HTML version.
-- R3: preformatted (`<pre>`) text is flattened onto one line.
+- Apple Mail's "Begin forwarded message:" is recognized only in English.
 
 ## Automated results at `83e8536`
 

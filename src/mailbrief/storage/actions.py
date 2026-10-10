@@ -4,7 +4,7 @@ repositories.py imports this module, so it must never import repositories.py.
 """
 
 import logging
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -32,7 +32,7 @@ from mailbrief.domain.analysis import (
     TargetReason,
 )
 from mailbrief.domain.messages import EmailContact, is_own_message, own_addresses
-from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
+from mailbrief.storage.database import sorted_batches
 from mailbrief.storage.proposals import ProposalRepository, proposal_from_row
 from mailbrief.storage.tables import (
     AccountTable,
@@ -106,12 +106,6 @@ def suggestion_from_row(row: ActionSuggestionTable) -> ActionSuggestion:
     )
 
 
-def _chunks[T: (int, str)](values: Iterable[T]) -> Iterator[list[T]]:
-    ordered = sorted(set(values))
-    for start in range(0, len(ordered), MAX_SQLITE_BATCH_SIZE):
-        yield ordered[start : start + MAX_SQLITE_BATCH_SIZE]
-
-
 def _state(
     decision: SuggestionDecisionTable | None,
     actions: Mapping[int, tuple[str, datetime | None]],
@@ -153,7 +147,9 @@ async def suggestion_views(
     """
     wanted: list[tuple[int, int | None]] = list(pairs)
     rows: dict[int, list[ActionSuggestionTable]] = {}
-    for chunk in _chunks(analysis_id for _, analysis_id in wanted if analysis_id is not None):
+    for chunk in sorted_batches(
+        analysis_id for _, analysis_id in wanted if analysis_id is not None
+    ):
         result = await session.scalars(
             select(ActionSuggestionTable)
             .where(ActionSuggestionTable.analysis_id.in_(chunk))
@@ -166,7 +162,7 @@ async def suggestion_views(
     # messages are unique on these, so each identity names one message.
     identities: dict[tuple[str, str, str], int] = {}
     with_suggestions = (message_id for message_id, analysis_id in wanted if analysis_id in rows)
-    for chunk in _chunks(with_suggestions):
+    for chunk in sorted_batches(with_suggestions):
         result_identities = await session.execute(
             select(
                 MessageTable.id,
@@ -183,7 +179,9 @@ async def suggestion_views(
     decisions: dict[tuple[int, str], SuggestionDecisionTable] = {}
     providers = sorted({provider for provider, _, _ in identities})
     account_ids = sorted({account_id for _, account_id, _ in identities})
-    for chunk_ids in _chunks(provider_message_id for _, _, provider_message_id in identities):
+    for chunk_ids in sorted_batches(
+        provider_message_id for _, _, provider_message_id in identities
+    ):
         # The account filters let SQLite use the identity index; the match below is exact.
         result_decisions = await session.scalars(
             select(SuggestionDecisionTable).where(
@@ -205,7 +203,7 @@ async def suggestion_views(
         for decision in decisions.values()
         if decision.decision == SuggestionState.ACCEPTED.value and decision.action_id is not None
     )
-    for chunk in _chunks(accepted):
+    for chunk in sorted_batches(accepted):
         result_actions = await session.execute(
             select(ActionTable.id, ActionTable.public_id, ActionTable.deleted_at_utc).where(
                 ActionTable.id.in_(chunk)
@@ -546,7 +544,7 @@ class ActionRepository:
             .label("is_source")
         )
         found: list[ThreadLinkRow] = []
-        for chunk in _chunks(message_keys):
+        for chunk in sorted_batches(message_keys):
             result = await self._session.execute(
                 select(
                     MessageTable.provider_message_id,
@@ -626,7 +624,7 @@ class ActionRepository:
         chunked query each, and thread activity with a fixed number more."""
         ids = [row.id for row in rows]
         steps: dict[int, list[ActionStepTable]] = {}
-        for chunk in _chunks(ids):
+        for chunk in sorted_batches(ids):
             step_result = await self._session.scalars(
                 select(ActionStepTable)
                 .where(ActionStepTable.action_id.in_(chunk))
@@ -635,7 +633,7 @@ class ActionRepository:
             for step in step_result:
                 steps.setdefault(step.action_id, []).append(step)
         sources: dict[int, list[tuple[ActionSourceTable, bool | None]]] = {}
-        for chunk in _chunks(ids):
+        for chunk in sorted_batches(ids):
             source_result = await self._session.execute(
                 select(ActionSourceTable, MessageTable.is_in_inbox)
                 .outerjoin(MessageTable, ActionSourceTable.message_id == MessageTable.id)
@@ -678,7 +676,7 @@ class ActionRepository:
                     identity = (source.provider, source.provider_account_id)
                     threads.setdefault(identity, set()).add(source.provider_thread_id)
         accounts: dict[tuple[str, str], tuple[int, frozenset[str]]] = {}
-        for chunk in _chunks(identity[1] for identity in threads):
+        for chunk in sorted_batches(identity[1] for identity in threads):
             found = await self._session.execute(
                 select(
                     AccountTable.id,
@@ -696,7 +694,7 @@ class ActionRepository:
                     )
         cached: dict[tuple[int, str], list[_ThreadMessage]] = {}
         for identity, (account_id, _) in accounts.items():
-            for chunk in _chunks(threads[identity]):
+            for chunk in sorted_batches(threads[identity]):
                 found_messages = await self._session.execute(
                     select(
                         MessageTable.conversation_id,

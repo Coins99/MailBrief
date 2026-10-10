@@ -4,7 +4,7 @@ Drafts and versions change through ORM objects only, never bulk statements, so r
 already loaded in the session always show what was last written.
 """
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 
 from pydantic import HttpUrl
@@ -26,7 +26,7 @@ from mailbrief.domain.drafts import (
     DraftVersionOrigin,
     first_line,
 )
-from mailbrief.storage.database import MAX_SQLITE_BATCH_SIZE
+from mailbrief.storage.database import sorted_batches
 from mailbrief.storage.tables import (
     ActionSourceTable,
     ActionTable,
@@ -36,12 +36,6 @@ from mailbrief.storage.tables import (
     DraftVersionTable,
     MessageTable,
 )
-
-
-def _chunks(values: Iterable[int]) -> Iterator[list[int]]:
-    ordered = sorted(set(values))
-    for start in range(0, len(ordered), MAX_SQLITE_BATCH_SIZE):
-        yield ordered[start : start + MAX_SQLITE_BATCH_SIZE]
 
 
 def content_of(row: DraftTable | DraftVersionTable) -> DraftEdit:
@@ -304,7 +298,7 @@ class DraftRepository:
     async def action_public_ids(self, action_ids: Iterable[int]) -> dict[int, str]:
         """Live actions' public IDs by row ID; a soft-deleted action is not linked."""
         found: dict[int, str] = {}
-        for chunk in _chunks(action_ids):
+        for chunk in sorted_batches(action_ids):
             result = await self._session.execute(
                 select(ActionTable.id, ActionTable.public_id).where(
                     ActionTable.id.in_(chunk), ActionTable.deleted_at_utc.is_(None)
@@ -317,7 +311,7 @@ class DraftRepository:
         """Domain drafts for rows, reading sources and action links in chunked queries."""
         ids = [row.id for row in rows]
         sources: dict[int, list[DraftSourceTable]] = {}
-        for chunk in _chunks(ids):
+        for chunk in sorted_batches(ids):
             result = await self._session.scalars(
                 select(DraftSourceTable)
                 .where(DraftSourceTable.draft_id.in_(chunk))
@@ -349,7 +343,7 @@ class DraftRepository:
             ).all()
         )
         subjects: dict[int, str] = {}
-        for chunk in _chunks(row.id for row in rows):
+        for chunk in sorted_batches(row.id for row in rows):
             result = await self._session.execute(
                 select(DraftSourceTable.draft_id, DraftSourceTable.subject)
                 .where(DraftSourceTable.draft_id.in_(chunk))

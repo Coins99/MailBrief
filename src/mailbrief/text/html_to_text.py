@@ -116,6 +116,8 @@ class _TextBuilder(HTMLParser):
         self._open_counts: dict[str, int] = {}
         self._lines: list[tuple[int, list[str]]] = [(0, [])]
         self._quote_depth = 0
+        # Visible <pre> elements open; while there is one, text keeps its line breaks.
+        self._pre_depth = 0
         self._max_chars = max_chars
         self._size = 0
         self.truncated = False
@@ -163,6 +165,8 @@ class _TextBuilder(HTMLParser):
             return
         if tag == "blockquote":
             self._quote_depth += 1
+        elif tag == "pre":
+            self._pre_depth += 1
         if tag in _BLOCK:
             self._new_line()
         if tag == "li":
@@ -188,13 +192,23 @@ class _TextBuilder(HTMLParser):
                 self._open_counts[name] -= 1
                 if name == "blockquote" and not hidden:
                     self._quote_depth -= 1
+                elif name == "pre" and not hidden:
+                    self._pre_depth -= 1
             if tag in _BLOCK and tag not in _LINE_ITEMS and not closed[0][1]:
                 self._new_line()
             return
 
     def handle_data(self, data: str) -> None:
-        if not self._inside_hidden():
+        if self._inside_hidden():
+            return
+        if not self._pre_depth:
             self._append(data)
+            return
+        # Spaces within each line still collapse, and _new_line stops empty lines piling up.
+        for index, line in enumerate(data.split("\n")):
+            if index:
+                self._new_line()
+            self._append(line)
 
     def text(self) -> str:
         rendered: list[str] = []

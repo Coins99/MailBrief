@@ -7,6 +7,7 @@ from mailbrief.text.prepare import (
     clean_generated_text,
     looks_like_forward,
     normalize_text,
+    readable_length,
     trim_quoted_history,
     truncate_at_boundary,
 )
@@ -100,6 +101,41 @@ def test_forwards_are_never_trimmed() -> None:
 
 
 @pytest.mark.parametrize(
+    "separator",
+    [
+        "---------- Weitergeleitete Nachricht ---------",
+        "-------- Weitergeleitete Nachricht --------",
+    ],
+    ids=["gmail", "thunderbird"],
+)
+def test_forward_separators_in_other_languages_keep_the_forward(separator: str) -> None:
+    # The subject has no "Fwd:", so only the separator shows that this is a forward.
+    text = (
+        f"FYI\n\n{separator}\nFrom: Pat <pat@example.com>\nDate: Mon, 21 Sept 2026 at 09:00\n"
+        "Subject: Budget\nTo: Alex <alex@example.com>\n\nThe budget is approved."
+    )
+    assert trim_quoted_history(text, is_forward=looks_like_forward("Budget")) == (text, False)
+
+
+def test_outlook_original_message_line_is_still_a_reply_header() -> None:
+    text = (
+        "Sounds good.\n\n-----Original Message-----\nFrom: Alex\nSent: Monday\n"
+        "Subject: Meeting\n\nCan we meet at 3?"
+    )
+    assert trim_quoted_history(text) == ("Sounds good.", True)
+
+
+@pytest.mark.parametrize(
+    "dashes",
+    ["-" * 30, "-------- -------- --------", "---------- - ----------"],
+    ids=["unbroken", "spaced", "single-dash"],
+)
+def test_a_line_of_dashes_alone_is_not_a_forward_marker(dashes: str) -> None:
+    text = f"Sounds good.\n\n{dashes}\n\nOn Mon, Alex wrote:\n> Can we meet at 3?"
+    assert trim_quoted_history(text) == (f"Sounds good.\n\n{dashes}", True)
+
+
+@pytest.mark.parametrize(
     ("subject", "expected"),
     [
         ("Fwd: Budget", True),
@@ -155,6 +191,16 @@ def test_truncation_prefers_line_then_word_boundaries() -> None:
     assert truncate_at_boundary("aaaaaaaaa\nbbbbbbbbbb", 12) == ("aaaaaaaaa", True)
     assert truncate_at_boundary("aaaaaaaaa bbbbbbbbbb", 12) == ("aaaaaaaaa", True)
     assert truncate_at_boundary("a" * 30, 12) == ("a" * 12, True)
+
+
+def test_readable_length_leaves_out_links_and_whitespace() -> None:
+    text = (
+        "See the plan (https://x.example.test/a) and [mailto:pat@example.com]\n"
+        "<tel:+15550100>\t https://x.example.test/b?u=1 now"
+    )
+    assert readable_length(text) == len("Seetheplanandnow")
+    assert readable_length("  a b\n\tc ") == 3
+    assert readable_length("") == 0
 
 
 def test_bracketed_links_are_removed_without_leftover_brackets() -> None:

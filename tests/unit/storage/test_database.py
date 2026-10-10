@@ -7,7 +7,12 @@ import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import StatementError
 
-from mailbrief.storage.database import Database, sqlite_url
+from mailbrief.storage.database import (
+    MAX_SQLITE_BATCH_SIZE,
+    Database,
+    sorted_batches,
+    sqlite_url,
+)
 from mailbrief.storage.tables import AccountTable, Base, MessageTable
 
 
@@ -18,6 +23,29 @@ def test_sqlite_url_uses_absolute_posix_path(tmp_path: Path) -> None:
 
     assert url.startswith("sqlite+aiosqlite:///")
     assert database_path.resolve().as_posix() in url
+
+
+def test_sorted_batches_removes_duplicates_and_sorts() -> None:
+    assert list(sorted_batches([3, 1, 2, 3, 1])) == [[1, 2, 3]]
+
+
+def test_sorted_batches_hold_at_most_the_batch_size() -> None:
+    batches = list(sorted_batches(range(250, 0, -1)))
+
+    assert MAX_SQLITE_BATCH_SIZE == 100
+    assert [len(batch) for batch in batches] == [100, 100, 50]
+    assert [value for batch in batches for value in batch] == list(range(1, 251))
+
+
+def test_sorted_batches_of_nothing_is_no_batches() -> None:
+    nothing: list[int] = []
+
+    assert list(sorted_batches(nothing)) == []
+
+
+def test_sorted_batches_takes_ints_and_strings() -> None:
+    assert list(sorted_batches([20, 3, 100])) == [[3, 20, 100]]
+    assert list(sorted_batches(["b", "c", "a", "b"])) == [["a", "b", "c"]]
 
 
 def test_metadata_contains_all_initial_tables() -> None:
