@@ -299,6 +299,11 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   statement/branch gate.
 - Tests run SQLite without disk flushes, CI runs tests in parallel (`pytest -n auto`), and CI
   runs macOS in Toronto and Windows in Tokyo time.
+- `tests/unit/test_source_rules.py` enforces two source rules, naming the file and line of
+  each slip: no strftime directive that follows the system language (`%a`, `%A`, `%b`, `%B`,
+  `%p`, `%c`, `%x`) anywhere in `src/mailbrief`, since weekday and month names come from
+  `ui/deadline_text.py`; and no hex colour literal in `src/mailbrief/ui` outside
+  `ui/theme/tokens.py`.
 
 ## UI work
 

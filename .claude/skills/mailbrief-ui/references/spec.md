@@ -206,8 +206,11 @@ stay ISO, since dates are typed there, and the CLI is unchanged
 The brief list's chips keep their shorter forms (see Brief list).
 - Weekday and month names are the fixed English `WEEKDAYS` and `MONTHS` of
   `deadline_text.py`, never `%a` or `%b`: Qt applies the system language to C date
-  formatting, so a French Mac would otherwise print "lun." and "août". No file in `ui` uses the
-  weekday or month strftime directives.
+  formatting, so a French Mac would otherwise print "lun." and "août". No file anywhere in
+  `src/mailbrief` uses a strftime directive that follows the system language (`%a`, `%A`,
+  `%b`, `%B`, `%p`, `%c`, `%x`): `tests/unit/test_source_rules.py` fails, naming the file and
+  line, if one appears. Wording a person reads therefore lives in `ui`, which can use these
+  helpers; services keep ISO dates (`coverage_line`, which the CLI prints).
 - Qt's own widgets take their month and weekday names (the calendar pop-ups of Saved mail
   and the action editor) from the default `QLocale`, which follows the system language.
   `use_english_locale()` in `app.py` sets it to English, and `app.main()` calls it right
@@ -228,13 +231,15 @@ The brief list's chips keep their shorter forms (see Brief list).
   `day_text` with the owner's day ("Sun Sep 20, 10:30", "Sun Dec 20, 2026, 15:30").
   Proposal rows show when the email arrived with `moment_text`.
 - Everywhere else a date appears it is the same style, with the owner's day (so a day in
-  another year names it): the Briefs page's saved-brief rows ("Thu Sep 3 · complete · 1
-  item · …"), missed days ("Fri Sep 4 · no brief") and the Replace sentence; MainWindow's
-  "Viewing the brief for Thu Sep 3." banner and the "Showing the brief for …" and "the
-  Inbox for …" status lines; Drafts' "updated Mon Sep 28, 10:05" and the draft editor's
-  version times; the Preferences automatic-analysis line ("since Tue Sep 29"); the Data
-  dialog's backup time ("Valid backup from Thu Oct 8, 17:00", in the owner's zone, set the
-  way `cached_dialog.zone` is), and a completed action ("Completed Tue Oct 6").
+  another year names it): Today's coverage footer (`coverage_short` in `ui/workspace.py`:
+  "Inbox on Oct 6, up to 09:14", "Inbox on Dec 31, 2025, up to 09:14"); the Briefs page's
+  saved-brief rows ("Thu Sep 3 · Complete · 1 item · …"), missed days ("Fri Sep 4 · no
+  brief") and the Replace sentence; MainWindow's "Viewing the brief for Thu Sep 3." banner
+  and the "Showing the brief for …" and "the Inbox for …" status lines; Drafts' "updated
+  Mon Sep 28, 10:05" and the draft editor's version times; the Preferences
+  automatic-analysis line ("since Tue Sep 29"); the Data dialog's backup time ("Valid
+  backup from Thu Oct 8, 17:00", in the owner's zone, set the way `cached_dialog.zone`
+  is), and a completed action ("Completed Tue Oct 6").
 - An action row's second line is only the completed day, target, deadline and steps; "Carried
   over" and "Source no longer in local mail" are the detail pane's, not the row's.
 
@@ -277,17 +282,18 @@ The brief list's chips keep their shorter forms (see Brief list).
   SidebarNav, a vertical divider and `pages`, a QStackedWidget. Page `today`
   (`todayPage`): `today_top` (a QVBoxLayout for banners) above a `HairlineSplitter`
   holding the list pane (the heading, `BriefListView` and an 11px muted coverage footer,
-  margins 12, 10, 12, 10: one elided line of `coverage_short`, with `coverage_line` as
-  its accessible name) and the `BriefDetailPane`; stretch 4:5, not collapsible, minimum
-  widths 220 and 280. `add_page(key, widget)`, `show_page(key)` (KeyError for an unknown
-  key) and `current_page()`. `show_digest(digest, *, links, proposals, owner_zone,
-  today)` builds the rows (chips counted from `today`), the heading and the coverage,
-  shows "No analyzed messages in this brief." when empty, and, for the same saved brief
-  (account, day and save time), keeps the selected email and the detail's scroll
-  position. `set_today(today, owner_zone)` recounts the list's chips for a new day in place
-  (`BriefListModel.update_rows`, `dataChanged`, no model reset), so the selection, the
-  detail pane and keyboard focus stay; nothing else in the brief depends on the day.
-  `clear(message)` shows no brief.
+  margins 12, 10, 12, 10: one elided line of `coverage_short(digest, today)`, with the
+  services' `coverage_line` as its accessible name) and the `BriefDetailPane`; stretch
+  4:5, not collapsible, minimum widths 220 and 280. `add_page(key, widget)`,
+  `show_page(key)` (KeyError for an unknown key) and `current_page()`.
+  `show_digest(digest, *, links, proposals, owner_zone, today)` builds the rows (chips
+  counted from `today`), the heading and the coverage, shows "No analyzed messages in this
+  brief." when empty, and, for the same saved brief (account, day and save time), keeps
+  the selected email and the detail's scroll position. `set_today(today, owner_zone)`
+  recounts the list's chips for a new day in place (`BriefListModel.update_rows`,
+  `dataChanged`, no model reset) and rewrites the heading and the coverage footer, which
+  name a year other than today's, so the selection, the detail pane and keyboard focus
+  stay; nothing else in the brief depends on the day. `clear(message)` shows no brief.
 
 ## Main window (`ui/main_window.py`)
 
