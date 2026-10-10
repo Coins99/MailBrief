@@ -41,8 +41,8 @@ from PySide6.QtWidgets import (
 )
 
 from mailbrief.domain.actions import ActionProposal, ThreadLink
-from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus
-from mailbrief.services.history import coverage_line, coverage_short
+from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus, SavedBriefSummary
+from mailbrief.services.history import coverage_line, outside_count
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
 from mailbrief.ui.deadline_text import day_text, moment_text, month_day
@@ -139,6 +139,25 @@ def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date) -> tuple[str, s
         sync = "complete" if coverage.sync_complete else "incomplete"
         full = f"{full} {counts}. Inbox sync {sync}."
     return " · ".join(short), full
+
+
+def coverage_short(brief: DailyDigest | SavedBriefSummary, today: date) -> str:
+    """What a brief covers, in a few words for the Today footer and in the brief's own zone:
+    "Inbox on Oct 6, up to 09:14" on the brief's own day, "Inbox on Oct 6, checked Oct 7 at
+    08:00" later, plus the replies from tracked threads that weren't in that Inbox. A day in
+    a year other than ``today``'s (the owner's day) names it. The footer's accessible name,
+    and the CLI, use the full ``coverage_line``."""
+    made = brief.generated_at_utc.astimezone(ZoneInfo(brief.timezone_name))
+    day = month_day(brief.local_date, today=today)
+    if made.date() <= brief.local_date:
+        line = f"Inbox on {day}, up to {made:%H:%M}"
+    else:
+        checked = month_day(made.date(), today=today)
+        line = f"Inbox on {day}, checked {checked} at {made:%H:%M}"
+    outside = outside_count(brief)
+    if outside:
+        line += f", plus {outside} tracked repl{'y' if outside == 1 else 'ies'}"
+    return line
 
 
 class _StatusLabel(ElidedLabel):
@@ -534,7 +553,7 @@ class ThreePaneWorkspace(QWidget):
         self._proposals = proposals or {}
         self._owner_zone, self._today = owner_zone, today
         self.heading.show_brief(digest, owner_zone, today)
-        self.coverage.setText(coverage_short(digest), coverage_line(digest))
+        self.coverage.setText(coverage_short(digest, today), coverage_line(digest))
         if not digest.items:
             self.brief_list.show_rows([])
             self.detail.show_empty(EMPTY_BRIEF)
@@ -551,13 +570,14 @@ class ThreePaneWorkspace(QWidget):
         """On a new day (or in a new zone), recount the list's deadline chips from
         ``today`` in ``owner_zone``, in place: the selection, the detail pane and keyboard
         focus stay as they are, and nothing is read from storage. The heading's day and save
-        time are rewritten too: a brief gains its year after New Year. Nothing else in the
-        brief depends on the day."""
+        time, and the coverage footer's days, are rewritten too: a brief gains its year after
+        New Year. Nothing else in the brief depends on the day."""
         digest = self._digest
         if digest is None or (today, owner_zone) == (self._today, self._owner_zone):
             return
         self._today, self._owner_zone = today, owner_zone
         self.heading.show_brief(digest, owner_zone, today)  # Its year, and its save day.
+        self.coverage.setText(coverage_short(digest, today), coverage_line(digest))
         if digest.items:
             self.brief_list.brief_model.update_rows(
                 build_rows(digest, self._proposals, today, owner_zone)

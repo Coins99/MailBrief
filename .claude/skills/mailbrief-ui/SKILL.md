@@ -53,8 +53,10 @@ Read AGENTS.md first; its invariants win. Component specs and the token table ar
   area, and skip a check that needs a wider screen than the one present. Get the screen
   with `QGuiApplication.primaryScreen()` or `screenAt()`, never `widget.screen()`, which
   re-parents the shared QScreen wrapper under the widget.
-- Check colours with:
-  `git grep -nE "#[0-9a-fA-F]{6}" src/mailbrief/ui ':!src/mailbrief/ui/theme/tokens.py'`
+- `tests/unit/test_source_rules.py` runs with every test run: it fails, naming the file and
+  line, on a hex colour under `ui` outside `ui/theme/tokens.py`, and on a strftime directive
+  that follows the system language (`%a`, `%A`, `%b`, `%B`, `%p`, `%c`, `%x`) anywhere in
+  `src/mailbrief`.
 
 ## Screenshot review loop
 1. Render the gallery at 1x and 2x (PowerShell: set `$env:MAILBRIEF_UI_SHOTS` instead):

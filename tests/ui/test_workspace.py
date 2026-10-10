@@ -19,7 +19,6 @@ from pytestqt.qtbot import QtBot
 from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestItem, DigestStatus
 from mailbrief.domain.messages import EmailContact
-from mailbrief.services.history import coverage_short
 from mailbrief.ui.actions_view import ActionRow, ActionsPanel
 from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
 from mailbrief.ui.brief_list import ELIDE_MARGIN, ROW_ROLE, elided
@@ -30,10 +29,13 @@ from mailbrief.ui.workspace import (
     ThreePaneWorkspace,
     brief_meta,
     brief_title,
+    coverage_short,
 )
 from tests.factories import make_digest_item
 from tests.ui.window_wait import show
 from tests.ui.workspace_fixtures import ACTIONS_NOW, ZONE, mockup_actions, mockup_digest
+from tests.unit.services.test_history import TODAY as HISTORY_DAY
+from tests.unit.services.test_history import summary, with_follow_ups
 
 SIZES = {"mockup": (680, 520), "desktop": (1100, 720)}
 OWNER_ZONE = ZoneInfo(ZONE)
@@ -335,7 +337,7 @@ def test_brief_meta_uses_the_brief_zone() -> None:
         "owner@example.com · saved 09:14 (America/Toronto)",
         "owner@example.com. Saved Tue Oct 6, 09:14 (America/Toronto).",
     )
-    assert "up to 09:14" in coverage_short(morning)  # The heading and footer agree.
+    assert "up to 09:14" in coverage_short(morning, TODAY)  # The heading and footer agree.
     # Oct 6 23:30 in Toronto is Oct 7 05:30 in Paris: the brief's own day decides.
     late = morning.model_copy(update={"generated_at_utc": datetime(2026, 10, 7, 3, 30, tzinfo=UTC)})
     short, _full = brief_meta(late, paris, TODAY)
@@ -603,6 +605,38 @@ def test_the_detail_keeps_a_readable_width_on_wide_windows(qtbot: QtBot) -> None
     assert content.x() == 0  # Left-aligned.
 
 
+def test_the_short_coverage_names_the_day_and_when_it_was_made() -> None:
+    today = summary(HISTORY_DAY, datetime(2026, 9, 29, 13, 14, tzinfo=UTC))
+    later = summary(date(2026, 9, 28), datetime(2026, 9, 29, 14, 2, tzinfo=UTC))
+    assert coverage_short(today, HISTORY_DAY) == "Inbox on Sep 29, up to 09:14"
+    assert coverage_short(later, HISTORY_DAY) == "Inbox on Sep 28, checked Sep 29 at 10:02"
+
+
+@pytest.mark.parametrize(
+    ("count", "suffix"),
+    [(0, ""), (1, ", plus 1 tracked reply"), (2, ", plus 2 tracked replies")],
+)
+def test_the_short_coverage_counts_tracked_replies(count: int, suffix: str) -> None:
+    brief = with_follow_ups(count)
+    assert coverage_short(brief, HISTORY_DAY) == "Inbox on Sep 29, up to 09:14" + suffix
+    made = summary(HISTORY_DAY, datetime(2026, 9, 29, 13, 14, tzinfo=UTC))
+    saved = made.model_copy(update={"follow_up_count": count})
+    assert coverage_short(saved, HISTORY_DAY) == coverage_short(brief, HISTORY_DAY)
+
+
+def test_the_short_coverage_names_another_year() -> None:
+    # Dec 30, 2025 up to 09:14 in Toronto; Dec 31, 2026 checked Jan 1 at 09:02 there.
+    old = summary(date(2025, 12, 30), datetime(2025, 12, 30, 14, 14, tzinfo=UTC))
+    late = summary(date(2026, 12, 31), datetime(2027, 1, 1, 14, 2, tzinfo=UTC))
+    assert coverage_short(old, date(2026, 1, 2)) == "Inbox on Dec 30, 2025, up to 09:14"
+    assert coverage_short(late, date(2027, 1, 2)) == (
+        "Inbox on Dec 31, 2026, checked Jan 1 at 09:02"
+    )
+    assert coverage_short(late, date(2026, 12, 31)) == (
+        "Inbox on Dec 31, checked Jan 1, 2027 at 09:02"
+    )
+
+
 def test_the_heading_gains_its_year_after_new_year(qtbot: QtBot) -> None:
     workspace = ThreePaneWorkspace()
     qtbot.addWidget(workspace)
@@ -613,6 +647,7 @@ def test_the_heading_gains_its_year_after_new_year(qtbot: QtBot) -> None:
     )
     workspace.show_digest(digest, owner_zone=OWNER_ZONE, today=date(2026, 12, 31))
     assert workspace.heading.title.text() == "Thu Dec 31"
+    assert workspace.coverage.text() == "Inbox on Dec 31, up to 10:00, plus 1 tracked reply"
     assert workspace.heading.meta.accessibleName().startswith(
         "owner@example.com. Saved Thu Dec 31, 10:00"
     )
@@ -620,6 +655,9 @@ def test_the_heading_gains_its_year_after_new_year(qtbot: QtBot) -> None:
     workspace.set_today(date(2027, 1, 1), OWNER_ZONE)  # Midnight passes.
 
     assert workspace.heading.title.text() == "Thu Dec 31, 2026"
+    assert workspace.coverage.text() == (  # The footer too.
+        "Inbox on Dec 31, 2026, up to 10:00, plus 1 tracked reply"
+    )
     assert workspace.heading.meta.accessibleName().startswith(
         "owner@example.com. Saved Thu Dec 31, 2026, 10:00"
     )
