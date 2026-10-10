@@ -127,7 +127,7 @@ def test_proposal_buttons_carry_the_proposal_and_revision(pane: BriefDetailPane)
     assert "Proposes for “Send the conference deck”: “Can we move this to next Monday?”" in (
         label_texts(pane)
     )
-    button(pane, "Set the deadline to 2026-10-12").click()
+    button(pane, "Set the deadline to Mon Oct 12").click()
     button(pane, "Dismiss").click()
     assert spy.at(0) == [APPLY, 21, 2]
     assert spy.at(1) == [DISMISS, 21, 2]
@@ -206,7 +206,7 @@ def test_deadline_and_meta_texts() -> None:
             deadline_timezone=ZONE,
         ),
     )
-    assert suggestion_meta(waiting, TORONTO) == "Waiting for someone. Due 2026-10-09 17:00."
+    assert suggestion_meta(waiting, TORONTO) == "Waiting for someone. Due Fri Oct 9, 17:00."
 
 
 def test_hostile_text_stays_literal_plain_text(pane: BriefDetailPane) -> None:
@@ -390,7 +390,7 @@ def test_pending_proposals_sit_above_the_footer_in_the_brief_s_zone(
     assert "Quietly dropped" not in " ".join(label_texts(pane))
     buttons = [b.text() for b in pane.findChildren(QPushButton)]
     assert buttons == [
-        "Set the deadline to 2026-10-06 06:00",
+        "Set the deadline to Tue Oct 6, 06:00",
         "Dismiss",
         "Complete it (delivered)",
         "Dismiss",

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from mailbrief.domain.actions import TARGET_REASON_TEXT, Action, ActionProposal, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
-from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.deadline_text import day_text, deadline_text
 from mailbrief.ui.proposals_view import pending_proposals
 
 _WEEKDAYS: Final = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -36,6 +36,7 @@ class ActionDetails:
     replied: str | None
     proposals: tuple[ActionProposal, ...]
     completed: date | None
+    today: date  # The owner's day, which decides whether a date names its year.
 
 
 def action_details(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> ActionDetails:
@@ -64,7 +65,7 @@ def action_details(action: Action, *, today: date, zone: ZoneInfo, now: datetime
     return ActionDetails(
         target=action.target_date,
         target_reason=TARGET_REASON_TEXT[reason] if keeps_reason and reason is not None else None,
-        due=deadline_text(action, zone),
+        due=deadline_text(action, zone, today),
         steps_done=sum(step.done for step in action.steps),
         steps=len(action.steps),
         waiting=is_open and action.ownership is ActionOwnership.WAITING_FOR,
@@ -76,20 +77,26 @@ def action_details(action: Action, *, today: date, zone: ZoneInfo, now: datetime
         replied=replied,
         proposals=pending_proposals(action),
         completed=None if completed is None else completed.astimezone(zone).date(),
+        today=today,
     )
 
 
-def target_text(details: ActionDetails) -> str | None:
-    """ "Target Fri Oct 9", with the reason in the brief detail's wording while it applies."""
+def target_text(details: ActionDetails, *, reason: bool = True) -> str | None:
+    """The target as "Target Fri Oct 9"; with ``reason``, the reason too in the brief
+    detail's wording while it applies: "Target Fri Oct 9, one working day before the
+    deadline"."""
     target = details.target
     if target is None:
         return None
-    text = f"Target {target:%a %b} {target.day}"
-    return text if details.target_reason is None else f"{text}, {details.target_reason}"
+    text = f"Target {day_text(target, details.today)}"
+    if not reason or details.target_reason is None:
+        return text
+    return f"{text}, {details.target_reason}"
 
 
 def completed_text(details: ActionDetails) -> str | None:
-    """ "Completed Oct 6", the day in the owner's zone, or None for an open action."""
+    """The completion as "Completed Oct 6", the day in the owner's zone, or None for an open
+    action."""
     day = details.completed
     return None if day is None else f"Completed {day:%b} {day.day}"
 
@@ -104,12 +111,13 @@ def gmail_source(action: Action) -> str | None:
 
 
 def _when(moment: datetime, *, today: date, zone: ZoneInfo, clock: bool) -> str:
-    """A moment of the past week by weekday ("Tue 14:02"), an older one by date, in ``zone``.
+    """A moment of the past week by weekday ("Tue 14:02"), an older one by its date ("Sun
+    Sep 20, 10:30", with the year when it isn't this year's), in ``zone``.
 
     Weekday names are fixed, like the rest of the window's English text.
     """
     local = moment.astimezone(zone)
-    time = f" {local:%H:%M}" if clock else ""
     if today - timedelta(days=6) <= local.date() <= today:
-        return _WEEKDAYS[local.weekday()] + time
-    return local.date().isoformat() + time
+        return _WEEKDAYS[local.weekday()] + (f" {local:%H:%M}" if clock else "")
+    day = day_text(local.date(), today)
+    return f"{day}, {local:%H:%M}" if clock else day

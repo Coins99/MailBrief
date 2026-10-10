@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.actions import Action, ActionProposal, ActionStatus
 from mailbrief.domain.analysis import FollowUpKind
-from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.deadline_text import deadline_text, moment_text
 from mailbrief.ui.lists import ActivatingList
 
 _COMPLETES = {
@@ -44,8 +44,8 @@ def pending_proposals(action: Action) -> tuple[ActionProposal, ...]:
 def effect_text(proposal: ActionProposal, zone: ZoneInfo) -> str:
     """What applying a proposal does, named by its effect.
 
-    A new deadline reads "Set the deadline to 2026-10-05 17:00" (an exact time in ``zone``),
-    "... to 2026-10-05" (a date) or "... to “next Monday”" (words only); a cancellation or
+    A new deadline reads "Set the deadline to Mon Oct 5, 17:00" (an exact time in ``zone``),
+    "... to Mon Oct 5" (a date) or "... to “next Monday”" (words only); a cancellation or
     delivery reads "Complete it (cancelled)" or "Complete it (delivered)".
     """
     if proposal.kind is FollowUpKind.NEW_DEADLINE:
@@ -56,10 +56,9 @@ def effect_text(proposal: ActionProposal, zone: ZoneInfo) -> str:
 
 def proposal_text(proposal: ActionProposal, zone: ZoneInfo) -> str:
     """One row: the effect, the email's quote, its sender and when it arrived in ``zone``."""
-    received = proposal.received_at_utc.astimezone(zone)
     return (
         f"{effect_text(proposal, zone)} · “{proposal.evidence}” · "
-        f"{proposal.sender_address} · {received:%Y-%m-%d %H:%M}"
+        f"{proposal.sender_address} · {moment_text(proposal.received_at_utc, zone)}"
     )
 
 

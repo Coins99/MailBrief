@@ -114,7 +114,7 @@ def test_an_exact_deadline_reads_in_the_owner_s_zone(panel: ActionsPanel) -> Non
         now=datetime(2026, 10, 2, 16, tzinfo=UTC),
     )
 
-    assert row_text(panel, ActionFilter.OPEN) == "Action 4 — due 2026-10-03 02:00"  # Saturday.
+    assert row_text(panel, ActionFilter.OPEN) == "Action 4 — due Sat Oct 3, 02:00"  # Saturday.
 
 
 def test_rows_are_plain_text_with_dates_progress_and_state(panel: ActionsPanel) -> None:
@@ -135,7 +135,7 @@ def test_rows_are_plain_text_with_dates_progress_and_state(panel: ActionsPanel) 
     show(panel, ActionFilter.OPEN, late)
 
     assert row_text(panel, ActionFilter.OPEN) == (
-        "<b>Send</b> the deck — target 2026-09-30 · due 2026-10-02 · 1/2 steps · overdue · "
+        "<b>Send</b> the deck — target Wed Sep 30 · due Fri Oct 2 · 1/2 steps · overdue · "
         "carried over"
     )
     assert panel.tabs.tabText(0) == "Open (1)"
@@ -169,7 +169,7 @@ def test_a_completed_action_is_never_shown_overdue_or_carried_over(panel: Action
     )
     show(panel, ActionFilter.COMPLETED, done)
 
-    assert row_text(panel, ActionFilter.COMPLETED) == "Action 3 — due 2026-09-01"
+    assert row_text(panel, ActionFilter.COMPLETED) == "Action 3 — due Tue Sep 1"
 
 
 def test_buttons_follow_the_selection_the_tab_and_busy_state(panel: ActionsPanel) -> None:
@@ -303,8 +303,8 @@ def test_thread_activity_reads_in_the_owner_s_zone(panel: ActionsPanel) -> None:
     )
     # More than a week back, a weekday would be ambiguous: the date is shown instead.
     assert row_text(panel, ActionFilter.OPEN, 1) == (
-        "Action 6 — 1 new in thread, latest 2026-09-20 10:30 from sam@example.com · "
-        "you replied 2026-09-26"
+        "Action 6 — 1 new in thread, latest Sun Sep 20, 10:30 from sam@example.com · "
+        "you replied Sat Sep 26"
     )
     assert row_text(panel, ActionFilter.OPEN, 2) == "Action 7"
 
@@ -389,7 +389,7 @@ def test_an_open_action_s_row() -> None:
     assert row == ActionRow(
         title="Action 1",
         meta=(
-            "Target Tue Oct 6, one working day before the deadline · Due 2026-10-07 · "
+            "Target Tue Oct 6 · Due Wed Oct 7 · "
             "2/5 steps · Carried over · Source no longer in local mail"
         ),
         chips=(),
@@ -432,7 +432,7 @@ def test_a_completed_action_s_row_is_muted_with_its_day_in_the_owner_s_zone() ->
 
     # Never Overdue or Carried over once completed.
     assert row == ActionRow(
-        title="Action 3", meta="Completed Oct 6 · Due 2026-09-01 · 2/2 steps", chips=(), muted=True
+        title="Action 3", meta="Completed Oct 6 · Due Tue Sep 1 · 2/2 steps", chips=(), muted=True
     )
 
 
@@ -566,7 +566,7 @@ def test_the_detail_shows_every_section_with_its_buttons(panel: ActionsPanel) ->
     assert detail_texts(panel) == [
         "Action 1",
         "Yours · open",
-        "Due 2026-10-02 · Overdue",
+        "Due Fri Oct 2 · Overdue",
         "Target Tue Oct 6",
         "Plan · 1 of 2 done",
         "✓ Step 1",
@@ -579,11 +579,11 @@ def test_the_detail_shows_every_section_with_its_buttons(panel: ActionsPanel) ->
         "A follow-up reply proposes an update to this action.",
         "Sources",
         "Q3 deck",
-        "alex@example.com · Received Sep 28",
+        "alex@example.com · Received Mon Sep 28",
         "Q3 deck",
-        "alex@example.com · Received Sep 28",
+        "alex@example.com · Received Mon Sep 28",
         "Q3 deck",
-        "alex@example.com · Received Sep 28 · No longer in local mail",
+        "alex@example.com · Received Mon Sep 28 · No longer in local mail",
     ]
     deadline = panel.detail.findChild(QLabel, "actionDeadline")
     assert deadline is not None and deadline.property("tone") == "warning"
@@ -680,7 +680,7 @@ def test_hostile_text_stays_literal_and_out_of_tooltips(panel: ActionsPanel) -> 
         HOSTILE,
         f"○ {HOSTILE}",
         f"1 new in thread, latest Sat 09:00 from {HOSTILE}",
-        "<b>x</b>@evil.example · Received Sep 28",
+        "<b>x</b>@evil.example · Received Mon Sep 28",
     ):
         assert expected in texts
     for label in labels:
@@ -789,3 +789,45 @@ def test_page_keys_page_a_list_that_scrolls(qtbot: QtBot) -> None:
 
     assert listing.currentRow() > 0  # The list paged…
     assert bar.value() == 0  # …and the new action's detail starts at the top.
+
+
+def test_the_row_names_the_target_and_the_detail_gives_its_reason(panel: ActionsPanel) -> None:
+    suggested = action(
+        1,
+        target_date=date(2026, 10, 2),
+        suggested_target_date=date(2026, 10, 2),
+        target_reason=TargetReason.WORKING_DAY_BEFORE,
+    )
+    show(panel, ActionFilter.OPEN, suggested)
+
+    assert action_row(suggested, today=TODAY, zone=UTC_ZONE, now=NOW).meta == "Target Fri Oct 2"
+    assert "Target Fri Oct 2, one working day before the deadline" in detail_texts(panel)
+
+
+def test_dates_in_another_year_name_it(panel: ActionsPanel) -> None:
+    january = date(2027, 1, 8)
+    old = action(
+        1,
+        target_date=date(2027, 1, 4),
+        thread=ThreadActivity(
+            new_messages=1,
+            latest_at_utc=datetime(2026, 12, 20, 15, 30, tzinfo=UTC),
+            latest_sender="Sam",
+            owner_replied_at_utc=datetime(2026, 12, 21, 12, tzinfo=UTC),
+        ),
+        sources=(source(),),  # Received Sep 28, 2026.
+    )
+
+    panel.show_actions(
+        ActionFilter.OPEN,
+        (old,),
+        today=january,
+        zone=UTC_ZONE,
+        now=datetime(2027, 1, 8, 9, tzinfo=UTC),
+    )
+
+    assert row_text(panel, ActionFilter.OPEN) == (
+        "Action 1 — target Mon Jan 4 · carried over · 1 new in thread, latest Sun Dec 20, "
+        "2026, 15:30 from Sam · you replied Mon Dec 21, 2026"
+    )
+    assert "alex@example.com · Received Mon Sep 28, 2026" in detail_texts(panel)

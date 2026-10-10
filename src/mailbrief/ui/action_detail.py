@@ -33,6 +33,7 @@ from mailbrief.ui.action_text import (
 )
 from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
 from mailbrief.ui.brief_list import NO_SUBJECT
+from mailbrief.ui.deadline_text import day_text
 from mailbrief.ui.labels import outline_button, plain_label, wrap_label
 from mailbrief.ui.theme import SMALL_PX, TEXT_PX, TITLE_PX
 
@@ -46,7 +47,7 @@ OPEN_MARK: Final = "○ "
 
 
 def state_text(action: Action, details: ActionDetails) -> str:
-    """ "Yours · open", "Waiting for someone · open" or "Completed Oct 6"."""
+    """The state line: "Yours · open", "Waiting for someone · open" or "Completed Oct 6"."""
     completed = completed_text(details)
     if action.status is ActionStatus.COMPLETED and completed is not None:
         return completed
@@ -63,9 +64,8 @@ def proposals_text(count: int) -> str:
 def source_text(source: ActionSource, *, today: date, zone: ZoneInfo) -> str:
     """The sender's address and the received date in ``zone``, and whether the email has
     left local mail."""
-    local = source.received_at_utc.astimezone(zone)
-    year = "" if local.year == today.year else f", {local.year}"
-    text = f"{source.sender_address} · Received {local:%b} {local.day}{year}"
+    received = day_text(source.received_at_utc.astimezone(zone).date(), today)
+    text = f"{source.sender_address} · Received {received}"
     return text if source.available else f"{text} · No longer in local mail"
 
 

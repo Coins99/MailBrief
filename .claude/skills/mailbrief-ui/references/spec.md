@@ -114,8 +114,8 @@ line is a `WrapLabel`):
    time is invented.
 3. Summary.
 4. Action text, secondary, if present and different from the summary.
-5. Deadline: 14px clock icon (warning_fg) and a warning label. DATETIME
-   `Due {%a %b} {day}, {%H:%M}`; DATE `Due {%a %b} {day}`; UNRESOLVED `Due “{text}”`.
+5. Deadline: 14px clock icon (warning_fg) and a warning label, `Due ` + `deadline_text`
+   in the brief's zone (see Dates).
 6. `Continues: “{title}”`, secondary, for each link that isn't a source.
 7. Suggestions. PENDING: a `HairlineFrame` card with the title (13px Medium), a 12px
    secondary meta line ("Yours." or "Waiting for someone.", then the target with its
@@ -151,9 +151,9 @@ a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list 
   (brief_list's). Page Up and Page Down page the detail while the list fits
   (`page_detail`).
 - `ActionRow`: meta joins, with " · ", "Completed Oct 6" (in the owner's zone), the
-  target ("Target Fri Oct 9", plus ", {TARGET_REASON_TEXT}" while it is still the
-  suggested target), "Due {deadline_text}", "2/5 steps", "Carried over" and "Source no
-  longer in local mail"; with none, "No target or deadline". Chips: "Overdue" (WARNING,
+  target ("Target Fri Oct 2", never its reason: the detail gives that), "Due
+  {deadline_text}" ("Due Mon Oct 5"), "2/5 steps", "Carried over" and "Source no longer
+  in local mail"; with none, "No target or deadline". Chips: "Overdue" (WARNING,
   open actions only), "N new in thread" (ACCENT, while new messages are unseen) and
   `proposal_chip` for pending proposals. Completed rows are muted: title text_secondary,
   meta text_muted.
@@ -171,15 +171,18 @@ a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list 
   1. Title, 15px Medium (`actionTitle`).
   2. State, secondary: "Yours · open", "Waiting for someone · open" or "Completed Oct 6".
   3. "Due {deadline_text}", warning with " · Overdue" when overdue, else secondary
-     (`actionDeadline`); the target with its reason, secondary (`actionTarget`).
+     (`actionDeadline`); the target with its reason while it is still the suggested one
+     ("Target Fri Oct 2, one working day before the deadline"), secondary
+     (`actionTarget`).
   4. "Plan · 2 of 5 done" (12px muted heading), then each step in order: "✓ {text}"
      muted when done, "○ {text}" otherwise.
   5. "Notes" and the notes.
-  6. "Thread" and `describe()`'s activity lines, first letter capitalised; then
-     `seenButton` (Mark seen).
+  6. "Thread" and `describe()`'s activity lines, first letter capitalised ("2 new in
+     thread, latest Tue 14:02 from Sam", "You replied Sun Sep 20"); then `seenButton`
+     (Mark seen).
   7. A sentence about the pending proposals; then `proposalsButton` (Proposals…).
   8. "Source" or "Sources": each subject ("(no subject)" when empty), then 12px
-     secondary "{address} · Received Oct 2" (the year when not this year), plus " · No
+     secondary "{address} · Received Fri Oct 2" (`day_text`), plus " · No
      longer in local mail". `sourceButton` (Open source, external-link) follows the first
      Gmail source.
   9. Footer: `editButton`, `completeButton` (Complete, or Reopen on Completed),
@@ -191,6 +194,24 @@ a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list 
 - Behaviour is unchanged: `_update_buttons` keeps its rules, every button emits
   `action_requested` or `draft_requested` for MainWindow's `start()`, and only Gmail
   links open.
+
+## Dates (`ui/deadline_text.py`)
+
+One style across the window, as the brief reads; only the action editor's date fields
+stay ISO, since dates are typed there, and the CLI is unchanged. The brief list's chips
+keep their shorter forms (see Brief list).
+- `day_text(day, today=None)`: "Mon Oct 5"; when `today` is given and in another year,
+  "Mon Jan 4, 2027".
+- `moment_text(moment, zone, today=None)`: "Thu Oct 8, 17:00" in `zone`, the year as
+  `day_text` adds it.
+- `deadline_text(item, zone, today=None)`: DATETIME `moment_text` in the owner's zone,
+  DATE `day_text` of the day the email names, UNRESOLVED the email's phrase in quotes,
+  NONE None. The brief detail's deadline, suggestion meta lines, proposal effects ("Set
+  the deadline to Mon Oct 5") and the Actions page all use it; the Actions page passes
+  the owner's day, so a deadline in another year names it.
+- Thread activity in the past week reads by weekday ("Tue 14:02", "Tue"); older, by
+  `day_text` with the owner's day ("Sun Sep 20, 10:30", "Sun Dec 20, 2026, 15:30").
+  Proposal rows show when the email arrived with `moment_text`.
 
 ## Workspace (`ui/workspace.py`)
 

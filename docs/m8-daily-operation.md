@@ -646,8 +646,8 @@ Part 7 is implemented and awaits live acceptance. It adds no migration (the head
 - **In the brief**, under the email that proposes, for each pending proposal:
   `Proposes for “Send the deck”: “Can we move this to next Monday?”`, then two links. The
   first is named by what it does:
-  - `Set the deadline to 2026-10-05 17:00`: an exact time, in the brief's own time zone;
-  - `Set the deadline to 2026-10-05`: a date;
+  - `Set the deadline to Mon Oct 5, 17:00`: an exact time, in the brief's own time zone;
+  - `Set the deadline to Mon Oct 5`: a date;
   - `Set the deadline to “when the board meets”`: a deadline given only in words;
   - `Complete it (cancelled)` or `Complete it (delivered)`.
 

@@ -85,8 +85,8 @@ def brief(zone: str = "America/Toronto") -> DailyDigest:
     ("fields", "effect"),
     [
         # An exact time reads in the zone shown: 21:00 UTC is 17:00 in Toronto.
-        (NEW_DATETIME, "Set the deadline to 2026-10-05 17:00"),
-        (NEW_DATE, "Set the deadline to 2026-10-05"),
+        (NEW_DATETIME, "Set the deadline to Mon Oct 5, 17:00"),
+        (NEW_DATE, "Set the deadline to Mon Oct 5"),
         (NEW_WORDS, "Set the deadline to “when the board meets”"),
         ({"kind": FollowUpKind.CANCELLED}, "Complete it (cancelled)"),
         ({"kind": FollowUpKind.DELIVERED}, "Complete it (delivered)"),
@@ -98,7 +98,7 @@ def test_a_proposal_is_named_by_its_effect(fields: dict[str, object], effect: st
 
     assert effect_text(proposal, TORONTO) == effect
     if proposal.deadline_precision is DeadlinePrecision.DATETIME:
-        assert effect_text(proposal, UTC_ZONE) == "Set the deadline to 2026-10-05 21:00"
+        assert effect_text(proposal, UTC_ZONE) == "Set the deadline to Mon Oct 5, 21:00"
 
 
 # The actions pane
@@ -229,8 +229,8 @@ def test_the_dialog_lists_effect_quote_sender_and_local_date(dialog: ProposalsDi
     first = dialog.listing.item(0)
     assert first is not None
     assert first.text() == (
-        "Set the deadline to 2026-10-05 · “No longer needed, thanks” · "
-        "sam@example.com · 2026-09-03 09:00"  # 13:00 UTC is 09:00 in Toronto.
+        "Set the deadline to Mon Oct 5 · “No longer needed, thanks” · "
+        "sam@example.com · Thu Sep 3, 09:00"  # 13:00 UTC is 09:00 in Toronto.
     )
     assert dialog.heading.text() == "Proposals for “Approve the proposal”"
     assert dialog.action_public_id == action.public_id
@@ -241,8 +241,8 @@ def test_the_dialog_lists_effect_quote_sender_and_local_date(dialog: ProposalsDi
 
 def test_the_apply_button_follows_the_selected_rows_effect(dialog: ProposalsDialog) -> None:
     dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
-    assert dialog.apply_button.text() == "&Apply: Set the deadline to 2026-10-05"
-    assert dialog.apply_button.accessibleName() == "Apply: Set the deadline to 2026-10-05"
+    assert dialog.apply_button.text() == "&Apply: Set the deadline to Mon Oct 5"
+    assert dialog.apply_button.accessibleName() == "Apply: Set the deadline to Mon Oct 5"
 
     dialog.listing.setCurrentRow(1)
 
@@ -553,7 +553,7 @@ async def test_the_actions_pane_opens_the_dialog_for_the_selected_action(
     assert dialog.isVisible()
     assert dialog.heading.text() == "Proposals for “Send the deck”"
     assert dialog.listing.count() == 2
-    assert dialog.apply_button.text() == "&Apply: Set the deadline to 2026-10-05"
+    assert dialog.apply_button.text() == "&Apply: Set the deadline to Mon Oct 5"
 
 
 async def test_applying_in_the_dialog_uses_the_action_revision_and_refreshes_it(

@@ -28,10 +28,10 @@ from mailbrief.domain.actions import (
     SuggestionView,
     ThreadLink,
 )
-from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
+from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.digests import DigestItem
 from mailbrief.ui.brief_list import NO_SUBJECT, sender_with_address
-from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.deadline_text import day_text, deadline_text
 from mailbrief.ui.hairline import HairlineFrame
 from mailbrief.ui.labels import (
     outline_button,
@@ -51,16 +51,9 @@ _ICON_PX = 14
 
 
 def item_deadline_text(item: DigestItem, zone: ZoneInfo) -> str | None:
-    """The email's own deadline in the brief's zone, or None."""
-    if item.deadline_precision is DeadlinePrecision.DATETIME and item.deadline_at_utc:
-        local = item.deadline_at_utc.astimezone(zone)
-        return f"Due {local:%a %b} {local.day}, {local:%H:%M}"
-    if item.deadline_precision is DeadlinePrecision.DATE and item.deadline_date:
-        day = item.deadline_date
-        return f"Due {day:%a %b} {day.day}"
-    if item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
-        return f"Due “{item.deadline_text}”"
-    return None
+    """The email's own deadline in the brief's zone, "Due Thu Oct 8, 17:00", or None."""
+    due = deadline_text(item, zone)
+    return None if due is None else f"Due {due}"
 
 
 def suggestion_meta(view: SuggestionView, zone: ZoneInfo) -> str:
@@ -70,7 +63,7 @@ def suggestion_meta(view: SuggestionView, zone: ZoneInfo) -> str:
     target, reason = suggestion.suggested_target_date, suggestion.target_reason
     due = deadline_text(suggestion, zone)
     if target is not None and reason is not None:
-        return f"{text} Target {target:%a %b} {target.day}, {TARGET_REASON_TEXT[reason]}."
+        return f"{text} Target {day_text(target)}, {TARGET_REASON_TEXT[reason]}."
     if due is not None:
         return f"{text} Due {due}."
     return f"{text} No deadline stated."

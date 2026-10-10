@@ -57,6 +57,7 @@ from mailbrief.ui.brief_list import (
     proposal_chip,
     row_height,
 )
+from mailbrief.ui.deadline_text import day_text
 from mailbrief.ui.hairline import HairlineSplitter, paint_focus_ring
 from mailbrief.ui.labels import plain_label
 from mailbrief.ui.lists import ActivatingList
@@ -106,7 +107,7 @@ def describe(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> s
     facts = action_details(action, today=today, zone=zone, now=now)
     details: list[str] = []
     if facts.target is not None:
-        details.append(f"target {facts.target.isoformat()}")
+        details.append(f"target {day_text(facts.target, facts.today)}")
     if facts.due is not None:
         details.append(f"due {facts.due}")
     if facts.steps:
@@ -143,7 +144,7 @@ def action_row(action: Action, *, today: date, zone: ZoneInfo, now: datetime) ->
         text
         for text in (
             completed_text(facts),
-            target_text(facts),
+            target_text(facts, reason=False),  # The detail pane gives the reason.
             None if facts.due is None else f"Due {facts.due}",
             f"{facts.steps_done}/{facts.steps} steps" if facts.steps else None,
             "Carried over" if facts.carried_over else None,
