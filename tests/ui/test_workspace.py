@@ -16,9 +16,11 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
+from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestItem, DigestStatus
 from mailbrief.domain.messages import EmailContact
 from mailbrief.services.history import coverage_short
+from mailbrief.ui.actions_view import ActionsPanel
 from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
 from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
 from mailbrief.ui.workspace import (
@@ -30,7 +32,7 @@ from mailbrief.ui.workspace import (
 )
 from tests.factories import make_digest_item
 from tests.ui.window_wait import show
-from tests.ui.workspace_fixtures import ZONE, mockup_digest
+from tests.ui.workspace_fixtures import ACTIONS_NOW, ZONE, mockup_actions, mockup_digest
 
 SIZES = {"mockup": (680, 520), "desktop": (1100, 720)}
 OWNER_ZONE = ZoneInfo(ZONE)
@@ -70,6 +72,48 @@ def test_workspace_renders(
         Path(folder).mkdir(parents=True, exist_ok=True)
         dpr = image.devicePixelRatio()
         assert image.save(str(Path(folder) / f"{size}-{mode.value}-{dpr:g}x.png"))
+
+
+# The Actions page's renders: the sidebar row, then the view shown.
+ACTION_PAGES = {
+    "page-actions": ("actions", ActionFilter.OPEN),
+    "page-waiting": ("waiting", ActionFilter.WAITING),
+    "page-completed": ("actions", ActionFilter.COMPLETED),
+}
+
+
+def build_actions(qtbot: QtBot, key: str) -> ThreePaneWorkspace:
+    """The workspace on the Actions page, as the window composes it."""
+    workspace = build(qtbot)
+    panel = ActionsPanel()
+    for view, actions in mockup_actions().items():
+        panel.show_actions(view, actions, today=TODAY, zone=OWNER_ZONE, now=ACTIONS_NOW)
+    workspace.add_page("actions", panel)
+    sidebar, view = ACTION_PAGES[key]
+    workspace.show_page("actions")
+    panel.show_view(view)
+    workspace.sidebar.set_current(sidebar)
+    return workspace
+
+
+@pytest.mark.parametrize("key", list(ACTION_PAGES))
+@pytest.mark.parametrize("mode", list(ThemeMode))
+def test_actions_page_renders(
+    qtbot: QtBot, qapp: QApplication, themed: None, mode: ThemeMode, key: str
+) -> None:
+    if key == "page-completed" and mode is ThemeMode.LIGHT:
+        pytest.skip("one render of the Completed view is enough")
+    apply_theme(qapp, mode)
+    workspace = build_actions(qtbot, key)
+    workspace.resize(*SIZES["desktop"])
+    show(qtbot, workspace)
+    image = workspace.grab()
+    assert not image.isNull()
+    folder = os.environ.get("MAILBRIEF_UI_SHOTS")
+    if folder:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        dpr = image.devicePixelRatio()
+        assert image.save(str(Path(folder) / f"{key}-{mode.value}-{dpr:g}x.png"))
 
 
 def test_sidebar_requests_pages_and_settings(qtbot: QtBot) -> None:

@@ -65,6 +65,7 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
   See `docs/m9-durability.md` and `docs/m9-live-validation.md`. Do not claim M9 accepted
   until the owner completes real-record recovery and the 7–14-day release scenario.
 - The desktop UI is the three-pane workspace (PR #21); see `.claude/skills/mailbrief-ui/`.
+  The Actions page follows it: painted action rows beside the selected action's detail.
 
 ## Layout (ports and adapters)
 
@@ -102,12 +103,14 @@ file, this file wins. `docs/archive/` holds superseded plans and notes for refer
 - `src/mailbrief/infra/`: HTTP retry classification, `vault.py`, the explicit OS
   credential vault, and `files.py`, atomic writes for exports the owner chooses.
 - `src/mailbrief/diagnostics/`: developer CLIs. `src/mailbrief/ui/`: PySide6 workflow,
-  desktop service composition, saved-brief display, the actions pane and editor, the
-  drafts pane (`drafts_view.py`), editor (`draft_editor.py`) and its Write with AI panel
-  (`drafting_panel.py`), the Settings Preferences tab (`preferences_view.py`) and the
-  Briefs page for saved briefs and missed days (`history_view.py`), the Proposals dialog
-  for one action and the wording of a proposal's effect (`proposals_view.py`); `lists.py`
-  holds `ActivatingList`, where Return or Enter activates a row once on every platform.
+  desktop service composition, saved-brief display, the Actions page (`actions_view.py`:
+  rows and lists; `action_detail.py`: the selected action; `action_text.py`: the details
+  both show) and the action editor, the drafts pane (`drafts_view.py`), editor
+  (`draft_editor.py`) and its Write with AI panel (`drafting_panel.py`), the Settings
+  Preferences tab (`preferences_view.py`) and the Briefs page for saved briefs and missed
+  days (`history_view.py`), the Proposals dialog for one action and the wording of a
+  proposal's effect (`proposals_view.py`); `lists.py` holds `ActivatingList`, where
+  Return or Enter activates a row once on every platform.
 - `ui/scheduler.py` (`RefreshScheduler`, the minute tick behind timed refresh) and
   `ui/auto_send_view.py` (the automatic-analysis permission dialog); `services/consent.py`
   reads and sets that permission.

@@ -63,7 +63,8 @@ Read AGENTS.md first; its invariants win. Component specs and the token table ar
    QT_SCALE_FACTOR=2 MAILBRIEF_UI_SHOTS=scratch/ui-shots uv run pytest tests/ui/test_workspace.py -q --no-cov
    ```
    Files are named `{size}-{mode}-{dpr}x.png`, sizes `mockup` (680×520) and `desktop`
-   (1100×720).
+   (1100×720). The Actions page renders at the desktop size as `page-actions-*`,
+   `page-waiting-*` and `page-completed-dark-*`; compare them with Today's renders.
 2. Compare `scratch/ui-shots/mockup-dark-2x.png` with the mockup. List differences in
    spacing, sizes, weights, colours and alignment; fix them; render again. At most three
    rounds per change.

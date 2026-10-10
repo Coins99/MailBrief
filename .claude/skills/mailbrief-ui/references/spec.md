@@ -68,15 +68,18 @@ All read colours from `current_tokens()` at paint time.
   (text_secondary); chips after a 4px gap, 11px, padding 1 × 6, radius `min(8, h/2)`, 6px
   apart, warning or accent fg/bg; a cosmetic hairline at the bottom; with focus, a 1px
   cosmetic accent_fg rect inset by 1. Title and sender elide to the row width minus 24.
-- Shared with the run page's shortlist: `paint_selection`, `paint_lines`,
+- Shared with the run page's shortlist and the Actions page's rows: `paint_selection`,
+  `paint_lines` (a title and a `subtitle`: a sender or a meta line), `paint_chips`,
   `paint_separator`, `row_height`, `elided`, `flat`, `SINGLE_LINE`, `ROW_PAD_V`,
-  `ROW_PAD_H` and `CHIP_GAP`; the focus ring is `paint_focus_ring()` from hairline.py.
+  `ROW_PAD_H`, `ELIDE_MARGIN` and `CHIP_GAP`; the focus ring is `paint_focus_ring()` from
+  hairline.py. Never copy painting code: paint new rows with these.
 - View: objectName `briefList`, accessible name "Brief items", NoFrame,
   ScrollPerPixel, SingleSelection; `item_selected(DigestItem)`; `show_rows(rows)` selects
   the first item row; Return and Enter emit `activated` once and are consumed.
   While the whole list fits (its vertical scroll bar has no range), Page Up and Page
   Down (no modifier) scroll the detail pane by a page (`set_page_scroll`, set by the
-  workspace); when the list scrolls, they page the list.
+  workspace); when the list scrolls, they page the list. The rule is `page_detail()`,
+  shared with the Actions page's lists.
 
 ## Wrapping labels (`ui/labels.py`)
 
@@ -129,6 +132,65 @@ Buttons are made with `outline_button()` (`button_label()` text, `variant="outli
 `setAutoDefault(False)`) and have an objectName: `acceptButton`, `dismissButton`,
 `addToButton`, `applyProposalButton`, `dismissProposalButton`, `replyButton` and
 `openInGmailButton`.
+
+## Actions page (`ui/actions_view.py`, `ui/action_detail.py`, `ui/action_text.py`)
+
+`ActionsPanel` (objectName `actionsPanel`) is the `actions` page, edge to edge like Today:
+a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list side
+(`actionsListPane`, at least 220 px) and `ActionDetailPane` (at least 280 px).
+- List side, top to bottom: "Your actions" (15px Medium, `actionsHeading`, margins 12,
+  10, 12, 4); `tabs`, a `QTabBar` (`actionsTabs`, "Action views": "Open (N)",
+  "Waiting (N)", "Completed (N)" or "(200+)", no base, not expanding, `StrongFocus` so Tab
+  reaches it on macOS too); `stack`, a `QStackedWidget` (`actionsStack`) holding the three
+  `lists[view]`. `show_view` sets the tab bar's index and the stack; a click on a tab
+  moves the stack; `view()` reads the tab bar.
+- Each list is an `ActionList` (an `ActivatingList`; objectName `actionList`, accessible
+  name "{Open|Waiting|Completed} actions"; NoFrame, ScrollPerPixel, no horizontal scroll
+  bar) painted by `ActionRowDelegate`. Each item's text is exactly `describe()`'s, and
+  it carries `action_row()`'s `ActionRow(title, meta, chips, muted)` under `ROW_ROLE`
+  (brief_list's). Page Up and Page Down page the detail while the list fits
+  (`page_detail`).
+- `ActionRow`: meta joins, with " · ", "Completed Oct 6" (in the owner's zone), the
+  target ("Target Fri Oct 9", plus ", {TARGET_REASON_TEXT}" while it is still the
+  suggested target), "Due {deadline_text}", "2/5 steps", "Carried over" and "Source no
+  longer in local mail"; with none, "No target or deadline". Chips: "Overdue" (WARNING,
+  open actions only), "N new in thread" (ACCENT, while new messages are unseen) and
+  `proposal_chip` for pending proposals. Completed rows are muted: title text_secondary,
+  meta text_muted.
+- `ActionRowDelegate`: the brief list's row, from the shared helpers only; painting is
+  clipped to the row; `sizeHint` is `QSize(0, row_height(has_chips))`, so a row never
+  widens the page.
+- `action_details()` (`ui/action_text.py`) works out an action's dates, progress, state,
+  thread activity and pending proposals once; `describe()`, `action_row()` and the
+  detail pane all read it, so they never disagree.
+- `ActionDetailPane(QScrollArea)`: objectName `actionDetail`, "Selected action",
+  `ClickFocus`, content (`actionDetailContent`) at most 720 px wide at the left, margins
+  16, 14, 16, 14, spacing 8. Its seven buttons are made once and stay (the panel exposes
+  them under its old names), so only the text between them is rebuilt. In order, every
+  mail-, AI- or owner-written line a `WrapLabel`:
+  1. Title, 15px Medium (`actionTitle`).
+  2. State, secondary: "Yours · open", "Waiting for someone · open" or "Completed Oct 6".
+  3. "Due {deadline_text}", warning with " · Overdue" when overdue, else secondary
+     (`actionDeadline`); the target with its reason, secondary (`actionTarget`).
+  4. "Plan · 2 of 5 done" (12px muted heading), then each step in order: "✓ {text}"
+     muted when done, "○ {text}" otherwise.
+  5. "Notes" and the notes.
+  6. "Thread" and `describe()`'s activity lines, first letter capitalised; then
+     `seenButton` (Mark seen).
+  7. A sentence about the pending proposals; then `proposalsButton` (Proposals…).
+  8. "Source" or "Sources": each subject ("(no subject)" when empty), then 12px
+     secondary "{address} · Received Oct 2" (the year when not this year), plus " · No
+     longer in local mail". `sourceButton` (Open source, external-link) follows the first
+     Gmail source.
+  9. Footer: `editButton`, `completeButton` (Complete, or Reopen on Completed),
+     `deleteButton`, `draftButton` (pencil, with the draft menu).
+  Empty states, muted (`actionEmpty`), with no buttons: Open "No open actions. Accept a
+  suggestion in a brief to start one.", Waiting "Nothing you're waiting for.", Completed
+  "No completed actions yet."
+- Tab: the tab bar, the list shown, then the detail's buttons in display order.
+- Behaviour is unchanged: `_update_buttons` keeps its rules, every button emits
+  `action_requested` or `draft_requested` for MainWindow's `start()`, and only Gmail
+  links open.
 
 ## Workspace (`ui/workspace.py`)
 
@@ -206,8 +268,9 @@ Buttons are made with `outline_button()` (`button_label()` text, `variant="outli
   `QProxyStyle`, never underlines mnemonics; Alt and the letter still work.
 - Pages: `today` (the "Viewing the brief for …" banner and the retry row in `today_top`),
   `run` (`runPage`, a scroll area, margins 16, 14, 16, 14, holding `runColumn`, a centred
-  column at most 760 px wide), `actions`, `drafts` and `briefs` (the panels, margins 12). Today shows `run` while
-  the review or consent waits. Actions opens the Open tab and Waiting the Waiting tab;
+  column at most 760 px wide), `actions` (the Actions page, no margins), `drafts` and
+  `briefs` (the panels, margins 12). Today shows `run` while the review or consent
+  waits. Actions opens the Open tab and Waiting the Waiting tab;
   changing the tab moves the sidebar. Briefs is a page like the others: choosing it loads
   the saved briefs and missed days through `start()` (refused with a reason while busy or
   before local storage loads), then shows `BriefHistoryPanel` (`ui/history_view.py`): a
@@ -279,6 +342,8 @@ Buttons are made with `outline_button()` (`button_label()` text, `variant="outli
 - `QListWidget::item`: padding 4px 8px and a transparent 2px left border, so selected and
   unselected rows line up; `:selected` (also `:!active`): `selection` background, `text`,
   2px `accent_border` left border.
+- `QListView#actionList` and `QScrollArea#actionDetail` share the brief list's and detail's
+  panel background, no border and no outline.
 - `QTabWidget::pane`: no border. `QTabBar::tab`: transparent, `text_secondary`, padding
   6px 12px, no border; `:selected`: `text` with a 2px `accent_border` bottom border.
 - Briefs: the missed-days list hides when there are none; its note says why. An automatic

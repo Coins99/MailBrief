@@ -278,3 +278,15 @@ async def test_cancel_follows_sync_and_review_while_busy(window: MainWindow) -> 
     assert chain == ["cancelButton", "sidebarNav", *FIRST_EMAIL]
     release.set()
     await finish(window)
+
+
+async def test_tab_on_the_actions_page_runs_views_list_then_detail(window: MainWindow) -> None:
+    window._show_page("actions")
+    QApplication.processEvents()
+    panel = window.actions_panel
+    detail = [button.objectName() for button in panel.detail.buttons()]
+    assert detail == ["editButton", "completeButton", "deleteButton", "draftButton"]
+
+    chain = tab_chain(window, panel.tabs)
+
+    assert chain == ["actionsTabs", "actionList", *detail, *HEADER_AND_SIDEBAR]

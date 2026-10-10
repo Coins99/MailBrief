@@ -21,6 +21,11 @@ Run each check on Windows and on macOS, and note the date, platform and build.
 - [ ] The focus ring is visible on every stop, and Return or Enter opens a row once.
 - [ ] In the brief list, Page Up and Page Down scroll the selected email while the whole
       list fits, and page the list when it scrolls.
+- [ ] On Actions and Waiting, Tab runs the Open / Waiting / Completed tabs → the list →
+      the selected action's buttons in display order; the arrow keys switch tabs, and
+      Return on a row opens the editor once.
+- [ ] In an action list, Page Up and Page Down scroll the selected action while the whole
+      list fits, and page the list when it scrolls.
 
 ## Reading the brief
 
@@ -55,6 +60,17 @@ Run each check on Windows and on macOS, and note the date, platform and build.
       long addresses wrap, and nothing scrolls sideways.
 
 ## Pages
+
+- [ ] Actions and Waiting show rows beside the selected action, edge to edge like Today:
+      the meta line (target with its reason, due date, steps, carried over, a source gone
+      from local mail), the Overdue, "N new in thread" and proposal chips, and muted
+      Completed rows. The tab counts match the sidebar's.
+- [ ] The detail shows the state, dates (an overdue deadline in the warning colour), the
+      plan with ✓ and ○, notes, thread activity with **Mark seen**, pending proposals with
+      **Proposals…**, the sources with **Open source** (it opens Gmail), and Edit,
+      Complete or Reopen, Delete and Draft; each still works, with **Undo**.
+- [ ] Each view with no actions shows its own empty message and no buttons.
+- [ ] A long title, note or step wraps in the detail and never widens the window.
 
 - [ ] The Briefs page lists saved briefs and missed days; opening a past brief returns to
       Today with the "Viewing the brief for …" banner and **Back to latest**.
