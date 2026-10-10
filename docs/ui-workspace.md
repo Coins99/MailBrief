@@ -41,6 +41,18 @@ Run each check on Windows and on macOS, and note the date, platform and build.
       carried over (and overdue when they were due); and the Briefs page, if it shows,
       reloads. During a sync, that reload waits until the sync ends.
 
+## Dates and language
+
+- [ ] With the Mac set to another language (System Settings → General → Language &
+      Region, another language first in the list), dates read in English everywhere,
+      including the month and weekday names in the calendar pop-ups (Saved mail's date
+      and the action editor's target date). Check it both after opening MailBrief from
+      Finder and after starting it from Terminal. On Windows, check the same with another
+      Windows display language.
+- [ ] A draft or brief from another year shows its year: in Drafts ("updated Wed Dec 3,
+      2025, 14:00"), in the draft editor's versions, and on the Briefs page ("Wed Dec 31,
+      2025 · Complete · …").
+
 ## Screen readers
 
 - [ ] VoiceOver on macOS reads the sidebar rows with their counts ("Actions, 5"), the
@@ -62,9 +74,9 @@ Run each check on Windows and on macOS, and note the date, platform and build.
 ## Pages
 
 - [ ] Actions and Waiting show rows beside the selected action, edge to edge like Today:
-      the meta line (target with its reason, due date, steps, carried over, a source gone
-      from local mail), the Overdue, "N new in thread" and proposal chips, and muted
-      Completed rows. The tab counts match the sidebar's.
+      the meta line (completed day, target without its reason, due date, steps), the
+      Overdue, "N new in thread" and proposal chips, and muted Completed rows. The tab
+      counts match the sidebar's.
 - [ ] The detail shows the state, dates (an overdue deadline in the warning colour), the
       plan with ✓ and ○, notes, thread activity with **Mark seen**, pending proposals with
       **Proposals…**, the sources with **Open source** (it opens Gmail), and Edit,

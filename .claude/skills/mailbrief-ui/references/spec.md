@@ -208,6 +208,12 @@ The brief list's chips keep their shorter forms (see Brief list).
   `deadline_text.py`, never `%a` or `%b`: Qt applies the system language to C date
   formatting, so a French Mac would otherwise print "lun." and "août". No file in `ui` uses the
   weekday or month strftime directives.
+- Qt's own widgets take their month and weekday names (the calendar pop-ups of Saved mail
+  and the action editor) from the default `QLocale`, which follows the system language.
+  `use_english_locale()` in `app.py` sets it to English, and `app.main()` calls it right
+  after the QApplication exists: a widget takes the default locale when it is created, so
+  no widget may be created before it. The date fields keep their explicit `yyyy-MM-dd`
+  display format; English is en_US, so the calendars start the week on Sunday.
 - `today` (the owner's day, in the owner's zone) is a required keyword argument of every
   formatter below; the window passes its injected clock's day.
 - `weekday(day)`: "Mon". `month_day(day, *, today)`: "Oct 5"; when the year isn't

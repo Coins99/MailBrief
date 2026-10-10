@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from PySide6.QtCore import QLibraryInfo
+from PySide6.QtCore import QLibraryInfo, QLocale
 from pytestqt.qtbot import QtBot
 
 from mailbrief.config import Settings
@@ -270,6 +270,35 @@ def test_package_failure_reports_type_without_sensitive_exception(
         report = (tmp_path / "smoke-result.json").read_text()
         assert "RuntimeError" in report
         assert "SECRET_MARKER" not in report
+    finally:
+        application = QApplication.instance()
+        assert isinstance(application, QApplication)
+        application.setQuitOnLastWindowClosed(True)
+        asyncio.set_event_loop(None)
+
+
+def test_main_switches_to_english_before_any_widget(
+    qtbot: QtBot,
+    themed: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from mailbrief import app
+    from mailbrief.ui import smoke
+
+    seen: list[QLocale.Language] = []
+
+    async def check(_directory: Path) -> None:  # The first code to make widgets.
+        seen.append(QLocale().language())
+
+    monkeypatch.setattr(smoke, "check_package", check)
+    # A French system language; ``themed`` puts the previous default back.
+    QLocale.setDefault(QLocale(QLocale.Language.French, QLocale.Country.France))
+    try:
+        assert app.main(["--smoke-test-dir", str(tmp_path)]) == 0
+        assert seen == [QLocale.Language.English]
     finally:
         application = QApplication.instance()
         assert isinstance(application, QApplication)

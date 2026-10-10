@@ -44,7 +44,7 @@ Read AGENTS.md first; its invariants win. Component specs and the token table ar
 - The offscreen platform ignores `setColorScheme`, so tests call `apply_theme`
   explicitly, and every test that calls it (directly or through `app.main`) takes the
   `themed` fixture from `tests/ui/conftest.py`, which restores the style, palette,
-  stylesheet, font and tokens.
+  stylesheet, font, tokens and the default `QLocale` (`app.main` sets it to English).
 - On macOS, UI tests need `MACOS_GUI_AVAILABLE=1` (or a real session) and run offscreen
   with `QT_QPA_PLATFORM=offscreen`.
 - Never assert a top-level window's requested size: CI's macOS screen is small (about

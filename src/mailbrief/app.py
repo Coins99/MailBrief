@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile
+from PySide6.QtCore import QLocale, QLockFile
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
 
@@ -17,6 +17,14 @@ from mailbrief.ui.diagnostics import configure_logging, log_failure, logger
 from mailbrief.ui.main_window import MainWindow
 from mailbrief.ui.runtime import DesktopRuntime
 from mailbrief.ui.theme import ThemeMode, apply_theme
+
+
+def use_english_locale() -> None:
+    """Make English the default locale, so Qt's own widgets (the calendar pop-ups' month
+    and weekday names) read in English like the rest of the window, whatever the system
+    language. A widget takes the default locale when it is created, so this runs before
+    any widget exists."""
+    QLocale.setDefault(QLocale(QLocale.Language.English))
 
 
 def create_application(arguments: Sequence[str] | None = None) -> QApplication:
@@ -117,6 +125,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     options = parser.parse_args(arguments)
     application = create_application([sys.argv[0]])
+    use_english_locale()  # Before any widget: each takes the default locale when created.
     theme_failure: Exception | None = None
     try:
         apply_theme(application, ThemeMode.DARK)
