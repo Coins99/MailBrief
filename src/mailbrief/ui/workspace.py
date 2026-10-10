@@ -45,6 +45,7 @@ from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus
 from mailbrief.services.history import coverage_line, coverage_short
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
+from mailbrief.ui.deadline_text import day_text, moment_text
 from mailbrief.ui.hairline import (
     HairlineDivider,
     HairlineSplitter,
@@ -89,10 +90,10 @@ def _styled(widget: QWidget, name: str) -> None:
     widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
 
-def brief_title(digest: DailyDigest) -> str:
-    """The brief's day, such as "Tue Oct 6", and whether it is partial or empty."""
-    day = digest.local_date
-    title = f"{day:%a %b} {day.day}"
+def brief_title(digest: DailyDigest, today: date | None = None) -> str:
+    """The brief's day, such as "Tue Oct 6" (with the year when it isn't ``today``'s), and
+    whether it is partial or empty."""
+    title = day_text(digest.local_date, today)
     if digest.status is DigestStatus.PARTIAL:
         return f"{title} · Partial"
     if digest.status is DigestStatus.EMPTY:
@@ -100,12 +101,13 @@ def brief_title(digest: DailyDigest) -> str:
     return title
 
 
-def brief_meta(digest: DailyDigest, zone: ZoneInfo) -> tuple[str, str]:
+def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date | None = None) -> tuple[str, str]:
     """The brief's account, save time and coverage: a short line to show, and the full
     sentence for its accessible name.
 
     The save time is in the brief's own zone, like its coverage footer. When the owner's
-    zone, ``zone``, would show another time, the brief's zone is named.
+    zone, ``zone``, would show another time, the brief's zone is named. The full sentence
+    gives the save time in ``zone``, as ``moment_text`` writes it.
     """
     saved = digest.generated_at_utc.astimezone(ZoneInfo(digest.timezone_name))
     if saved.date() > digest.local_date:
@@ -117,7 +119,7 @@ def brief_meta(digest: DailyDigest, zone: ZoneInfo) -> tuple[str, str]:
     owner_offset = digest.generated_at_utc.astimezone(zone).utcoffset()
     named = "" if saved.utcoffset() == owner_offset else f" ({digest.timezone_name})"
     short = [f"{digest.account_id} · saved {when}{named}"]
-    full = f"{digest.account_id}. Saved {saved.isoformat(timespec='minutes')}{named}."
+    full = f"{digest.account_id}. Saved {moment_text(digest.generated_at_utc, zone, today)}."
     coverage = digest.coverage
     if coverage is not None:
         if coverage.failed:
@@ -419,9 +421,9 @@ class BriefHeading(QWidget):
         self.meta.setObjectName("briefHeadingMeta")
         layout.addWidget(self.meta)
 
-    def show_brief(self, digest: DailyDigest, zone: ZoneInfo) -> None:
-        self.title.setText(brief_title(digest))
-        self.meta.setText(*brief_meta(digest, zone))
+    def show_brief(self, digest: DailyDigest, zone: ZoneInfo, today: date) -> None:
+        self.title.setText(brief_title(digest, today))
+        self.meta.setText(*brief_meta(digest, zone, today))
         self.show()
 
 
@@ -529,7 +531,7 @@ class ThreePaneWorkspace(QWidget):
         self._links = links or {}
         self._proposals = proposals or {}
         self._owner_zone, self._today = owner_zone, today
-        self.heading.show_brief(digest, owner_zone)
+        self.heading.show_brief(digest, owner_zone, today)
         self.coverage.setText(coverage_short(digest), coverage_line(digest))
         if not digest.items:
             self.brief_list.show_rows([])

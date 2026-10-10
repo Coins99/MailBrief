@@ -680,7 +680,7 @@ async def test_a_run_says_how_many_updates_it_proposed(
 
     await run_brief(window)
 
-    assert window.status.text() == "Brief saved (complete)." + sentence
+    assert window.status.text() == "Brief saved (Complete)." + sentence
 
 
 async def test_the_proposal_sentence_follows_the_thread_sentence(
@@ -693,7 +693,7 @@ async def test_the_proposal_sentence_follows_the_thread_sentence(
     await run_brief(window)
 
     assert window.status.text() == (
-        "Brief saved (complete). Checked 2 tracked threads. Proposed 2 updates to your actions."
+        "Brief saved (Complete). Checked 2 tracked threads. Proposed 2 updates to your actions."
     )
 
 

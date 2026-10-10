@@ -336,7 +336,7 @@ def test_brief_meta_uses_the_brief_zone() -> None:
     )
     assert brief_meta(morning, paris) == (
         "owner@example.com · saved 09:14 (America/Toronto)",
-        "owner@example.com. Saved 2026-10-06T09:14-04:00 (America/Toronto).",
+        "owner@example.com. Saved Tue Oct 6, 15:14.",  # In the owner's zone, Paris.
     )
     assert "up to 09:14" in coverage_short(morning)  # The heading and footer agree.
     # Oct 6 23:30 in Toronto is Oct 7 05:30 in Paris: the brief's own day decides.
@@ -358,11 +358,19 @@ def test_brief_title_names_the_day_and_an_incomplete_brief() -> None:
     assert brief_title(brief_with(status=DigestStatus.EMPTY)) == "Tue Oct 6 · Empty"
 
 
+def test_a_brief_from_another_year_names_it() -> None:
+    old = brief_with(local_date=date(2026, 12, 31))
+    assert brief_title(old, date(2027, 1, 4)) == "Thu Dec 31, 2026"
+    assert brief_title(old, date(2026, 12, 31)) == "Thu Dec 31"
+    full = brief_meta(old, OWNER_ZONE, date(2027, 1, 4))[1]
+    assert "Saved Tue Oct 6, 2026, 09:14." in full
+
+
 def test_brief_meta_short_and_full() -> None:
     complete = brief_with(coverage=coverage())
     assert brief_meta(complete, OWNER_ZONE) == (
         "owner@example.com · saved 09:14",
-        "owner@example.com. Saved 2026-10-06T09:14-04:00. "
+        "owner@example.com. Saved Tue Oct 6, 09:14. "
         "3 analyzed, 1 reused, 0 failed, 1 skipped. Inbox sync complete.",
     )
     later = brief_with(generated_at_utc=datetime(2026, 10, 7, 13, 5, tzinfo=UTC))
@@ -378,7 +386,7 @@ def test_brief_meta_short_and_full() -> None:
     unknown = brief_with(coverage=None)
     assert brief_meta(unknown, OWNER_ZONE) == (
         "owner@example.com · saved 09:14",
-        "owner@example.com. Saved 2026-10-06T09:14-04:00.",
+        "owner@example.com. Saved Tue Oct 6, 09:14.",
     )
 
 
@@ -388,7 +396,7 @@ def test_the_heading_shows_the_brief(qtbot: QtBot) -> None:
     assert not heading.isHidden()
     assert heading.title.text() == "Tue Oct 6"
     assert heading.meta.text() == "owner@example.com · saved 09:14"
-    assert heading.meta.accessibleName().startswith("owner@example.com. Saved 2026-10-06T09:14")
+    assert heading.meta.accessibleName().startswith("owner@example.com. Saved Tue Oct 6, 09:14")
 
 
 def workspace_with(

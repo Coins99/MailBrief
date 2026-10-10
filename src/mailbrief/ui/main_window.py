@@ -2008,7 +2008,7 @@ class MainWindow(QMainWindow):
                     await self._show_digest(digest)
                 else:
                     await self._view(digest)
-                self.status.setText(f"Brief saved ({digest.status.value}).")
+                self.status.setText(f"Brief saved ({digest.status.value.capitalize()}).")
                 if digest.status is DigestStatus.EMPTY:
                     if result.sync.message_count == 0 and result.sync.status is SyncStatus.COMPLETE:
                         self.status.setText(f"No messages in {day}. Empty brief saved.")

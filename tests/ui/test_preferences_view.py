@@ -181,9 +181,8 @@ async def test_startup_applies_the_owner_s_zone_and_drafting_defaults(
 
     assert window.zone == ZoneInfo("America/Toronto")
     assert window.cached_dialog.zone == window.zone
-    # Generated at 12:00 UTC in a UTC brief: the save time stays in the brief's zone, named
-    # because Toronto would show another time.
-    assert "Saved 2026-09-04T12:00+00:00 (UTC)." in shown_text(window)
+    # Generated at 12:00 UTC: the full sentence gives the time in the owner's zone, Toronto.
+    assert "Saved Fri Sep 4, 08:00." in shown_text(window)
     window.draft_editor.ai_panel.offer(frozenset(), DraftKind.NOTE)
     options = window.draft_editor.ai_panel.options()
     assert options is not None
@@ -236,8 +235,8 @@ async def test_saving_applies_the_new_zone_and_refreshes_the_views(
     assert window.status.text() == "Preferences saved."
     assert window.settings_dialog.status.text() == "Preferences saved."
     assert backend.loads > loads and backend.list_calls > lists
-    # The save time stays in the brief's zone; Tokyo would show another time, so it's named.
-    assert "Saved 2026-09-04T12:00+00:00 (UTC)." in shown_text(window)
+    # The full sentence follows the owner's new zone: 12:00 UTC is 21:00 in Tokyo.
+    assert "Saved Fri Sep 4, 21:00." in shown_text(window)
 
     panel.save_button.click()  # The panel now holds the new revision.
     await finish(window)

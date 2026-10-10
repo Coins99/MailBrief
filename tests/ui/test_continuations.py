@@ -303,7 +303,7 @@ async def test_a_brief_run_reports_its_thread_check(
     await finish(window)
 
     assert window.status.text() == (
-        "Brief saved (complete). Checked 3 of 4 tracked threads; 1 failed."
+        "Brief saved (Complete). Checked 3 of 4 tracked threads; 1 failed."
     )
     assert backend.link_calls[-1] == backend.saved
 
