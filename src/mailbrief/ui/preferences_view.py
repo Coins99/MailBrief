@@ -185,7 +185,8 @@ class PreferencesPanel(QWidget):
         self.save_button.clicked.connect(self._save)
         self.reset_button.clicked.connect(self.reset_requested.emit)
         self.auto_button.clicked.connect(self.auto_send_requested.emit)
-        self.set_auto_send(None, ZoneInfo("UTC"))
+        # No permission to date yet, so ``today`` is never read.
+        self.set_auto_send(None, ZoneInfo("UTC"), today=date.min)
         self.set_zones("unknown", ())
 
     def set_zones(self, system_zone: str, zones: tuple[str, ...]) -> None:
@@ -232,7 +233,7 @@ class PreferencesPanel(QWidget):
         *,
         unreadable: bool = False,
         connected: bool = True,
-        today: date | None = None,
+        today: date,
     ) -> None:
         """Show the connected account's automatic-analysis permission, in ``zone`` for the
         date it was given, with its year when ``today`` (the owner's day) is in another.
@@ -251,7 +252,7 @@ class PreferencesPanel(QWidget):
             text, changeable = _AUTO_OFF, True
         else:
             noun = "message" if status.limit == 1 else "messages"
-            since = day_text(status.granted_at_utc.astimezone(zone).date(), today)
+            since = day_text(status.granted_at_utc.astimezone(zone).date(), today=today)
             text, changeable = f"Up to {status.limit} {noun} per run, since {since}", True
         self.auto_line.setText(text)
         self.auto_button.setEnabled(changeable)

@@ -35,6 +35,7 @@ from mailbrief.domain.actions import Action, ActionFilter
 from mailbrief.domain.drafts import DraftKind
 from mailbrief.ui.action_detail import ActionDetailPane
 from mailbrief.ui.action_text import (
+    ActionDetails,
     action_details,
     completed_text,
     gmail_source,
@@ -57,7 +58,6 @@ from mailbrief.ui.brief_list import (
     proposal_chip,
     row_height,
 )
-from mailbrief.ui.deadline_text import day_text
 from mailbrief.ui.hairline import HairlineSplitter, paint_focus_ring
 from mailbrief.ui.labels import plain_label
 from mailbrief.ui.lists import ActivatingList
@@ -104,10 +104,15 @@ def describe(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> s
 
     An exact deadline is shown in ``zone``, the owner's.
     """
-    facts = action_details(action, today=today, zone=zone, now=now)
+    return describe_details(action, action_details(action, today=today, zone=zone, now=now))
+
+
+def describe_details(action: Action, facts: ActionDetails) -> str:
+    """``describe``, from details already worked out."""
     details: list[str] = []
-    if facts.target is not None:
-        details.append(f"target {day_text(facts.target, facts.today)}")
+    target = target_text(facts, reason=False)
+    if target is not None:
+        details.append(target)
     if facts.due is not None:
         details.append(f"due {facts.due}")
     if facts.steps:
@@ -139,7 +144,11 @@ class ActionRow:
 
 def action_row(action: Action, *, today: date, zone: ZoneInfo, now: datetime) -> ActionRow:
     """The painted row for ``action``, from the same details as ``describe``."""
-    facts = action_details(action, today=today, zone=zone, now=now)
+    return row_from_details(action, action_details(action, today=today, zone=zone, now=now))
+
+
+def row_from_details(action: Action, facts: ActionDetails) -> ActionRow:
+    """``action_row``, from details already worked out."""
     meta = [
         text
         for text in (
@@ -153,7 +162,7 @@ def action_row(action: Action, *, today: date, zone: ZoneInfo, now: datetime) ->
     chips: list[Chip] = []
     if facts.overdue:
         chips.append(Chip("Overdue", ChipTone.WARNING))
-    if facts.new_messages and has_activity(action):
+    if facts.new_messages:  # Any new message is unseen activity; an owner's reply alone isn't new.
         chips.append(Chip(f"{facts.new_messages} new in thread", ChipTone.ACCENT))
     proposal = proposal_chip(facts.proposals)
     if proposal is not None:
@@ -384,8 +393,9 @@ class ActionsPanel(QWidget):
         try:
             listing.clear()
             for action in actions:
-                item = QListWidgetItem(describe(action, today=today, zone=zone, now=now))
-                item.setData(ROW_ROLE, action_row(action, today=today, zone=zone, now=now))
+                facts = action_details(action, today=today, zone=zone, now=now)
+                item = QListWidgetItem(describe_details(action, facts))
+                item.setData(ROW_ROLE, row_from_details(action, facts))
                 listing.addItem(item)
             ids = [action.public_id for action in actions]
             if kept in ids:

@@ -265,7 +265,7 @@ class DataDialog(QDialog):
 
     def _backup_time(self, metadata: BackupMetadata) -> str:
         """When the backup was made, in the owner's zone, with the year if it isn't this one."""
-        return moment_text(metadata.created_at_utc, self.zone, self.today())
+        return moment_text(metadata.created_at_utc, self.zone, today=self.today())
 
     async def restore(self) -> None:
         path = await self.choose("Restore a backup", "ZIP archive (*.zip)", save=False)

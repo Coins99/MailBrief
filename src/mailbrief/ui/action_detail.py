@@ -47,12 +47,14 @@ OPEN_MARK: Final = "○ "
 
 
 def state_text(action: Action, details: ActionDetails) -> str:
-    """The state line: "Yours · open", "Waiting for someone · open" or "Completed Tue Oct 6"."""
+    """The state line: "Yours · open", "Waiting for someone · open", either with " · carried
+    over" while that applies, or "Completed Tue Oct 6"."""
     completed = completed_text(details)
     if action.status is ActionStatus.COMPLETED and completed is not None:
         return completed
     who = "Yours" if action.ownership is ActionOwnership.MINE else "Waiting for someone"
-    return f"{who} · {action.status.value}"
+    state = f"{who} · {action.status.value}"
+    return f"{state} · carried over" if details.carried_over else state
 
 
 def proposals_text(count: int) -> str:
@@ -64,7 +66,7 @@ def proposals_text(count: int) -> str:
 def source_text(source: ActionSource, *, today: date, zone: ZoneInfo) -> str:
     """The sender's address and the received date in ``zone``, and whether the email has
     left local mail."""
-    received = day_text(source.received_at_utc.astimezone(zone).date(), today)
+    received = day_text(source.received_at_utc.astimezone(zone).date(), today=today)
     text = f"{source.sender_address} · Received {received}"
     return text if source.available else f"{text} · No longer in local mail"
 

@@ -5,6 +5,7 @@ through one serialized queue, and answers through the methods below. Source subj
 senders come from email, so they are shown only in plain-text labels.
 """
 
+from datetime import date
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
@@ -477,13 +478,13 @@ class DraftEditor(QDialog):
             return
         self.versions_requested.emit()
 
-    def show_versions(self, versions: tuple[DraftVersionInfo, ...]) -> None:
+    def show_versions(self, versions: tuple[DraftVersionInfo, ...], today: date) -> None:
         self._versions = versions
         self.confirm_panel.hide()
         self.versions_list.blockSignals(True)
         self.versions_list.clear()
         for info in versions:
-            when = moment_text(info.created_at_utc, self._zone)
+            when = moment_text(info.created_at_utc, self._zone, today=today)
             preview = info.preview or "(empty)"
             made = info.generation
             how = (

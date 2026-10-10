@@ -45,7 +45,7 @@ from mailbrief.domain.digests import DailyDigest, DigestItem, DigestStatus
 from mailbrief.services.history import coverage_line, coverage_short
 from mailbrief.ui.brief_detail import BriefDetailPane
 from mailbrief.ui.brief_list import BriefListView, build_rows
-from mailbrief.ui.deadline_text import day_text, moment_text
+from mailbrief.ui.deadline_text import day_text, moment_text, month_day
 from mailbrief.ui.hairline import (
     HairlineDivider,
     HairlineSplitter,
@@ -90,10 +90,10 @@ def _styled(widget: QWidget, name: str) -> None:
     widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
 
-def brief_title(digest: DailyDigest, today: date | None = None) -> str:
+def brief_title(digest: DailyDigest, today: date) -> str:
     """The brief's day, such as "Tue Oct 6" (with the year when it isn't ``today``'s), and
     whether it is partial or empty."""
-    title = day_text(digest.local_date, today)
+    title = day_text(digest.local_date, today=today)
     if digest.status is DigestStatus.PARTIAL:
         return f"{title} · Partial"
     if digest.status is DigestStatus.EMPTY:
@@ -101,7 +101,7 @@ def brief_title(digest: DailyDigest, today: date | None = None) -> str:
     return title
 
 
-def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date | None = None) -> tuple[str, str]:
+def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date) -> tuple[str, str]:
     """The brief's account, save time and coverage: a short line to show, and the full
     sentence for its accessible name.
 
@@ -112,7 +112,7 @@ def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date | None = None) -
     """
     saved = digest.generated_at_utc.astimezone(ZoneInfo(digest.timezone_name))
     if saved.date() > digest.local_date:
-        when = f"{saved:%b} {saved.day} {saved:%H:%M}"
+        when = f"{month_day(saved.date(), today=today)} {saved:%H:%M}"
     else:
         when = f"{saved:%H:%M}"
     # Compare offsets, not names: two names for one zone (Asia/Calcutta, Asia/Kolkata),
@@ -120,7 +120,7 @@ def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date | None = None) -
     owner_offset = digest.generated_at_utc.astimezone(zone).utcoffset()
     named = "" if saved.utcoffset() == owner_offset else f" ({digest.timezone_name})"
     short = [f"{digest.account_id} · saved {when}{named}"]
-    when_full = moment_text(digest.generated_at_utc, ZoneInfo(digest.timezone_name), today)
+    when_full = moment_text(digest.generated_at_utc, ZoneInfo(digest.timezone_name), today=today)
     full = f"{digest.account_id}. Saved {when_full}{named}."
     coverage = digest.coverage
     if coverage is not None:
@@ -550,12 +550,14 @@ class ThreePaneWorkspace(QWidget):
     def set_today(self, today: date, owner_zone: ZoneInfo) -> None:
         """On a new day (or in a new zone), recount the list's deadline chips from
         ``today`` in ``owner_zone``, in place: the selection, the detail pane and keyboard
-        focus stay as they are, and nothing is read from storage. Nothing else in the brief
-        depends on the day."""
+        focus stay as they are, and nothing is read from storage. The heading's day and save
+        time are rewritten too: a brief gains its year after New Year. Nothing else in the
+        brief depends on the day."""
         digest = self._digest
         if digest is None or (today, owner_zone) == (self._today, self._owner_zone):
             return
         self._today, self._owner_zone = today, owner_zone
+        self.heading.show_brief(digest, owner_zone, today)  # Its year, and its save day.
         if digest.items:
             self.brief_list.brief_model.update_rows(
                 build_rows(digest, self._proposals, today, owner_zone)
@@ -581,13 +583,14 @@ class ThreePaneWorkspace(QWidget):
 
     def _show_item(self, item: DigestItem) -> None:
         self._pending_scroll = None  # Another email starts at the top.
-        digest = self._digest
-        if digest is None:
+        digest, today = self._digest, self._today
+        if digest is None or today is None:
             return
         self.detail.show_item(
             item,
             account_email=digest.account_id,
             timezone_name=digest.timezone_name,
+            today=today,
             links=self._links.get(item.message_key, ()),
             proposals=self._proposals.get(item.message_key, ()),
         )

@@ -1,6 +1,6 @@
 """The drafts panel: plain rows, New, Open (Return or double-click), Delete and busy state."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -13,6 +13,7 @@ from mailbrief.domain.drafts import DraftKind, DraftSummary
 from mailbrief.ui.drafts_view import DELETE, NEW, OPEN, DraftsPanel, describe
 
 TORONTO = ZoneInfo("America/Toronto")
+TODAY = date(2026, 9, 30)
 
 
 def summary(number: int, **overrides: Any) -> DraftSummary:
@@ -56,24 +57,24 @@ def requests(panel: DraftsPanel) -> list[tuple[str, object]]:
     ],
 )
 def test_describe(fields: dict[str, Any], expected: str) -> None:
-    assert describe(summary(1, **fields), TORONTO) == expected
+    assert describe(summary(1, **fields), TORONTO, TODAY) == expected
 
 
 def test_rows_are_plain_text_and_keep_the_selection(panel: DraftsPanel) -> None:
     assert not panel.empty.isHidden()
     assert not panel.open_button.isEnabled()
     first, second = summary(1, display_title="<b>bold</b>"), summary(2)
-    panel.show_drafts((first, second), TORONTO)
+    panel.show_drafts((first, second), TORONTO, TODAY)
     panel.list.setCurrentRow(1)
 
-    panel.show_drafts((summary(3), first, second), TORONTO)
+    panel.show_drafts((summary(3), first, second), TORONTO, TODAY)
 
     assert panel.empty.isHidden()
     assert panel.selected() == second
     assert panel.list.item(1).text().startswith("Note · <b>bold</b>")
-    panel.show_drafts((summary(3),), TORONTO)
+    panel.show_drafts((summary(3),), TORONTO, TODAY)
     assert panel.selected() == summary(3)
-    panel.show_drafts((), TORONTO)
+    panel.show_drafts((), TORONTO, TODAY)
     assert panel.selected() is None and not panel.delete_button.isEnabled()
 
 
@@ -90,7 +91,7 @@ def test_new_offers_email_note_and_message(panel: DraftsPanel) -> None:
 
 def test_open_by_button_return_or_double_click_and_delete(panel: DraftsPanel, qtbot: QtBot) -> None:
     found = requests(panel)
-    panel.show_drafts((summary(1),), TORONTO)
+    panel.show_drafts((summary(1),), TORONTO, TODAY)
 
     panel.open_button.click()
     QTest.keyClick(panel.list, Qt.Key.Key_Return)
@@ -104,7 +105,7 @@ def test_open_by_button_return_or_double_click_and_delete(panel: DraftsPanel, qt
 
 def test_busy_disables_everything(panel: DraftsPanel) -> None:
     found = requests(panel)
-    panel.show_drafts((summary(1),), TORONTO)
+    panel.show_drafts((summary(1),), TORONTO, TODAY)
 
     panel.set_busy(True)
     panel.new_menu.actions()[0].trigger()
@@ -123,7 +124,18 @@ def test_without_drafts_a_centred_message_replaces_the_list(panel: DraftsPanel) 
     assert panel.empty.property("tone") == "muted"
     assert panel.empty.alignment() & Qt.AlignmentFlag.AlignCenter
     assert panel.empty.wordWrap()
-    panel.show_drafts((summary(1),), TORONTO)
+    panel.show_drafts((summary(1),), TORONTO, TODAY)
     assert not panel.list.isHidden() and panel.empty.isHidden()
-    panel.show_drafts((), TORONTO)
+    panel.show_drafts((), TORONTO, TODAY)
     assert panel.list.isHidden() and not panel.empty.isHidden()
+
+
+def test_a_draft_from_another_year_names_it(qtbot: QtBot) -> None:
+    next_year = date(2027, 1, 4)
+    assert describe(summary(1), TORONTO, next_year).startswith(
+        "Note · Draft 1 — updated Mon Sep 28, 2026, 10:05"
+    )
+    panel = DraftsPanel()
+    qtbot.addWidget(panel)
+    panel.show_drafts((summary(1),), TORONTO, next_year)
+    assert "updated Mon Sep 28, 2026, 10:05" in panel.list.item(0).text()

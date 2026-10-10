@@ -1028,3 +1028,25 @@ async def test_each_automatic_run_leaves_one_counts_only_line_in_the_desktop_log
     )
     assert "status=saved ready=0 unrefreshed=0 analyzed=3 deferred=2 ai_requests=0" in lines[1]
     assert not any(word in " ".join(lines) for word in ("Budget", "owner@", "subject"))
+
+
+async def test_the_permission_line_names_the_year_when_it_is_another(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    window.zone = ZoneInfo("UTC")
+    window.now = lambda: datetime(2027, 1, 4, 12, tzinfo=UTC)
+    backend.permission = make_auto_send(
+        limit=2, granted_at_utc=datetime(2026, 9, 29, 15, tzinfo=UTC)
+    )
+    panel = window.settings_dialog.preferences_panel
+
+    await open_settings(window)  # The line when Settings opens.
+    assert panel.auto_line.text() == "Up to 2 messages per run, since Tue Sep 29, 2026"
+    window.settings_dialog.reject()
+
+    panel.set_auto_send(None, window.zone, today=window._local_today())
+    window._account_email = OWNER
+    window.start(window._open_auto_send)  # The line when its dialog is opened.
+    await finish(window)
+    assert panel.auto_line.text() == "Up to 2 messages per run, since Tue Sep 29, 2026"
+    window.auto_send_dialog.reject()

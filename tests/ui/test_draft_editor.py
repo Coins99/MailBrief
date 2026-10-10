@@ -1,7 +1,7 @@
 """The draft editor alone: fields per kind, live checks, autosave timing, versions, closing."""
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
@@ -290,6 +290,7 @@ def test_save_version_saves_pending_text_first(editor: DraftEditor) -> None:
     assert editor.status.text() == "No changes since the last saved version."
 
 
+TODAY = date(2026, 9, 30)
 VERSIONS = (
     DraftVersionInfo(
         number=2, origin=DraftVersionOrigin.EDITED, created_at_utc=AT, preview="Later", length=5
@@ -307,7 +308,7 @@ def test_versions_preview_and_restore_after_confirmation(editor: DraftEditor) ->
 
     editor.versions_button.click()
     assert listed == [()]
-    editor.show_versions(VERSIONS)
+    editor.show_versions(VERSIONS, TODAY)
     assert editor.versions_list.item(0).text() == (
         "Version 2 · saved Mon Sep 28, 10:05 · 5 characters · Later"
     )
@@ -336,7 +337,7 @@ def test_versions_preview_and_restore_after_confirmation(editor: DraftEditor) ->
 
 def test_keep_my_text_cancels_a_restore_and_a_failure_unlocks(editor: DraftEditor) -> None:
     restores = recorded(editor.restore_requested)
-    editor.show_versions(VERSIONS)
+    editor.show_versions(VERSIONS, TODAY)
     editor.restore_button.click()
     editor.keep_button.click()
     assert editor.confirm_panel.isHidden() and restores == []
@@ -461,7 +462,7 @@ def test_over_the_limit_every_write_waits(editor: DraftEditor) -> None:
     saves = recorded(editor.autosave_requested)
     restores = recorded(editor.restore_requested)
     copies = recorded(editor.save_as_new_requested)
-    editor.show_versions(VERSIONS)
+    editor.show_versions(VERSIONS, TODAY)
     editor.body.setPlainText("x" * 20_001)
 
     editor._autosave_now()
@@ -492,7 +493,7 @@ def test_versions_refresh_after_a_checkpoint_and_restore_needs_a_choice(
 ) -> None:
     listed = recorded(editor.versions_requested)
     restores = recorded(editor.restore_requested)
-    editor.show_versions(())
+    editor.show_versions((), TODAY)
     assert not editor.restore_button.isEnabled()
 
     editor._ask_restore()
@@ -501,3 +502,13 @@ def test_versions_refresh_after_a_checkpoint_and_restore_needs_a_choice(
 
     assert editor.confirm_panel.isHidden() and restores == []
     assert listed == [()]
+
+
+def test_version_history_names_the_year_of_an_older_version(editor: DraftEditor) -> None:
+    editor.show_versions(VERSIONS, date(2027, 1, 4))
+
+    assert (
+        editor.versions_list.item(0)
+        .text()
+        .startswith("Version 2 · saved Mon Sep 28, 2026, 10:05 ·")
+    )

@@ -40,6 +40,7 @@ from tests.ui.test_workflow import FakeBackend
 KEY = "reply-1"
 TORONTO = ZoneInfo("America/Toronto")
 UTC_ZONE = ZoneInfo("UTC")
+TODAY = date(2026, 9, 5)
 NEW_DATETIME = {
     "kind": FollowUpKind.NEW_DEADLINE,
     "deadline_text": "Monday 5 PM",
@@ -96,9 +97,11 @@ def brief(zone: str = "America/Toronto") -> DailyDigest:
 def test_a_proposal_is_named_by_its_effect(fields: dict[str, object], effect: str) -> None:
     proposal = make_proposal(**fields)
 
-    assert effect_text(proposal, TORONTO) == effect
+    assert effect_text(proposal, TORONTO, today=TODAY) == effect
     if proposal.deadline_precision is DeadlinePrecision.DATETIME:
-        assert effect_text(proposal, UTC_ZONE) == "Set the deadline to Mon Oct 5, 21:00"
+        assert (
+            effect_text(proposal, UTC_ZONE, today=TODAY) == "Set the deadline to Mon Oct 5, 21:00"
+        )
 
 
 # The actions pane
@@ -223,7 +226,7 @@ def two_proposals() -> tuple[ActionProposal, ActionProposal]:
 def test_the_dialog_lists_effect_quote_sender_and_local_date(dialog: ProposalsDialog) -> None:
     action = make_action(proposals=two_proposals())
 
-    dialog.show_proposals(action, TORONTO)
+    dialog.show_proposals(action, TORONTO, TODAY)
 
     assert dialog.listing.count() == 2
     first = dialog.listing.item(0)
@@ -240,7 +243,7 @@ def test_the_dialog_lists_effect_quote_sender_and_local_date(dialog: ProposalsDi
 
 
 def test_the_apply_button_follows_the_selected_rows_effect(dialog: ProposalsDialog) -> None:
-    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO, TODAY)
     assert dialog.apply_button.text() == "&Apply: Set the deadline to Mon Oct 5"
     assert dialog.apply_button.accessibleName() == "Apply: Set the deadline to Mon Oct 5"
 
@@ -252,7 +255,7 @@ def test_the_apply_button_follows_the_selected_rows_effect(dialog: ProposalsDial
 
 def test_text_from_an_email_is_plain_and_never_a_mnemonic(dialog: ProposalsDialog) -> None:
     words = make_proposal(**{**NEW_WORDS, "deadline_text": "Q&A <b>day</b>"})
-    dialog.show_proposals(make_action(proposals=(words,)), TORONTO)
+    dialog.show_proposals(make_action(proposals=(words,)), TORONTO, TODAY)
 
     # An & in the label would read as a mnemonic marker; it is doubled, and the accessible
     # name, which Qt doesn't parse, keeps the single one. The one mnemonic is the button's own.
@@ -268,7 +271,7 @@ def test_text_from_an_email_is_plain_and_never_a_mnemonic(dialog: ProposalsDialo
 def test_the_dialog_emits_apply_and_dismiss_for_the_selected_proposal(
     dialog: ProposalsDialog,
 ) -> None:
-    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO, TODAY)
     applied: list[int] = []
     dismissed: list[int] = []
     dialog.apply_requested.connect(applied.append)
@@ -285,7 +288,7 @@ def test_the_dialog_emits_apply_and_dismiss_for_the_selected_proposal(
 def test_only_the_button_applies_never_return_or_a_double_click(
     dialog: ProposalsDialog,
 ) -> None:
-    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO, TODAY)
     asked: list[tuple[str, int]] = []
     dialog.apply_requested.connect(lambda proposal_id: asked.append(("apply", proposal_id)))
     dialog.dismiss_requested.connect(lambda proposal_id: asked.append(("dismiss", proposal_id)))
@@ -317,7 +320,7 @@ def test_only_the_button_applies_never_return_or_a_double_click(
 
 
 def test_the_apply_button_has_its_own_mnemonic(dialog: ProposalsDialog) -> None:
-    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO, TODAY)
     buttons = (dialog.apply_button, dialog.dismiss_button, dialog.close_button)
 
     for row in (0, 1):
@@ -328,13 +331,13 @@ def test_the_apply_button_has_its_own_mnemonic(dialog: ProposalsDialog) -> None:
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="Qt ignores mnemonics on macOS")
 def test_the_mnemonic_is_a_real_shortcut_where_qt_has_mnemonics(dialog: ProposalsDialog) -> None:
-    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO, TODAY)
 
     assert QKeySequence.mnemonic(dialog.apply_button.text()).toString() == "Alt+A"
 
 
 def test_a_busy_dialog_acts_on_nothing(dialog: ProposalsDialog) -> None:
-    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO)
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO, TODAY)
     asked: list[int] = []
     dialog.apply_requested.connect(asked.append)
     dialog.dismiss_requested.connect(asked.append)
@@ -353,17 +356,17 @@ def test_refreshing_keeps_the_selection_and_an_empty_dialog_says_so(
     dialog: ProposalsDialog,
 ) -> None:
     action = make_action(proposals=two_proposals())
-    dialog.show_proposals(action, TORONTO)
+    dialog.show_proposals(action, TORONTO, TODAY)
     dialog.listing.setCurrentRow(1)
 
-    dialog.show_proposals(action, TORONTO)
+    dialog.show_proposals(action, TORONTO, TODAY)
     assert dialog.listing.currentRow() == 1  # The same proposal stays selected.
 
-    dialog.show_proposals(make_action(proposals=(two_proposals()[0],)), TORONTO)
+    dialog.show_proposals(make_action(proposals=(two_proposals()[0],)), TORONTO, TODAY)
     assert dialog.listing.currentRow() == 0  # The selected one is gone.
 
     for gone in (make_action(), None):
-        dialog.show_proposals(gone, TORONTO)
+        dialog.show_proposals(gone, TORONTO, TODAY)
         assert dialog.listing.count() == 0 and NONE_PENDING in dialog.heading.text()
         assert not dialog.apply_button.isEnabled() and dialog.apply_button.text() == "&Apply"
     assert dialog.action_public_id is None
@@ -632,7 +635,7 @@ async def test_a_closed_dialog_is_not_refreshed_and_closing_the_window_closes_it
 
     opened.actions_panel.proposals_button.click()  # Reopened from a pane with no action.
     assert not dialog.isVisible()
-    dialog.show_proposals(tracked_action(), UTC_ZONE)  # type: ignore[arg-type]
+    dialog.show_proposals(tracked_action(), UTC_ZONE, TODAY)  # type: ignore[arg-type]
     dialog.open()
     opened.closeEvent(QCloseEvent())
     assert not dialog.isVisible()
@@ -708,3 +711,16 @@ async def test_a_cancelled_run_proposes_nothing(window: MainWindow, backend: Fak
     await finish(window)
 
     assert "Proposed" not in window.status.text()
+
+
+def test_dates_in_another_year_name_it(dialog: ProposalsDialog) -> None:
+    next_year = date(2027, 1, 4)
+    proposal = make_proposal(**NEW_DATETIME)
+    assert effect_text(proposal, UTC_ZONE, today=next_year) == (
+        "Set the deadline to Mon Oct 5, 2026, 21:00"
+    )
+    dialog.show_proposals(make_action(proposals=two_proposals()), TORONTO, next_year)
+    first = dialog.listing.item(0).text()
+    assert "Set the deadline to Mon Oct 5, 2026" in first
+    assert "Thu Sep 3, 2026, 09:00" in first  # When the email arrived.
+    assert dialog.apply_button.text() == "&Apply: Set the deadline to Mon Oct 5, 2026"

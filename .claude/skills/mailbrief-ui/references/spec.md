@@ -170,7 +170,8 @@ a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list 
   them under its old names), so only the text between them is rebuilt. In order, every
   mail-, AI- or owner-written line a `WrapLabel`:
   1. Title, 15px Medium (`actionTitle`).
-  2. State, secondary: "Yours · open", "Waiting for someone · open" or "Completed Tue Oct 6".
+  2. State, secondary: "Yours · open", "Waiting for someone · open" (either with " · carried over" while it
+     applies) or "Completed Tue Oct 6".
   3. "Due {deadline_text}", warning with " · Overdue" when overdue, else secondary
      (`actionDeadline`); the target with its reason while it is still the suggested one
      ("Target Fri Oct 2, one working day before the deadline"), secondary
@@ -203,15 +204,20 @@ One style across the window, as the brief reads: every date or time a person see
 stay ISO, since dates are typed there, and the CLI is unchanged
 (`git grep -nE "isoformat\(\)|%Y-%m-%d" src/mailbrief/ui` lists only `action_editor.py`).
 The brief list's chips keep their shorter forms (see Brief list).
-- `day_text(day, today=None)`: "Mon Oct 5"; when `today` is given and in another year,
-  "Mon Jan 4, 2027".
-- `moment_text(moment, zone, today=None)`: "Thu Oct 8, 17:00" in `zone`, the year as
+- Weekday and month names are the fixed English `WEEKDAYS` and `MONTHS` of
+  `deadline_text.py`, never `%a` or `%b`: Qt applies the system language to C date
+  formatting, so a French Mac would otherwise print "lun." and "août". No file in `ui` uses the
+  weekday or month strftime directives.
+- `today` (the owner's day, in the owner's zone) is a required keyword argument of every
+  formatter below; the window passes its injected clock's day.
+- `weekday(day)`: "Mon". `month_day(day, *, today)`: "Oct 5"; when the year isn't
+  `today`'s, "Jan 4, 2027". `day_text(day, *, today)`: "Mon Oct 5" or "Mon Jan 4, 2027".
+- `moment_text(moment, zone, *, today)`: "Thu Oct 8, 17:00" in `zone`, the year as
   `day_text` adds it.
-- `deadline_text(item, zone, today=None)`: DATETIME `moment_text` in the owner's zone,
+- `deadline_text(item, zone, *, today)`: DATETIME `moment_text` in the owner's zone,
   DATE `day_text` of the day the email names, UNRESOLVED the email's phrase in quotes,
   NONE None. The brief detail's deadline, suggestion meta lines, proposal effects ("Set
-  the deadline to Mon Oct 5") and the Actions page all use it; the Actions page passes
-  the owner's day, so a deadline in another year names it.
+  the deadline to Mon Oct 5") and the Actions page all use it; a deadline in another year names it.
 - Thread activity in the past week reads by weekday ("Tue 14:02", "Tue"); older, by
   `day_text` with the owner's day ("Sun Sep 20, 10:30", "Sun Dec 20, 2026, 15:30").
   Proposal rows show when the email arrived with `moment_text`.

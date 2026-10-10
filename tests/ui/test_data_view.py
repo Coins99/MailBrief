@@ -77,7 +77,10 @@ async def test_backup_verify_and_portable_export(
     dialog.today = lambda: date(2026, 10, 10)
     await dialog.verify()
     created = inspect_backup(archive).created_at_utc
-    assert dialog.status.text() == f"Valid backup from {moment_text(created, dialog.zone)}."
+    assert (
+        dialog.status.text()
+        == f"Valid backup from {moment_text(created, dialog.zone, today=date(2026, 10, 10))}."
+    )
     dialog.today = lambda: date(2027, 1, 4)  # In another year the year is named.
     await dialog.verify()
     assert f", {created.astimezone(dialog.zone).year}," in dialog.status.text()

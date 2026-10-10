@@ -331,28 +331,30 @@ def test_brief_meta_uses_the_brief_zone() -> None:
         generated_at_utc=datetime(2026, 10, 6, 13, 14, tzinfo=UTC),
         coverage=None,
     )
-    assert brief_meta(morning, paris) == (
+    assert brief_meta(morning, paris, TODAY) == (
         "owner@example.com · saved 09:14 (America/Toronto)",
         "owner@example.com. Saved Tue Oct 6, 09:14 (America/Toronto).",
     )
     assert "up to 09:14" in coverage_short(morning)  # The heading and footer agree.
     # Oct 6 23:30 in Toronto is Oct 7 05:30 in Paris: the brief's own day decides.
     late = morning.model_copy(update={"generated_at_utc": datetime(2026, 10, 7, 3, 30, tzinfo=UTC)})
-    short, _full = brief_meta(late, paris)
+    short, _full = brief_meta(late, paris, TODAY)
     assert short.startswith("owner@example.com · saved 23:30 (America/Toronto)")
     assert "Oct 7" not in short
     # Another name with the same offset at that moment shows the same time: no zone.
     for owner in (toronto, ZoneInfo("America/New_York")):
         for brief in (morning, late):
-            assert "(" not in brief_meta(brief, owner)[0]
+            assert "(" not in brief_meta(brief, owner, TODAY)[0]
     calcutta = morning.model_copy(update={"timezone_name": "Asia/Calcutta"})
-    assert "(" not in brief_meta(calcutta, ZoneInfo("Asia/Kolkata"))[0]  # One zone, two names.
+    assert (
+        "(" not in brief_meta(calcutta, ZoneInfo("Asia/Kolkata"), TODAY)[0]
+    )  # One zone, two names.
 
 
 def test_brief_title_names_the_day_and_an_incomplete_brief() -> None:
-    assert brief_title(brief_with()) == "Tue Oct 6"
-    assert brief_title(brief_with(status=DigestStatus.PARTIAL)) == "Tue Oct 6 · Partial"
-    assert brief_title(brief_with(status=DigestStatus.EMPTY)) == "Tue Oct 6 · Empty"
+    assert brief_title(brief_with(), TODAY) == "Tue Oct 6"
+    assert brief_title(brief_with(status=DigestStatus.PARTIAL), TODAY) == "Tue Oct 6 · Partial"
+    assert brief_title(brief_with(status=DigestStatus.EMPTY), TODAY) == "Tue Oct 6 · Empty"
 
 
 def test_a_brief_from_another_year_names_it() -> None:
@@ -367,7 +369,7 @@ def test_a_brief_from_another_year_names_it() -> None:
         coverage=None,
     )
     # The brief's zone and the owner's differ: the time is the brief's, and named.
-    assert brief_meta(tokyo, OWNER_ZONE) == (
+    assert brief_meta(tokyo, OWNER_ZONE, TODAY) == (
         "owner@example.com · saved 21:00 (Asia/Tokyo)",
         "owner@example.com. Saved Tue Oct 6, 21:00 (Asia/Tokyo).",
     )
@@ -375,15 +377,15 @@ def test_a_brief_from_another_year_names_it() -> None:
 
 def test_brief_meta_short_and_full() -> None:
     complete = brief_with(coverage=coverage())
-    assert brief_meta(complete, OWNER_ZONE) == (
+    assert brief_meta(complete, OWNER_ZONE, TODAY) == (
         "owner@example.com · saved 09:14",
         "owner@example.com. Saved Tue Oct 6, 09:14. "
         "3 analyzed, 1 reused, 0 failed, 1 skipped. Inbox sync complete.",
     )
     later = brief_with(generated_at_utc=datetime(2026, 10, 7, 13, 5, tzinfo=UTC))
-    assert brief_meta(later, OWNER_ZONE)[0] == "owner@example.com · saved Oct 7 09:05"
+    assert brief_meta(later, OWNER_ZONE, TODAY)[0] == "owner@example.com · saved Oct 7 09:05"
     troubled = brief_with(coverage=coverage(failed=2, deferred=1, sync_complete=False))
-    short, full = brief_meta(troubled, OWNER_ZONE)
+    short, full = brief_meta(troubled, OWNER_ZONE, TODAY)
     assert short == (
         "owner@example.com · saved 09:14 · 2 failed · 1 deferred · Inbox sync incomplete"
     )
@@ -391,7 +393,7 @@ def test_brief_meta_short_and_full() -> None:
         "3 analyzed, 1 reused, 2 failed, 1 skipped, 1 deferred. Inbox sync incomplete."
     )
     unknown = brief_with(coverage=None)
-    assert brief_meta(unknown, OWNER_ZONE) == (
+    assert brief_meta(unknown, OWNER_ZONE, TODAY) == (
         "owner@example.com · saved 09:14",
         "owner@example.com. Saved Tue Oct 6, 09:14.",
     )
@@ -599,3 +601,25 @@ def test_the_detail_keeps_a_readable_width_on_wide_windows(qtbot: QtBot) -> None
     assert content is not None
     assert 0 < content.width() <= DETAIL_MAX_WIDTH
     assert content.x() == 0  # Left-aligned.
+
+
+def test_the_heading_gains_its_year_after_new_year(qtbot: QtBot) -> None:
+    workspace = ThreePaneWorkspace()
+    qtbot.addWidget(workspace)
+    digest = brief_with(
+        local_date=date(2026, 12, 31),
+        generated_at_utc=datetime(2026, 12, 31, 15, 0, tzinfo=UTC),
+        coverage=None,
+    )
+    workspace.show_digest(digest, owner_zone=OWNER_ZONE, today=date(2026, 12, 31))
+    assert workspace.heading.title.text() == "Thu Dec 31"
+    assert workspace.heading.meta.accessibleName().startswith(
+        "owner@example.com. Saved Thu Dec 31, 10:00"
+    )
+
+    workspace.set_today(date(2027, 1, 1), OWNER_ZONE)  # Midnight passes.
+
+    assert workspace.heading.title.text() == "Thu Dec 31, 2026"
+    assert workspace.heading.meta.accessibleName().startswith(
+        "owner@example.com. Saved Thu Dec 31, 2026, 10:00"
+    )

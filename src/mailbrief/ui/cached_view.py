@@ -132,9 +132,9 @@ class CachedMailDialog(QDialog):
         last = page.account.last_sync_at_utc
         today = self.today()
         zone = self.zone or ZoneInfo(page.timezone_name)
-        stamp = moment_text(last, zone, today) if last else "none recorded"
+        stamp = moment_text(last, zone, today=today) if last else "none recorded"
         self.status.setText(
-            f"{day_text(page.local_date, today)} ({page.timezone_name}) · "
+            f"{day_text(page.local_date, today=today)} ({page.timezone_name}) · "
             f"{len(page.messages)} saved messages on this page. "
             f"Account last complete sync: {stamp}. "
             "Cached metadata may be stale; browsing does not use the network."
@@ -157,7 +157,7 @@ class CachedMailDialog(QDialog):
             return
         message = self._page.messages[index]
         received = moment_text(
-            message.received_at_utc, ZoneInfo(self._page.timezone_name), self.today()
+            message.received_at_utc, ZoneInfo(self._page.timezone_name), today=self.today()
         )
         self.details.setPlainText(
             f"From: {message.sender.address}\nSubject: {message.subject}\n"

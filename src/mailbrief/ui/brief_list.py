@@ -40,6 +40,7 @@ from mailbrief.domain.actions import ActionProposal, ProposalState
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind
 from mailbrief.domain.digests import SECTION_TITLES, DailyDigest, DigestItem
 from mailbrief.domain.messages import EmailContact
+from mailbrief.ui.deadline_text import month_day, weekday
 from mailbrief.ui.hairline import hairline_pen, paint_focus_ring
 from mailbrief.ui.labels import cut_text
 from mailbrief.ui.theme import (
@@ -118,12 +119,6 @@ def with_address(name: str | None, address: str) -> str:
     return f"{shown} <{address}>"
 
 
-def _short_day(day: date, today: date) -> str:
-    """ "Oct 9", or "Oct 9, 2027" when the year isn't ``today``'s."""
-    text = f"{day:%b} {day.day}"
-    return text if day.year == today.year else f"{text}, {day.year}"
-
-
 def deadline_chip(
     item: DigestItem, zone: ZoneInfo, today: date, owner_zone: ZoneInfo
 ) -> Chip | None:
@@ -136,11 +131,11 @@ def deadline_chip(
         local = item.deadline_at_utc.astimezone(zone)
         owner_day = item.deadline_at_utc.astimezone(owner_zone).date()
         if today <= owner_day <= today + timedelta(days=_WEEKDAY_DAYS):
-            text = f"Due {local:%a %H:%M}"
+            text = f"Due {weekday(local.date())} {local:%H:%M}"
         else:
-            text = f"Due {_short_day(local.date(), today)} {local:%H:%M}"
+            text = f"Due {month_day(local.date(), today=today)} {local:%H:%M}"
     elif item.deadline_precision is DeadlinePrecision.DATE and item.deadline_date:
-        text = f"Due {_short_day(item.deadline_date, today)}"
+        text = f"Due {month_day(item.deadline_date, today=today)}"
     elif item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
         text = f"Due {cut_text(item.deadline_text, _UNRESOLVED_CHARS)}"
     return None if text is None else Chip(text, ChipTone.WARNING)

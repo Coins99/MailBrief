@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 from mailbrief.domain.actions import ProposalState, SuggestionState, SuggestionView, ThreadLink
-from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, FollowUpKind
+from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, FollowUpKind, TargetReason
 from mailbrief.domain.messages import EmailContact
 from mailbrief.ui.brief_detail import (
     ACCEPT,
@@ -29,6 +29,7 @@ from tests.factories import make_digest_item, make_proposal, make_suggestion
 from tests.ui.workspace_fixtures import ACCOUNT, DECK_ACTION, FINANCE_ACTION, ZONE, mockup_digest
 
 TORONTO = ZoneInfo(ZONE)
+TODAY = date(2026, 10, 6)
 HOSTILE = '<b>Win</b> & "q" <img src=x>\nsecond line'
 
 
@@ -47,6 +48,7 @@ def show(pane: BriefDetailPane, key: str) -> None:
         item,
         account_email=ACCOUNT,
         timezone_name=ZONE,
+        today=TODAY,
         links=brief.links.get(key, ()),
         proposals=brief.proposals.get(key, ()),
     )
@@ -67,7 +69,9 @@ def show(pane: BriefDetailPane, key: str) -> None:
 def test_the_sender_line_never_hides_the_address(
     pane: BriefDetailPane, sender: EmailContact, shown: str
 ) -> None:
-    pane.show_item(make_digest_item(sender=sender), account_email=ACCOUNT, timezone_name=ZONE)
+    pane.show_item(
+        make_digest_item(sender=sender), account_email=ACCOUNT, timezone_name=ZONE, today=TODAY
+    )
     line = pane.findChild(QLabel, "detailSender")
     assert line is not None and line.text() == shown
 
@@ -152,7 +156,9 @@ def test_reply_and_source_requests(pane: BriefDetailPane) -> None:
     ],
 )
 def test_open_in_gmail_only_for_gmail_https_links(pane: BriefDetailPane, url: str) -> None:
-    pane.show_item(make_digest_item(source_url=url), account_email=ACCOUNT, timezone_name=ZONE)
+    pane.show_item(
+        make_digest_item(source_url=url), account_email=ACCOUNT, timezone_name=ZONE, today=TODAY
+    )
     assert [b.text() for b in pane.findChildren(QPushButton)] == ["Draft a reply"]
 
 
@@ -168,6 +174,7 @@ def test_states_and_empty(pane: BriefDetailPane) -> None:
         make_digest_item(suggestions=(accepted, dismissed), action_text="Approve the proposal."),
         account_email=ACCOUNT,
         timezone_name=ZONE,
+        today=TODAY,
         proposals=(done,),
     )
     texts = label_texts(pane)
@@ -191,9 +198,9 @@ def test_deadline_and_meta_texts() -> None:
         deadline_date=date(2026, 10, 9),
         deadline_at_utc=None,
     )
-    assert item_deadline_text(unresolved, TORONTO) == "Due “end of week”"
-    assert item_deadline_text(dated, TORONTO) == "Due Fri Oct 9"
-    assert item_deadline_text(make_digest_item(), TORONTO) is None
+    assert item_deadline_text(unresolved, TORONTO, today=TODAY) == "Due “end of week”"
+    assert item_deadline_text(dated, TORONTO, today=TODAY) == "Due Fri Oct 9"
+    assert item_deadline_text(make_digest_item(), TORONTO, today=TODAY) is None
     waiting = SuggestionView(
         suggestion_id=1,
         state=SuggestionState.PENDING,
@@ -206,7 +213,10 @@ def test_deadline_and_meta_texts() -> None:
             deadline_timezone=ZONE,
         ),
     )
-    assert suggestion_meta(waiting, TORONTO) == "Waiting for someone. Due Fri Oct 9, 17:00."
+    assert (
+        suggestion_meta(waiting, TORONTO, today=TODAY)
+        == "Waiting for someone. Due Fri Oct 9, 17:00."
+    )
 
 
 def test_hostile_text_stays_literal_plain_text(pane: BriefDetailPane) -> None:
@@ -230,7 +240,12 @@ def test_hostile_text_stays_literal_plain_text(pane: BriefDetailPane) -> None:
         }
     )
     pane.show_item(
-        item, account_email=ACCOUNT, timezone_name=ZONE, links=links, proposals=(proposal,)
+        item,
+        account_email=ACCOUNT,
+        timezone_name=ZONE,
+        today=TODAY,
+        links=links,
+        proposals=(proposal,),
     )
     labels = [label for label in pane.findChildren(QLabel) if "<b>Win</b>" in label.text()]
     assert len(labels) >= 6  # Subject, sender, summary, action, continues, titles, proposal.
@@ -258,6 +273,7 @@ def test_long_titles_shorten_buttons_but_keep_the_full_name(pane: BriefDetailPan
         brief.digest.items[0],
         account_email=ACCOUNT,
         timezone_name=ZONE,
+        today=TODAY,
         links=links,
         proposals=(proposal,),
     )
@@ -311,6 +327,7 @@ def show_links(pane: BriefDetailPane, *views: SuggestionView) -> None:
         make_digest_item(suggestions=views or (PENDING_SUGGESTION,)),
         account_email=ACCOUNT,
         timezone_name=ZONE,
+        today=TODAY,
         links=(TRACKED, OWN),
     )
 
@@ -359,7 +376,7 @@ def test_another_email_replaces_the_old_buttons(pane: BriefDetailPane) -> None:
     show(pane, "marco")
     assert pane.findChild(HairlineFrame, "proposalCard") is not None
     pane.show_item(
-        mockup_digest().digest.items[3], account_email=ACCOUNT, timezone_name=ZONE
+        mockup_digest().digest.items[3], account_email=ACCOUNT, timezone_name=ZONE, today=TODAY
     )  # The same email without its proposals.
     assert pane.findChild(HairlineFrame, "proposalCard") is None
 
@@ -383,6 +400,7 @@ def test_pending_proposals_sit_above_the_footer_in_the_brief_s_zone(
         make_digest_item(),
         account_email=ACCOUNT,
         timezone_name="Asia/Tokyo",  # 21:00 UTC is 06:00 the next day there.
+        today=TODAY,
         proposals=(exact, applied, delivered),
     )
     cards = pane.findChildren(HairlineFrame, "proposalCard")
@@ -414,7 +432,11 @@ def test_a_hostile_proposal_deadline_stays_text(pane: BriefDetailPane) -> None:
         deadline_precision=DeadlinePrecision.UNRESOLVED,
     )
     pane.show_item(
-        make_digest_item(), account_email=ACCOUNT, timezone_name=ZONE, proposals=(proposal,)
+        make_digest_item(),
+        account_email=ACCOUNT,
+        timezone_name=ZONE,
+        today=TODAY,
+        proposals=(proposal,),
     )
     effect = pane.findChildren(QPushButton)[0]
     assert "&&" in effect.text() and "<b>Win</b>" in effect.text()  # No mnemonic, no markup.
@@ -429,7 +451,7 @@ def test_an_unresolved_suggestion_deadline_shows_its_words() -> None:
             deadline_text="<b>soon</b>", deadline_precision=DeadlinePrecision.UNRESOLVED
         ),
     )
-    assert suggestion_meta(soon, TORONTO) == "Yours. Due “<b>soon</b>”."
+    assert suggestion_meta(soon, TORONTO, today=TODAY) == "Yours. Due “<b>soon</b>”."
 
 
 def test_every_button_can_be_reached_from_the_keyboard(pane: BriefDetailPane) -> None:
@@ -451,6 +473,7 @@ def test_a_pending_suggestion_shows_its_plan(pane: BriefDetailPane) -> None:
         make_digest_item(suggestions=(plan_suggestion(steps, SuggestionState.PENDING),)),
         account_email=ACCOUNT,
         timezone_name=ZONE,
+        today=TODAY,
     )
     card = pane.findChild(HairlineFrame, "suggestionCard")
     assert card is not None
@@ -467,6 +490,7 @@ def test_a_hostile_plan_step_stays_literal(pane: BriefDetailPane) -> None:
         make_digest_item(suggestions=(hostile,)),
         account_email=ACCOUNT,
         timezone_name=ZONE,
+        today=TODAY,
     )
     assert "· <b>Win</b> & <a href=x>go</a>" in label_texts(pane)
 
@@ -476,5 +500,23 @@ def test_an_accepted_suggestion_shows_no_plan(pane: BriefDetailPane) -> None:
         make_digest_item(suggestions=(plan_suggestion(("Read it",), SuggestionState.ACCEPTED),)),
         account_email=ACCOUNT,
         timezone_name=ZONE,
+        today=TODAY,
     )
     assert "· Read it" not in label_texts(pane)
+
+
+def test_a_target_date_in_another_year_names_the_year() -> None:
+    view = SuggestionView(
+        suggestion_id=1,
+        state=SuggestionState.PENDING,
+        suggestion=make_suggestion(
+            suggested_target_date=date(2027, 1, 4),
+            target_reason=TargetReason.WORKING_DAY_BEFORE,
+        ),
+    )
+    assert suggestion_meta(view, TORONTO, today=date(2026, 12, 20)).startswith(
+        "Yours. Target Mon Jan 4, 2027,"
+    )
+    assert suggestion_meta(view, TORONTO, today=date(2027, 1, 1)).startswith(
+        "Yours. Target Mon Jan 4,"
+    )

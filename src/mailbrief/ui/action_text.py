@@ -3,15 +3,12 @@ row and its detail pane, so they can't disagree."""
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Final
 from zoneinfo import ZoneInfo
 
 from mailbrief.domain.actions import TARGET_REASON_TEXT, Action, ActionProposal, ActionStatus
 from mailbrief.domain.analysis import ActionOwnership
-from mailbrief.ui.deadline_text import day_text, deadline_text
+from mailbrief.ui.deadline_text import day_text, deadline_text, weekday
 from mailbrief.ui.proposals_view import pending_proposals
-
-_WEEKDAYS: Final = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 @dataclass(frozen=True)
@@ -65,7 +62,7 @@ def action_details(action: Action, *, today: date, zone: ZoneInfo, now: datetime
     return ActionDetails(
         target=action.target_date,
         target_reason=TARGET_REASON_TEXT[reason] if keeps_reason and reason is not None else None,
-        due=deadline_text(action, zone, today),
+        due=deadline_text(action, zone, today=today),
         steps_done=sum(step.done for step in action.steps),
         steps=len(action.steps),
         waiting=is_open and action.ownership is ActionOwnership.WAITING_FOR,
@@ -88,7 +85,7 @@ def target_text(details: ActionDetails, *, reason: bool = True) -> str | None:
     target = details.target
     if target is None:
         return None
-    text = f"Target {day_text(target, details.today)}"
+    text = f"Target {day_text(target, today=details.today)}"
     if not reason or details.target_reason is None:
         return text
     return f"{text}, {details.target_reason}"
@@ -98,7 +95,7 @@ def completed_text(details: ActionDetails) -> str | None:
     """The completion as "Completed Tue Oct 6", the day in the owner's zone, or None for an open
     action."""
     day = details.completed
-    return None if day is None else f"Completed {day_text(day, details.today)}"
+    return None if day is None else f"Completed {day_text(day, today=details.today)}"
 
 
 def gmail_source(action: Action) -> str | None:
@@ -118,6 +115,6 @@ def _when(moment: datetime, *, today: date, zone: ZoneInfo, clock: bool) -> str:
     """
     local = moment.astimezone(zone)
     if today - timedelta(days=6) <= local.date() <= today:
-        return _WEEKDAYS[local.weekday()] + (f" {local:%H:%M}" if clock else "")
-    day = day_text(local.date(), today)
+        return weekday(local.date()) + (f" {local:%H:%M}" if clock else "")
+    day = day_text(local.date(), today=today)
     return f"{day}, {local:%H:%M}" if clock else day

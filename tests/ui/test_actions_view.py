@@ -30,7 +30,8 @@ from mailbrief.domain.actions import (
 )
 from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision, TargetReason
 from mailbrief.domain.drafts import DraftKind
-from mailbrief.ui.action_detail import EMPTY_TEXT
+from mailbrief.ui.action_detail import EMPTY_TEXT, state_text
+from mailbrief.ui.action_text import action_details
 from mailbrief.ui.actions_view import (
     COMPLETE,
     DELETE,
@@ -135,7 +136,7 @@ def test_rows_are_plain_text_with_dates_progress_and_state(panel: ActionsPanel) 
     show(panel, ActionFilter.OPEN, late)
 
     assert row_text(panel, ActionFilter.OPEN) == (
-        "<b>Send</b> the deck — target Wed Sep 30 · due Fri Oct 2 · 1/2 steps · overdue · "
+        "<b>Send</b> the deck — Target Wed Sep 30 · due Fri Oct 2 · 1/2 steps · overdue · "
         "carried over"
     )
     assert panel.tabs.tabText(0) == "Open (1)"
@@ -827,7 +828,28 @@ def test_dates_in_another_year_name_it(panel: ActionsPanel) -> None:
     )
 
     assert row_text(panel, ActionFilter.OPEN) == (
-        "Action 1 — target Mon Jan 4 · carried over · 1 new in thread, latest Sun Dec 20, "
+        "Action 1 — Target Mon Jan 4 · carried over · 1 new in thread, latest Sun Dec 20, "
         "2026, 15:30 from Sam · you replied Mon Dec 21, 2026"
     )
     assert "alex@example.com · Received Mon Sep 28, 2026" in detail_texts(panel)
+
+
+def test_the_state_line_says_when_an_action_is_carried_over() -> None:
+    def state(**fields: object) -> str:
+        made = action(1, **fields)
+        return state_text(made, action_details(made, today=TODAY, zone=UTC_ZONE, now=NOW))
+
+    earlier = datetime(2026, 10, 1, 9, tzinfo=UTC)  # A day before TODAY.
+    assert state() == "Yours · open"
+    assert state(created_at_utc=earlier) == "Yours · open · carried over"
+    assert state(ownership=ActionOwnership.WAITING_FOR, created_at_utc=earlier) == (
+        "Waiting for someone · open · carried over"
+    )
+    done = state(status=ActionStatus.COMPLETED, completed_at_utc=NOW, created_at_utc=earlier)
+    assert done == "Completed Sat Oct 3"  # Never carried over once completed.
+
+
+def test_the_detail_shows_carried_over(panel: ActionsPanel) -> None:
+    show(panel, ActionFilter.OPEN, action(1, created_at_utc=datetime(2026, 10, 1, tzinfo=UTC)))
+
+    assert detail_texts(panel)[:2] == ["Action 1", "Yours · open · carried over"]

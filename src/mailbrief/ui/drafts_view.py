@@ -4,6 +4,7 @@ Titles are the owner's text or, for replies, an email's subject, so rows are pla
 text and never tooltips, which Qt may render as rich text.
 """
 
+from datetime import date
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
@@ -28,9 +29,9 @@ DELETE = "delete"
 NEW_KINDS = (DraftKind.EMAIL, DraftKind.NOTE, DraftKind.MESSAGE)
 
 
-def describe(summary: DraftSummary, zone: ZoneInfo) -> str:
+def describe(summary: DraftSummary, zone: ZoneInfo, today: date) -> str:
     """One plain line: kind, title, when it changed, what is left to fill, and its action."""
-    updated = moment_text(summary.updated_at_utc, zone)
+    updated = moment_text(summary.updated_at_utc, zone, today=today)
     parts = [f"{KIND_NAMES[summary.kind]} · {summary.display_title} — updated {updated}"]
     count = summary.placeholder_count
     if count:
@@ -96,14 +97,14 @@ class DraftsPanel(QWidget):
         row = self.list.currentRow()
         return self._drafts[row] if 0 <= row < len(self._drafts) else None
 
-    def show_drafts(self, drafts: tuple[DraftSummary, ...], zone: ZoneInfo) -> None:
+    def show_drafts(self, drafts: tuple[DraftSummary, ...], zone: ZoneInfo, today: date) -> None:
         """Replace the list, keeping the selection on the same draft when it remains."""
         previous = self.selected()
         row = self.list.currentRow()
         self._drafts = drafts
         self.list.clear()
         for summary in drafts:
-            self.list.addItem(QListWidgetItem(describe(summary, zone)))
+            self.list.addItem(QListWidgetItem(describe(summary, zone, today)))
         ids = [summary.public_id for summary in drafts]
         if previous is not None and previous.public_id in ids:
             self.list.setCurrentRow(ids.index(previous.public_id))
