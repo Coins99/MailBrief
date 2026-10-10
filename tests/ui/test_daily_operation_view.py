@@ -1,7 +1,7 @@
 """The refresh settings in the Preferences tab, and the automatic-analysis dialog (ADR 0017)."""
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -133,10 +133,10 @@ def test_off_says_every_run_asks_first(panel: PreferencesPanel) -> None:
 @pytest.mark.parametrize(
     ("limit", "granted", "text"),
     [
-        (1, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 1 message per run, since 2026-09-30"),
-        (3, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 3 messages per run, since 2026-09-30"),
+        (1, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 1 message per run, since Wed Sep 30"),
+        (3, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 3 messages per run, since Wed Sep 30"),
         # 02:00 UTC is still the evening before in Toronto: the date is the owner's.
-        (10, datetime(2026, 9, 30, 2, tzinfo=UTC), "Up to 10 messages per run, since 2026-09-29"),
+        (10, datetime(2026, 9, 30, 2, tzinfo=UTC), "Up to 10 messages per run, since Tue Sep 29"),
     ],
 )
 def test_a_permission_says_how_many_and_since_when_in_the_owners_zone(
@@ -145,6 +145,15 @@ def test_a_permission_says_how_many_and_since_when_in_the_owners_zone(
     panel.set_auto_send(make_auto_send(limit=limit, granted_at_utc=granted), TORONTO)
 
     assert line(panel) == (text, True)
+
+
+def test_a_permission_from_another_year_names_the_year(panel: PreferencesPanel) -> None:
+    granted = datetime(2026, 12, 30, 14, tzinfo=UTC)
+    panel.set_auto_send(
+        make_auto_send(limit=2, granted_at_utc=granted), TORONTO, today=date(2027, 1, 4)
+    )
+
+    assert line(panel)[0] == "Up to 2 messages per run, since Wed Dec 30, 2026"
 
 
 def test_a_setting_that_could_not_be_read_can_not_be_changed(panel: PreferencesPanel) -> None:

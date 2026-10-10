@@ -150,10 +150,11 @@ a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list 
   it carries `action_row()`'s `ActionRow(title, meta, chips, muted)` under `ROW_ROLE`
   (brief_list's). Page Up and Page Down page the detail while the list fits
   (`page_detail`).
-- `ActionRow`: meta joins, with " · ", "Completed Oct 6" (in the owner's zone), the
+- `ActionRow`: meta joins, with " · ", "Completed Tue Oct 6" (in the owner's zone), the
   target ("Target Fri Oct 2", never its reason: the detail gives that), "Due
-  {deadline_text}" ("Due Mon Oct 5"), "2/5 steps", "Carried over" and "Source no longer
-  in local mail"; with none, "No target or deadline". Chips: "Overdue" (WARNING,
+  {deadline_text}" ("Due Mon Oct 5") and "2/5 steps", and nothing else (the detail pane
+  shows "Carried over" and "Source no longer in local mail"); with none, "No target or
+  deadline". Chips: "Overdue" (WARNING,
   open actions only), "N new in thread" (ACCENT, while new messages are unseen) and
   `proposal_chip` for pending proposals. Completed rows are muted: title text_secondary,
   meta text_muted.
@@ -169,7 +170,7 @@ a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list 
   them under its old names), so only the text between them is rebuilt. In order, every
   mail-, AI- or owner-written line a `WrapLabel`:
   1. Title, 15px Medium (`actionTitle`).
-  2. State, secondary: "Yours · open", "Waiting for someone · open" or "Completed Oct 6".
+  2. State, secondary: "Yours · open", "Waiting for someone · open" or "Completed Tue Oct 6".
   3. "Due {deadline_text}", warning with " · Overdue" when overdue, else secondary
      (`actionDeadline`); the target with its reason while it is still the suggested one
      ("Target Fri Oct 2, one working day before the deadline"), secondary
@@ -197,9 +198,11 @@ a `HairlineSplitter` (stretch 4 : 5, children not collapsible) holding the list 
 
 ## Dates (`ui/deadline_text.py`)
 
-One style across the window, as the brief reads; only the action editor's date fields
-stay ISO, since dates are typed there, and the CLI is unchanged. The brief list's chips
-keep their shorter forms (see Brief list).
+One style across the window, as the brief reads: every date or time a person sees uses
+`day_text` or `moment_text`, in the owner's zone. Only the action editor's date fields
+stay ISO, since dates are typed there, and the CLI is unchanged
+(`git grep -nE "isoformat\(\)|%Y-%m-%d" src/mailbrief/ui` lists only `action_editor.py`).
+The brief list's chips keep their shorter forms (see Brief list).
 - `day_text(day, today=None)`: "Mon Oct 5"; when `today` is given and in another year,
   "Mon Jan 4, 2027".
 - `moment_text(moment, zone, today=None)`: "Thu Oct 8, 17:00" in `zone`, the year as
@@ -212,6 +215,16 @@ keep their shorter forms (see Brief list).
 - Thread activity in the past week reads by weekday ("Tue 14:02", "Tue"); older, by
   `day_text` with the owner's day ("Sun Sep 20, 10:30", "Sun Dec 20, 2026, 15:30").
   Proposal rows show when the email arrived with `moment_text`.
+- Everywhere else a date appears it is the same style, with the owner's day (so a day in
+  another year names it): the Briefs page's saved-brief rows ("Thu Sep 3 · complete · 1
+  item · …"), missed days ("Fri Sep 4 · no brief") and the Replace sentence; MainWindow's
+  "Viewing the brief for Thu Sep 3." banner and the "Showing the brief for …" and "the
+  Inbox for …" status lines; Drafts' "updated Mon Sep 28, 10:05" and the draft editor's
+  version times; the Preferences automatic-analysis line ("since Tue Sep 29"); the Data
+  dialog's backup time ("Valid backup from Thu Oct 8, 17:00", in the owner's zone, set the
+  way `cached_dialog.zone` is), and a completed action ("Completed Tue Oct 6").
+- An action row's second line is only the completed day, target, deadline and steps; "Carried
+  over" and "Source no longer in local mail" are the detail pane's, not the row's.
 
 ## Workspace (`ui/workspace.py`)
 

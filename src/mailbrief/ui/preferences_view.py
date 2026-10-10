@@ -8,6 +8,7 @@ permission is not part of the form: it is set in its own dialog, and the panel o
 
 import functools
 import zoneinfo
+from datetime import date
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
@@ -42,6 +43,7 @@ from mailbrief.domain.preferences import (
     normalize_exclusion,
 )
 from mailbrief.services.consent import NO_CONSENT
+from mailbrief.ui.deadline_text import day_text
 from mailbrief.ui.drafting_panel import LENGTH_CHOICES, TONE_CHOICES
 
 # Each AI limit's field, label and range; the spin box's minimum is one below the range
@@ -230,9 +232,10 @@ class PreferencesPanel(QWidget):
         *,
         unreadable: bool = False,
         connected: bool = True,
+        today: date | None = None,
     ) -> None:
         """Show the connected account's automatic-analysis permission, in ``zone`` for the
-        date it was given.
+        date it was given, with its year when ``today`` (the owner's day) is in another.
 
         Without an active consent (``status`` None) there is nothing to allow yet, so the
         button is off and the line says how to get one. ``unreadable`` says it couldn't be
@@ -248,7 +251,7 @@ class PreferencesPanel(QWidget):
             text, changeable = _AUTO_OFF, True
         else:
             noun = "message" if status.limit == 1 else "messages"
-            since = status.granted_at_utc.astimezone(zone).date().isoformat()
+            since = day_text(status.granted_at_utc.astimezone(zone).date(), today)
             text, changeable = f"Up to {status.limit} {noun} per run, since {since}", True
         self.auto_line.setText(text)
         self.auto_button.setEnabled(changeable)

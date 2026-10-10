@@ -44,6 +44,7 @@ from mailbrief.domain.drafts import (
     recipient_warnings,
     still_to_fill,
 )
+from mailbrief.ui.deadline_text import moment_text
 from mailbrief.ui.drafting_panel import DraftingPanel
 
 DEBOUNCE_MS = 1_500
@@ -482,7 +483,7 @@ class DraftEditor(QDialog):
         self.versions_list.blockSignals(True)
         self.versions_list.clear()
         for info in versions:
-            when = info.created_at_utc.astimezone(self._zone).strftime("%Y-%m-%d %H:%M")
+            when = moment_text(info.created_at_utc, self._zone)
             preview = info.preview or "(empty)"
             made = info.generation
             how = (

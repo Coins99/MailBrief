@@ -3,9 +3,10 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 from PySide6.QtCore import Qt
@@ -15,9 +16,10 @@ from pytestqt.qtbot import QtBot
 from sqlalchemy import select
 
 from mailbrief.storage.database import Database
-from mailbrief.storage.recovery import BackupValidationError
+from mailbrief.storage.recovery import BackupValidationError, inspect_backup
 from mailbrief.storage.tables import DraftTable, MessageTable
 from mailbrief.ui import data_view
+from mailbrief.ui.deadline_text import moment_text
 from mailbrief.ui.main_window import MainWindow
 from tests.ui.test_workflow import FakeBackend
 from tests.unit.services import test_data as fixtures
@@ -71,8 +73,14 @@ async def test_backup_verify_and_portable_export(
     monkeypatch.setattr(dialog, "choose", choose)
     await dialog.backup()
     assert archive.is_file()
+    dialog.zone = ZoneInfo("Asia/Tokyo")
+    dialog.today = lambda: date(2026, 10, 10)
     await dialog.verify()
-    assert "Valid backup" in dialog.status.text()
+    created = inspect_backup(archive).created_at_utc
+    assert dialog.status.text() == f"Valid backup from {moment_text(created, dialog.zone)}."
+    dialog.today = lambda: date(2027, 1, 4)  # In another year the year is named.
+    await dialog.verify()
+    assert f", {created.astimezone(dialog.zone).year}," in dialog.status.text()
     choose.return_value = tmp_path / "writing.json"
     await dialog.export()
     payload = json.loads((tmp_path / "writing.json").read_text(encoding="utf-8"))

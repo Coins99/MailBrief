@@ -20,9 +20,10 @@ from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestItem, DigestStatus
 from mailbrief.domain.messages import EmailContact
 from mailbrief.services.history import coverage_short
-from mailbrief.ui.actions_view import ActionsPanel
+from mailbrief.ui.actions_view import ActionRow, ActionsPanel
 from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
-from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
+from mailbrief.ui.brief_list import ELIDE_MARGIN, ROW_ROLE, elided
+from mailbrief.ui.theme import TEXT_PX, ThemeMode, apply_theme, current_tokens, ui_metrics
 from mailbrief.ui.workspace import (
     EMPTY_BRIEF,
     KEY_ROLE,
@@ -114,6 +115,26 @@ def test_actions_page_renders(
         Path(folder).mkdir(parents=True, exist_ok=True)
         dpr = image.devicePixelRatio()
         assert image.save(str(Path(folder) / f"{key}-{mode.value}-{dpr:g}x.png"))
+
+
+@pytest.mark.parametrize("key", list(ACTION_PAGES))
+def test_no_action_row_line_is_cut_off_at_the_gallery_size(
+    qtbot: QtBot, qapp: QApplication, themed: None, key: str
+) -> None:
+    apply_theme(qapp, ThemeMode.DARK)
+    workspace = build_actions(qtbot, key)
+    workspace.resize(*SIZES["desktop"])
+    show(qtbot, workspace)
+    panel = workspace.findChild(ActionsPanel)
+    assert panel is not None
+    listing = panel.lists[panel.view()]
+    assert listing.count() > 0
+    width = listing.viewport().width() - ELIDE_MARGIN
+    metrics = ui_metrics(TEXT_PX)
+    for number in range(listing.count()):
+        row = listing.item(number).data(ROW_ROLE)
+        assert isinstance(row, ActionRow)
+        assert elided(row.meta, metrics, width) == row.meta, row.meta
 
 
 def test_sidebar_requests_pages_and_settings(qtbot: QtBot) -> None:

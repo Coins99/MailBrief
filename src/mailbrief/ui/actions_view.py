@@ -147,8 +147,6 @@ def action_row(action: Action, *, today: date, zone: ZoneInfo, now: datetime) ->
             target_text(facts, reason=False),  # The detail pane gives the reason.
             None if facts.due is None else f"Due {facts.due}",
             f"{facts.steps_done}/{facts.steps} steps" if facts.steps else None,
-            "Carried over" if facts.carried_over else None,
-            "Source no longer in local mail" if facts.source_gone else None,
         )
         if text is not None
     ]

@@ -95,10 +95,10 @@ def target_text(details: ActionDetails, *, reason: bool = True) -> str | None:
 
 
 def completed_text(details: ActionDetails) -> str | None:
-    """The completion as "Completed Oct 6", the day in the owner's zone, or None for an open
+    """The completion as "Completed Tue Oct 6", the day in the owner's zone, or None for an open
     action."""
     day = details.completed
-    return None if day is None else f"Completed {day:%b} {day.day}"
+    return None if day is None else f"Completed {day_text(day, details.today)}"
 
 
 def gmail_source(action: Action) -> str | None:

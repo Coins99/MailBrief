@@ -309,7 +309,7 @@ def test_versions_preview_and_restore_after_confirmation(editor: DraftEditor) ->
     assert listed == [()]
     editor.show_versions(VERSIONS)
     assert editor.versions_list.item(0).text() == (
-        "Version 2 · saved 2026-09-28 10:05 · 5 characters · Later"
+        "Version 2 · saved Mon Sep 28, 10:05 · 5 characters · Later"
     )
     assert editor.versions_list.item(1).text().endswith("· (empty)")
     assert previews == [(2,)]

@@ -310,7 +310,7 @@ async def test_a_refresh_never_pulls_the_owner_away_from_a_past_brief(
     await due(window)
 
     assert len(backend.link_calls) == shown  # Not shown: they are reading another day's.
-    assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
+    assert window.viewing_label.text() == "Viewing the brief for Thu Sep 3."
     assert window.status.text().startswith("Automatic brief at 10:02: analyzed 3 new messages")
 
 
@@ -894,7 +894,7 @@ async def test_settings_show_the_permission_from_the_active_consent(
         limit=2, granted_at_utc=datetime(2026, 9, 29, 15, tzinfo=UTC)
     )
     await open_settings(window)
-    assert panel.auto_line.text() == "Up to 2 messages per run, since 2026-09-29"
+    assert panel.auto_line.text() == "Up to 2 messages per run, since Tue Sep 29"
     window.settings_dialog.reject()
 
 
@@ -928,7 +928,7 @@ async def test_change_opens_the_dialog_and_saving_gives_the_permission(
     await finish(window)
 
     assert backend.permission_saves == [3]
-    assert panel.auto_line.text() == "Up to 3 messages per run, since 2026-09-30"
+    assert panel.auto_line.text() == "Up to 3 messages per run, since Wed Sep 30"
     assert window.status.text() == "Automatic runs may now send up to 3 messages without asking."
     assert window.settings_dialog.status.text() == window.status.text()
 

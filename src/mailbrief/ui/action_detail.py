@@ -47,7 +47,7 @@ OPEN_MARK: Final = "○ "
 
 
 def state_text(action: Action, details: ActionDetails) -> str:
-    """The state line: "Yours · open", "Waiting for someone · open" or "Completed Oct 6"."""
+    """The state line: "Yours · open", "Waiting for someone · open" or "Completed Tue Oct 6"."""
     completed = completed_text(details)
     if action.status is ActionStatus.COMPLETED and completed is not None:
         return completed

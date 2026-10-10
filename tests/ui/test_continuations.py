@@ -201,13 +201,13 @@ async def test_add_to_and_undo_stay_on_a_past_brief(
 
     detail(window).accept_into_requested.emit(7, TRACKED.public_id, TRACKED.revision)
     await finish(window)
-    assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
+    assert window.viewing_label.text() == "Viewing the brief for Thu Sep 3."
     assert shown_text(window).startswith("Thu Sep 3")
     assert backend.link_calls[-1] == past
 
     window.undo_button.click()
     await finish(window)
-    assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
+    assert window.viewing_label.text() == "Viewing the brief for Thu Sep 3."
     assert shown_text(window).startswith("Thu Sep 3")
 
 

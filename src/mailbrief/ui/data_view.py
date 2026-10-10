@@ -4,8 +4,9 @@ import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -38,6 +39,7 @@ from mailbrief.services.data import (
 from mailbrief.storage.backup import create_backup
 from mailbrief.storage.database import Database
 from mailbrief.storage.recovery import BackupValidationError, inspect_backup
+from mailbrief.ui.deadline_text import moment_text
 from mailbrief.ui.diagnostics import log_failure
 
 HELP = """Your data stays on this computer. Disconnect removes Gmail credentials only.
@@ -93,6 +95,10 @@ class DataDialog(QDialog):
         self.run = run
         self.request_restore = request_restore
         self.refresh = refresh
+        # The owner's zone, for the backup's time; the window sets it, as for cached mail.
+        self.zone = ZoneInfo("UTC")
+        # The owner's day, to name the year of an older backup; the window sets it.
+        self.today: Callable[[], date] = lambda: datetime.now(self.zone).date()
         self._picker: QFileDialog | None = None
         self._confirmation: QMessageBox | None = None
         self._storage_available = False
@@ -255,7 +261,11 @@ class DataDialog(QDialog):
         path = await self.choose("Verify a backup", "ZIP archive (*.zip)", save=False)
         if path is not None:
             metadata = await asyncio.to_thread(inspect_backup, path)
-            self.status.setText(f"Valid backup from {metadata.created_at_utc.isoformat()}.")
+            self.status.setText(f"Valid backup from {self._backup_time(metadata)}.")
+
+    def _backup_time(self, metadata: BackupMetadata) -> str:
+        """When the backup was made, in the owner's zone, with the year if it isn't this one."""
+        return moment_text(metadata.created_at_utc, self.zone, self.today())
 
     async def restore(self) -> None:
         path = await self.choose("Restore a backup", "ZIP archive (*.zip)", save=False)
@@ -263,7 +273,7 @@ class DataDialog(QDialog):
             return
         metadata = await asyncio.to_thread(inspect_backup, path)
         if await self.confirm(
-            f"Replace saved data with the backup from {metadata.created_at_utc.isoformat()}? "
+            f"Replace saved data with the backup from {self._backup_time(metadata)}? "
             "MailBrief will exit, preserve the current database beside it, and clear automatic "
             "AI permission. Credentials stay in the vault. Relaunch after the result appears."
         ):

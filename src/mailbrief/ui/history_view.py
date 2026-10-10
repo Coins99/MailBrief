@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.digests import SavedBriefSummary
 from mailbrief.services.history import CATCH_UP_DAYS
+from mailbrief.ui.deadline_text import day_text
 from mailbrief.ui.labels import outline_button
 from mailbrief.ui.lists import ActivatingList
 from mailbrief.ui.theme import TITLE_PX, ui_font
@@ -36,10 +37,10 @@ def _plain(text: str = "") -> QLabel:
     return label
 
 
-def summary_text(summary: SavedBriefSummary) -> str:
+def summary_text(summary: SavedBriefSummary, today: date | None = None) -> str:
     noun = "item" if summary.item_count == 1 else "items"
     return (
-        f"{summary.local_date.isoformat()} · {summary.status.value} · "
+        f"{day_text(summary.local_date, today)} · {summary.status.value} · "
         f"{summary.item_count} {noun} · {summary.account_email}"
     )
 
@@ -131,7 +132,7 @@ class BriefHistoryPanel(QWidget):
         self.saved.blockSignals(True)
         self.saved.clear()
         for summary in summaries:
-            self.saved.addItem(QListWidgetItem(summary_text(summary)))
+            self.saved.addItem(QListWidgetItem(summary_text(summary, self._shown_today())))
         self.saved.blockSignals(False)
         self._show_missed(missed)
         if not summaries:
@@ -153,6 +154,10 @@ class BriefHistoryPanel(QWidget):
             self.status.clear()  # It was about the account that changed.
         self._update_buttons()
 
+    def _shown_today(self) -> date | None:
+        """The owner's day for naming years, None until the page is configured."""
+        return None if self._today == date.min else self._today
+
     def _show_missed(self, missed: tuple[date, ...] | None) -> None:
         """The missed-days list and its note, for ``self._account``. ``missed`` is None
         until that account's days are loaded; the note then claims nothing about them."""
@@ -160,7 +165,7 @@ class BriefHistoryPanel(QWidget):
         self.missed.blockSignals(True)
         self.missed.clear()
         for day in self._missed:
-            self.missed.addItem(QListWidgetItem(f"{day.isoformat()} · no brief"))
+            self.missed.addItem(QListWidgetItem(f"{day_text(day, self._shown_today())} · no brief"))
         self.missed.blockSignals(False)
         if self._account is None:
             note = NOT_CONNECTED
@@ -232,7 +237,9 @@ class BriefHistoryPanel(QWidget):
         if summary.account_email != self._account:
             self.status.setText(OTHER_ACCOUNT)
             return
-        self.confirm_label.setText(f"This replaces the saved brief for {day.isoformat()}.")
+        self.confirm_label.setText(
+            f"This replaces the saved brief for {day_text(day, self._shown_today())}."
+        )
         self.confirm_panel.show()
         self.keep_button.setFocus()
 

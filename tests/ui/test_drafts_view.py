@@ -44,14 +44,14 @@ def requests(panel: DraftsPanel) -> list[tuple[str, object]]:
 @pytest.mark.parametrize(
     ("fields", "expected"),
     [
-        ({}, "Note · Draft 1 — updated 2026-09-28 10:05"),
+        ({}, "Note · Draft 1 — updated Mon Sep 28, 10:05"),
         (
             {"kind": DraftKind.REPLY, "placeholder_count": 1, "action_title": "Send it"},
-            "Reply · Draft 1 — updated 2026-09-28 10:05 · 1 placeholder · for “Send it”",
+            "Reply · Draft 1 — updated Mon Sep 28, 10:05 · 1 placeholder · for “Send it”",
         ),
         (
             {"kind": DraftKind.MESSAGE, "placeholder_count": 3},
-            "Message · Draft 1 — updated 2026-09-28 10:05 · 3 placeholders",
+            "Message · Draft 1 — updated Mon Sep 28, 10:05 · 3 placeholders",
         ),
     ],
 )

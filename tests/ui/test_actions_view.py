@@ -388,10 +388,7 @@ def test_an_open_action_s_row() -> None:
 
     assert row == ActionRow(
         title="Action 1",
-        meta=(
-            "Target Tue Oct 6 · Due Wed Oct 7 · "
-            "2/5 steps · Carried over · Source no longer in local mail"
-        ),
+        meta="Target Tue Oct 6 · Due Wed Oct 7 · 2/5 steps",
         chips=(),
         muted=False,
     )
@@ -430,9 +427,12 @@ def test_a_completed_action_s_row_is_muted_with_its_day_in_the_owner_s_zone() ->
 
     row = action_row(done, today=TODAY, zone=ZoneInfo("America/Toronto"), now=NOW)
 
-    # Never Overdue or Carried over once completed.
+    # Never Overdue once completed.
     assert row == ActionRow(
-        title="Action 3", meta="Completed Oct 6 · Due Tue Sep 1 · 2/2 steps", chips=(), muted=True
+        title="Action 3",
+        meta="Completed Tue Oct 6 · Due Tue Sep 1 · 2/2 steps",
+        chips=(),
+        muted=True,
     )
 
 
@@ -638,7 +638,7 @@ def test_a_completed_action_s_detail(panel: ActionsPanel) -> None:
     show(panel, ActionFilter.COMPLETED, done)
     panel.show_view(ActionFilter.COMPLETED)
 
-    assert detail_texts(panel)[:2] == ["Action 3", "Completed Oct 6"]
+    assert detail_texts(panel)[:2] == ["Action 3", "Completed Tue Oct 6"]
     assert panel.complete_button.text() == "Re&open"
 
 

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from mailbrief.domain.drafts import KIND_NAMES, DraftKind, DraftSummary
+from mailbrief.ui.deadline_text import moment_text
 from mailbrief.ui.labels import outline_button
 from mailbrief.ui.lists import ActivatingList
 from mailbrief.ui.theme import TITLE_PX, ui_font
@@ -29,7 +30,7 @@ NEW_KINDS = (DraftKind.EMAIL, DraftKind.NOTE, DraftKind.MESSAGE)
 
 def describe(summary: DraftSummary, zone: ZoneInfo) -> str:
     """One plain line: kind, title, when it changed, what is left to fill, and its action."""
-    updated = summary.updated_at_utc.astimezone(zone).strftime("%Y-%m-%d %H:%M")
+    updated = moment_text(summary.updated_at_utc, zone)
     parts = [f"{KIND_NAMES[summary.kind]} · {summary.display_title} — updated {updated}"]
     count = summary.placeholder_count
     if count:

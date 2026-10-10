@@ -61,15 +61,26 @@ def test_saved_briefs_and_missed_days_are_listed(panel: BriefHistoryPanel) -> No
 
     rows = [panel.saved.item(row).text() for row in range(panel.saved.count())]
     assert rows == [
-        "2026-09-05 · complete · 2 items · owner@example.com",
-        "2026-09-03 · complete · 1 item · owner@example.com",
+        "Sat Sep 5 · complete · 2 items · owner@example.com",
+        "Thu Sep 3 · complete · 1 item · owner@example.com",
     ]
     missed = [panel.missed.item(row).text() for row in range(panel.missed.count())]
-    assert missed == ["2026-09-04 · no brief", "2026-09-02 · no brief"]
+    assert missed == ["Fri Sep 4 · no brief", "Wed Sep 2 · no brief"]
     assert not panel.missed.isHidden() and panel.missed_note.isHidden()
     assert panel.saved.accessibleName() and panel.missed.accessibleName()
     # Today's brief is open-only: today is briefed with Sync and review.
     assert panel.open_button.isEnabled() and not panel.brief_button.isEnabled()
+
+
+def test_a_saved_brief_and_missed_day_from_another_year_name_it(
+    panel: BriefHistoryPanel,
+) -> None:
+    panel.configure(
+        (summary(date(2026, 12, 30)),), (date(2026, 12, 31),), "owner@example.com", date(2027, 1, 2)
+    )
+
+    assert panel.saved.item(0).text().startswith("Wed Dec 30, 2026 · ")
+    assert panel.missed.item(0).text() == "Thu Dec 31, 2026 · no brief"
 
 
 def test_without_a_connection_missed_days_ask_for_one(panel: BriefHistoryPanel) -> None:
@@ -102,7 +113,7 @@ def test_replacing_a_saved_brief_asks_first(panel: BriefHistoryPanel) -> None:
     panel.configure((summary(PAST),), (), "owner@example.com", TODAY)
 
     panel.brief_button.click()
-    assert panel.confirm_label.text() == "This replaces the saved brief for 2026-09-03."
+    assert panel.confirm_label.text() == "This replaces the saved brief for Thu Sep 3."
     assert briefed == []
     panel.keep_button.click()
     assert panel.confirm_panel.isHidden() and briefed == []
@@ -216,7 +227,7 @@ async def test_the_page_lists_the_connected_account_s_missed_days(
 
     assert window.workspace.current_page() == "briefs"
     assert window.history_panel.saved.count() == 2
-    assert window.history_panel.missed.item(0).text() == "2026-09-02 · no brief"
+    assert window.history_panel.missed.item(0).text() == "Wed Sep 2 · no brief"
     window._show_page("today")
 
 
@@ -224,7 +235,7 @@ async def test_the_page_follows_disconnect_and_connect(window: MainWindow) -> No
     window.workspace.sidebar.page_requested.emit("briefs")
     await finish(window)
     panel = window.history_panel
-    assert panel.missed.item(0).text() == "2026-09-02 · no brief"
+    assert panel.missed.item(0).text() == "Wed Sep 2 · no brief"
 
     window.disconnect_button.click()
     await finish(window)
@@ -234,7 +245,7 @@ async def test_the_page_follows_disconnect_and_connect(window: MainWindow) -> No
     await finish(window)
     assert window.workspace.current_page() == "briefs"
     assert not panel.missed.isHidden()
-    assert panel.missed.item(0).text() == "2026-09-02 · no brief"
+    assert panel.missed.item(0).text() == "Wed Sep 2 · no brief"
     window._show_page("today")
 
 
@@ -245,7 +256,7 @@ async def test_opening_a_past_brief_shows_the_banner_until_back_to_latest(
 
     assert heading(window).startswith("Thu Sep 3")
     assert not window.viewing.isHidden()
-    assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
+    assert window.viewing_label.text() == "Viewing the brief for Thu Sep 3."
     assert window.workspace.current_page() == "today"
 
     window.latest_button.click()
@@ -290,7 +301,7 @@ async def test_briefing_a_missed_day_passes_its_date_and_shows_it(
 
     assert backend.generated_days[-1] == date(2026, 9, 2)
     assert heading(window).startswith("Wed Sep 2")
-    assert window.viewing_label.text() == "Viewing the brief for 2026-09-02."
+    assert window.viewing_label.text() == "Viewing the brief for Wed Sep 2."
 
 
 async def test_briefing_a_saved_day_asks_before_replacing(
@@ -301,13 +312,13 @@ async def test_briefing_a_saved_day_asks_before_replacing(
     window.history_panel.saved.setCurrentRow(1)
     window.history_panel.brief_button.click()
     assert backend.generated_days == []
-    assert "replaces the saved brief for 2026-09-03" in window.history_panel.confirm_label.text()
+    assert "replaces the saved brief for Thu Sep 3" in window.history_panel.confirm_label.text()
 
     window.history_panel.replace_button.click()
     await review_and_approve(window)
 
     assert backend.generated_days == [PAST]
-    assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
+    assert window.viewing_label.text() == "Viewing the brief for Thu Sep 3."
 
 
 async def test_offline_briefing_says_a_connection_is_needed(
