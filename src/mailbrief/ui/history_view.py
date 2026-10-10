@@ -40,7 +40,7 @@ def _plain(text: str = "") -> QLabel:
 def summary_text(summary: SavedBriefSummary, today: date | None = None) -> str:
     noun = "item" if summary.item_count == 1 else "items"
     return (
-        f"{day_text(summary.local_date, today)} · {summary.status.value} · "
+        f"{day_text(summary.local_date, today)} · {summary.status.value.capitalize()} · "
         f"{summary.item_count} {noun} · {summary.account_email}"
     )
 

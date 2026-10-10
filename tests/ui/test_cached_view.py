@@ -1,6 +1,7 @@
 """Offline browsing and keyboard-driven shortlist inclusion."""
 
 import asyncio
+import re
 from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
@@ -107,6 +108,12 @@ async def test_offline_browsing_filters_pages_and_renders_preview_as_text(
     assert viewer.isVisible()
     assert '<img src="https://evil.example">' in viewer.details.toPlainText()
     assert "may be stale" in viewer.status.text()
+    # Times read as everywhere else in the window, not as ISO.
+    assert re.search(
+        r"\nReceived: [A-Z][a-z]{2} [A-Z][a-z]{2} \d+(, \d{4})?, \d\d:\d\d\n",
+        viewer.details.toPlainText(),
+    )
+    assert re.match(r"[A-Z][a-z]{2} [A-Z][a-z]{2} \d+(, \d{4})? \(UTC\) · ", viewer.status.text())
     assert not viewer.source.isEnabled()  # The factory's Outlook link cannot open from Gmail UI.
     viewer.next.click()
     await finish(window)

@@ -292,8 +292,11 @@ async def test_offline_browsing_shows_the_last_sync_in_the_owner_s_zone(
         local_date=date(2026, 9, 4),
         timezone_name="America/Toronto",
     )
+    window.cached_dialog.today = lambda: date(2026, 9, 4)
     window.cached_dialog.show_page(page)
-    assert "last complete sync: 2026-09-04T08:00-04:00" in window.cached_dialog.status.text()
+    text = window.cached_dialog.status.text()
+    assert "Fri Sep 4 (America/Toronto)" in text
+    assert "last complete sync: Fri Sep 4, 08:00." in text
 
 
 async def test_a_brief_refused_for_unreadable_preferences_says_why(

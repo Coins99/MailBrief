@@ -61,8 +61,8 @@ def test_saved_briefs_and_missed_days_are_listed(panel: BriefHistoryPanel) -> No
 
     rows = [panel.saved.item(row).text() for row in range(panel.saved.count())]
     assert rows == [
-        "Sat Sep 5 · complete · 2 items · owner@example.com",
-        "Thu Sep 3 · complete · 1 item · owner@example.com",
+        "Sat Sep 5 · Complete · 2 items · owner@example.com",
+        "Thu Sep 3 · Complete · 1 item · owner@example.com",
     ]
     missed = [panel.missed.item(row).text() for row in range(panel.missed.count())]
     assert missed == ["Fri Sep 4 · no brief", "Wed Sep 2 · no brief"]
