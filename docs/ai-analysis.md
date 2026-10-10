@@ -33,7 +33,7 @@ exceptions. Usage metadata is retained even with ZDR. See
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
 | `MAILBRIEF_AI_MAX_OUTPUT_TOKENS` | 4000 | 256-64000 | Output limit per Groq call, reasoning included |
-| `MAILBRIEF_AI_MAX_REQUESTS_PER_RUN` | 10 | 1-1000 | Maximum HTTP attempts per connection/run, including retries |
+| `MAILBRIEF_AI_MAX_REQUESTS_PER_RUN` | 20 | 1-1000 | Maximum HTTP attempts per connection/run, including retries |
 | `MAILBRIEF_AI_TIMEOUT_SECONDS` | 120 | 10-600 | Time limit per request |
 | `MAILBRIEF_AI_BODY_CHARACTER_LIMIT` | 4000 | 1-8000 | Prepared body characters per email |
 | `MAILBRIEF_AI_BATCH_SIZE` | 1 | 1-10 | Messages per call |
@@ -88,8 +88,8 @@ MailBrief paces itself from Groq's rate-limit headers. After each call, if the r
 token allowance (`x-ratelimit-remaining-tokens`) is smaller than that call used (prompt
 plus completion), the next call first waits for the token window to reset
 (`x-ratelimit-reset-tokens`). An exhausted request or token allowance does the same. A
-wait longer than 30 seconds stops the run with "Groq rate limit reached; retry later." and
-keeps the results already saved.
+wait longer than 60 seconds, one token window, stops the run with "Groq rate limit
+reached; retry later." and keeps the results already saved.
 
 If you later enable paid usage, an organization owner can set a monthly USD limit in
 **Groq Console > Settings > Billing > Limits** and add alerts. This applies across all
@@ -298,7 +298,7 @@ error code, when Groq sent a safe one; Groq's own error text is never shown or s
   incomplete answer, not a rejected request: a batch is split and a single message is
   tried once more. Try again, or raise `MAILBRIEF_AI_MAX_OUTPUT_TOKENS`. Every other 400
   is still reported as a rejected request.
-- **Rate limits**: waits of up to 30 seconds are retried automatically, at most 3 times;
+- **Rate limits**: waits of up to 60 seconds are retried automatically, at most 3 times;
   longer waits stop the run, so retry later.
 
 ## Live acceptance checklist

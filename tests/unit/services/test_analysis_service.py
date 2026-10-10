@@ -460,7 +460,7 @@ async def test_a_long_token_window_reset_stops_the_run_and_keeps_results(
     def answer_with_a_low_window(request: httpx.Request) -> httpx.Response:
         answer = answer_every_message(request)
         answer.headers.update(
-            {"x-ratelimit-remaining-tokens": "100", "x-ratelimit-reset-tokens": "45s"}
+            {"x-ratelimit-remaining-tokens": "100", "x-ratelimit-reset-tokens": "90s"}
         )
         return answer
 

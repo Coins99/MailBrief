@@ -54,7 +54,8 @@ CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 PROVIDER_NAME = "groq"
 MAX_RETRIES = 3
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)
-MAX_RETRY_DELAY_SECONDS = 30.0
+# Groq's token window is one minute, so a run waits out a whole window before stopping.
+MAX_RETRY_DELAY_SECONDS = 60.0
 
 AUTH_MESSAGE = "Groq rejected the API key. Run: mailbrief-gmail-diagnostic ai-key set"
 PERMISSION_MESSAGE = "Groq denied access (network, region, permission or quota)."
@@ -452,7 +453,7 @@ class GroqProvider:
         model: str,
         key_loader: Callable[[], Awaitable[SecretStr | None]],
         max_output_tokens: int,
-        max_requests: int = 10,
+        max_requests: int = 20,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not 1 <= max_requests <= 1_000:
