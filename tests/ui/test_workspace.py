@@ -117,6 +117,10 @@ def test_actions_page_renders(
         assert image.save(str(Path(folder) / f"{key}-{mode.value}-{dpr:g}x.png"))
 
 
+# The Actions list's viewport at the gallery's 1100 px window (the 4 : 5 split).
+GALLERY_LIST_WIDTH = 364
+
+
 @pytest.mark.parametrize("key", list(ACTION_PAGES))
 def test_no_action_row_line_is_cut_off_at_the_gallery_size(
     qtbot: QtBot, qapp: QApplication, themed: None, key: str
@@ -129,7 +133,9 @@ def test_no_action_row_line_is_cut_off_at_the_gallery_size(
     assert panel is not None
     listing = panel.lists[panel.view()]
     assert listing.count() > 0
-    width = listing.viewport().width() - ELIDE_MARGIN
+    if workspace.width() == SIZES["desktop"][0]:  # A small screen can clamp the window.
+        assert listing.viewport().width() == GALLERY_LIST_WIDTH
+    width = GALLERY_LIST_WIDTH - ELIDE_MARGIN
     metrics = ui_metrics(TEXT_PX)
     for number in range(listing.count()):
         row = listing.item(number).data(ROW_ROLE)
