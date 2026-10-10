@@ -6,6 +6,7 @@ in a tooltip, and the pane never opens a URL itself.
 """
 
 from collections.abc import Callable, Sequence
+from datetime import date
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -28,10 +29,10 @@ from mailbrief.domain.actions import (
     SuggestionView,
     ThreadLink,
 )
-from mailbrief.domain.analysis import ActionOwnership, DeadlinePrecision
+from mailbrief.domain.analysis import ActionOwnership
 from mailbrief.domain.digests import DigestItem
 from mailbrief.ui.brief_list import NO_SUBJECT, sender_with_address
-from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.deadline_text import day_text, deadline_text
 from mailbrief.ui.hairline import HairlineFrame
 from mailbrief.ui.labels import (
     outline_button,
@@ -50,27 +51,20 @@ DETAIL_MAX_WIDTH = 720
 _ICON_PX = 14
 
 
-def item_deadline_text(item: DigestItem, zone: ZoneInfo) -> str | None:
-    """The email's own deadline in the brief's zone, or None."""
-    if item.deadline_precision is DeadlinePrecision.DATETIME and item.deadline_at_utc:
-        local = item.deadline_at_utc.astimezone(zone)
-        return f"Due {local:%a %b} {local.day}, {local:%H:%M}"
-    if item.deadline_precision is DeadlinePrecision.DATE and item.deadline_date:
-        day = item.deadline_date
-        return f"Due {day:%a %b} {day.day}"
-    if item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
-        return f"Due “{item.deadline_text}”"
-    return None
+def item_deadline_text(item: DigestItem, zone: ZoneInfo, *, today: date) -> str | None:
+    """The email's own deadline in the brief's zone, "Due Thu Oct 8, 17:00", or None."""
+    due = deadline_text(item, zone, today=today)
+    return None if due is None else f"Due {due}"
 
 
-def suggestion_meta(view: SuggestionView, zone: ZoneInfo) -> str:
+def suggestion_meta(view: SuggestionView, zone: ZoneInfo, *, today: date) -> str:
     """Whose it is, then its target, else its deadline, else that none was stated."""
     suggestion = view.suggestion
     text = "Yours." if suggestion.ownership is ActionOwnership.MINE else "Waiting for someone."
     target, reason = suggestion.suggested_target_date, suggestion.target_reason
-    due = deadline_text(suggestion, zone)
+    due = deadline_text(suggestion, zone, today=today)
     if target is not None and reason is not None:
-        return f"{text} Target {target:%a %b} {target.day}, {TARGET_REASON_TEXT[reason]}."
+        return f"{text} Target {day_text(target, today=today)}, {TARGET_REASON_TEXT[reason]}."
     if due is not None:
         return f"{text} Due {due}."
     return f"{text} No deadline stated."
@@ -137,6 +131,7 @@ class BriefDetailPane(QScrollArea):
         *,
         account_email: str,
         timezone_name: str,
+        today: date,
         links: Sequence[ThreadLink] = (),
         proposals: Sequence[ActionProposal] = (),
     ) -> None:
@@ -150,7 +145,7 @@ class BriefDetailPane(QScrollArea):
         layout.addWidget(wrap_label(item.summary, px=TEXT_PX))
         if item.action_text and item.action_text != item.summary:
             layout.addWidget(wrap_label(item.action_text, tone="secondary", px=TEXT_PX))
-        due = item_deadline_text(item, zone)
+        due = item_deadline_text(item, zone, today=today)
         if due is not None:
             layout.addLayout(self._deadline_row(due))
         for link in links:
@@ -160,14 +155,14 @@ class BriefDetailPane(QScrollArea):
                 )
         for view in item.suggestions:
             if view.state is SuggestionState.PENDING:
-                layout.addWidget(self._suggestion_card(view, links, zone))
+                layout.addWidget(self._suggestion_card(view, links, zone, today))
             elif view.state is SuggestionState.ACCEPTED:
                 layout.addWidget(
                     wrap_label(f"Accepted: {view.suggestion.title}", tone="secondary", px=TEXT_PX)
                 )
         for proposal in proposals:
             if proposal.state is ProposalState.PENDING:
-                layout.addWidget(self._proposal_card(proposal, zone))
+                layout.addWidget(self._proposal_card(proposal, zone, today))
         layout.addLayout(self._footer(item, account_email))
         layout.addStretch(1)
         self.rebuilt.emit()
@@ -183,7 +178,7 @@ class BriefDetailPane(QScrollArea):
         return row
 
     def _suggestion_card(
-        self, view: SuggestionView, links: Sequence[ThreadLink], zone: ZoneInfo
+        self, view: SuggestionView, links: Sequence[ThreadLink], zone: ZoneInfo, today: date
     ) -> HairlineFrame:
         card = HairlineFrame()
         card.setObjectName("suggestionCard")
@@ -192,7 +187,9 @@ class BriefDetailPane(QScrollArea):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addWidget(wrap_label(view.suggestion.title, px=TEXT_PX, medium=True))
-        layout.addWidget(wrap_label(suggestion_meta(view, zone), tone="secondary", px=SMALL_PX))
+        layout.addWidget(
+            wrap_label(suggestion_meta(view, zone, today=today), tone="secondary", px=SMALL_PX)
+        )
         for step in view.suggestion.steps:  # The suggested plan, in order.
             layout.addWidget(wrap_label(f"· {step}", tone="secondary", px=SMALL_PX))
         layout.addSpacing(4)
@@ -229,7 +226,9 @@ class BriefDetailPane(QScrollArea):
         """An "Add to" handler bound to this suggestion and action, not the loop's last."""
         return lambda: self.accept_into_requested.emit(suggestion_id, link.public_id, link.revision)
 
-    def _proposal_card(self, proposal: ActionProposal, zone: ZoneInfo) -> HairlineFrame:
+    def _proposal_card(
+        self, proposal: ActionProposal, zone: ZoneInfo, today: date
+    ) -> HairlineFrame:
         card = HairlineFrame()
         card.setObjectName("proposalCard")
         card.setAccessibleName("Proposed update")
@@ -241,7 +240,9 @@ class BriefDetailPane(QScrollArea):
         )
         row = QHBoxLayout()
         row.setSpacing(8)
-        apply = outline_button(effect_text(proposal, zone), "applyProposalButton", shorten=True)
+        apply = outline_button(
+            effect_text(proposal, zone, today=today), "applyProposalButton", shorten=True
+        )
         apply.clicked.connect(
             lambda _checked=False, pid=proposal.id, revision=proposal.action_revision: (
                 self.proposal_requested.emit(APPLY, pid, revision)

@@ -40,6 +40,7 @@ from mailbrief.domain.actions import ActionProposal, ProposalState
 from mailbrief.domain.analysis import DeadlinePrecision, FollowUpKind
 from mailbrief.domain.digests import SECTION_TITLES, DailyDigest, DigestItem
 from mailbrief.domain.messages import EmailContact
+from mailbrief.ui.deadline_text import month_day, weekday
 from mailbrief.ui.hairline import hairline_pen, paint_focus_ring
 from mailbrief.ui.labels import cut_text
 from mailbrief.ui.theme import (
@@ -73,7 +74,8 @@ _CHIP_SPACING: Final = 6
 # Header rows: left inset, space above and below the title.
 _HEADER_ABOVE: Final = 12
 _HEADER_BELOW: Final = 4
-_ELIDE_MARGIN: Final = 24
+# The room a row's text leaves: its padding at both sides (logical px).
+ELIDE_MARGIN: Final = 2 * ROW_PAD_H
 
 
 class ChipTone(StrEnum):
@@ -129,12 +131,11 @@ def deadline_chip(
         local = item.deadline_at_utc.astimezone(zone)
         owner_day = item.deadline_at_utc.astimezone(owner_zone).date()
         if today <= owner_day <= today + timedelta(days=_WEEKDAY_DAYS):
-            text = f"Due {local:%a %H:%M}"
+            text = f"Due {weekday(local.date())} {local:%H:%M}"
         else:
-            text = f"Due {local:%b} {local.day} {local:%H:%M}"
+            text = f"Due {month_day(local.date(), today=today)} {local:%H:%M}"
     elif item.deadline_precision is DeadlinePrecision.DATE and item.deadline_date:
-        day = item.deadline_date
-        text = f"Due {day:%b} {day.day}"
+        text = f"Due {month_day(item.deadline_date, today=today)}"
     elif item.deadline_precision is DeadlinePrecision.UNRESOLVED and item.deadline_text:
         text = f"Due {cut_text(item.deadline_text, _UNRESOLVED_CHARS)}"
     return None if text is None else Chip(text, ChipTone.WARNING)
@@ -310,13 +311,13 @@ def paint_lines(
     top: int,
     width: int,
     title: str,
-    sender: str,
+    subtitle: str,
     *,
     title_color: str,
-    sender_color: str,
+    subtitle_color: str,
 ) -> int:
-    """The title, 13 px Medium and elided to ``width``, then ``sender`` as given, 13 px
-    (callers fit it to ``width``). Returns the y below the sender line."""
+    """The title, 13 px Medium and elided to ``width``, then ``subtitle`` (a sender or a meta
+    line) as given, 13 px (callers fit it to ``width``). Returns the y below the subtitle."""
     title_metrics = ui_metrics(TEXT_PX, medium=True)
     painter.setFont(ui_font(TEXT_PX, medium=True))
     painter.setPen(QColor(title_color))
@@ -326,11 +327,11 @@ def paint_lines(
         elided(title, title_metrics, width),
     )
     top += title_metrics.height()
-    sender_metrics = ui_metrics(TEXT_PX)
+    subtitle_metrics = ui_metrics(TEXT_PX)
     painter.setFont(ui_font(TEXT_PX))
-    painter.setPen(QColor(sender_color))
-    painter.drawText(QRect(left, top, width, sender_metrics.height()), SINGLE_LINE, sender)
-    return top + sender_metrics.height()
+    painter.setPen(QColor(subtitle_color))
+    painter.drawText(QRect(left, top, width, subtitle_metrics.height()), SINGLE_LINE, subtitle)
+    return top + subtitle_metrics.height()
 
 
 def paint_separator(painter: QPainter, rect: QRect, tokens: Tokens) -> None:
@@ -362,7 +363,7 @@ class BriefItemDelegate(QStyledItemDelegate):
             painter.restore()
             return
         paint_selection(painter, rect, state, tokens)
-        width = max(0, rect.width() - _ELIDE_MARGIN)
+        width = max(0, rect.width() - ELIDE_MARGIN)
         left = rect.left() + ROW_PAD_H
         top = paint_lines(
             painter,
@@ -372,7 +373,7 @@ class BriefItemDelegate(QStyledItemDelegate):
             row.title,
             elided(row.sender, ui_metrics(TEXT_PX), width),
             title_color=tokens.text,
-            sender_color=tokens.text_secondary,
+            subtitle_color=tokens.text_secondary,
         )
         if row.chips:
             paint_chips(painter, row.chips, left, top + CHIP_GAP)
@@ -388,6 +389,28 @@ class BriefItemDelegate(QStyledItemDelegate):
         if row.kind == "header":
             return QSize(width, _HEADER_ABOVE + ui_metrics(SMALL_PX).height() + _HEADER_BELOW)
         return QSize(width, row_height(bool(row.chips)))
+
+
+def page_detail(view: QAbstractItemView, bar: QScrollBar | None, event: QKeyEvent) -> bool:
+    """Page Up or Page Down in ``view`` scrolls ``bar`` (the detail beside it) by a page
+    while the whole list fits; True when it did, and the key is then accepted. A list that
+    scrolls, or no ``bar``, leaves the key to the list."""
+    modifiers = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+    if (
+        bar is None
+        or event.key() not in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)
+        or modifiers != Qt.KeyboardModifier.NoModifier
+        or view.verticalScrollBar().maximum() != 0
+    ):
+        return False
+    # Only while the whole list fits: then the item being read is what needs paging.
+    bar.triggerAction(
+        QAbstractSlider.SliderAction.SliderPageStepSub
+        if event.key() == Qt.Key.Key_PageUp
+        else QAbstractSlider.SliderAction.SliderPageStepAdd
+    )
+    event.accept()
+    return True
 
 
 class BriefListView(QListView):
@@ -446,22 +469,7 @@ class BriefListView(QListView):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         index = self.currentIndex()
-        bar = self._page_scroll
-        modifiers = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
-        if (
-            bar is not None
-            and event.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)
-            and modifiers == Qt.KeyboardModifier.NoModifier
-            and self.verticalScrollBar().maximum() == 0
-        ):
-            # Only while the whole list fits: then the email being read is what needs
-            # paging. A list that scrolls pages itself.
-            bar.triggerAction(
-                QAbstractSlider.SliderAction.SliderPageStepSub
-                if event.key() == Qt.Key.Key_PageUp
-                else QAbstractSlider.SliderAction.SliderPageStepAdd
-            )
-            event.accept()
+        if page_detail(self, self._page_scroll, event):
             return
         if index.isValid() and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             # Activate once and consume the key, as ActivatingList does (ui/lists.py).

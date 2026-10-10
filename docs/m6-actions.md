@@ -25,13 +25,15 @@ recorded in [ADR 0011](adr/0011-actions-and-suggestions.md).
   that continues an open action's thread also offers **Add to “<title>”**, which accepts
   the suggestion into that action as another source instead of creating a new one
   ([m8-daily-operation.md](m8-daily-operation.md#thread-activity-and-adding-to-an-action-part-5)).
-- **Your actions** lists the three views. **Edit…** (or Return on a row) changes the
-  title, whose it is, effort, target date, notes and the plan: add, rename (F2; Return on
-  macOS), reorder, check off or remove steps. One save is one revision. The editor stays
-  open until the save succeeds; if it fails, or the action changed in the meantime, your
-  edits stay in the dialog with a message saying what to do.
-  **Complete**/**Reopen**, **Delete** and **Open source** (Gmail only) act on the selected
-  action.
+- **Your actions** shows the Open, Waiting and Completed views as tabs over a list of
+  rows, beside the selected action's detail: its dates, plan, notes, thread activity,
+  proposals and sources. **Edit…** (or Return on a row) changes the title, whose it is,
+  effort, target date, notes and the plan: add, rename (F2; Return on macOS), reorder,
+  check off or remove steps. One save is one revision. The editor stays open until the
+  save succeeds; if it fails, or the action changed in the meantime, your edits stay in
+  the dialog with a message saying what to do.
+  **Complete**/**Reopen**, **Delete** and **Draft…** sit at the foot of the detail, and
+  **Open source** (Gmail only) follows the action's first Gmail source.
 - **Undo** reverses the latest accept, add, dismiss, complete, reopen or delete. It is
   withdrawn by an edit or a new brief, and refuses when the action changed in between.
 - **Continue** in the shortlist review needs at least one checked message, so an empty

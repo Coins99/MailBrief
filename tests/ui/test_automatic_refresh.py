@@ -310,7 +310,7 @@ async def test_a_refresh_never_pulls_the_owner_away_from_a_past_brief(
     await due(window)
 
     assert len(backend.link_calls) == shown  # Not shown: they are reading another day's.
-    assert window.viewing_label.text() == "Viewing the brief for 2026-09-03."
+    assert window.viewing_label.text() == "Viewing the brief for Thu Sep 3."
     assert window.status.text().startswith("Automatic brief at 10:02: analyzed 3 new messages")
 
 
@@ -894,7 +894,7 @@ async def test_settings_show_the_permission_from_the_active_consent(
         limit=2, granted_at_utc=datetime(2026, 9, 29, 15, tzinfo=UTC)
     )
     await open_settings(window)
-    assert panel.auto_line.text() == "Up to 2 messages per run, since 2026-09-29"
+    assert panel.auto_line.text() == "Up to 2 messages per run, since Tue Sep 29"
     window.settings_dialog.reject()
 
 
@@ -928,7 +928,7 @@ async def test_change_opens_the_dialog_and_saving_gives_the_permission(
     await finish(window)
 
     assert backend.permission_saves == [3]
-    assert panel.auto_line.text() == "Up to 3 messages per run, since 2026-09-30"
+    assert panel.auto_line.text() == "Up to 3 messages per run, since Wed Sep 30"
     assert window.status.text() == "Automatic runs may now send up to 3 messages without asking."
     assert window.settings_dialog.status.text() == window.status.text()
 
@@ -1028,3 +1028,25 @@ async def test_each_automatic_run_leaves_one_counts_only_line_in_the_desktop_log
     )
     assert "status=saved ready=0 unrefreshed=0 analyzed=3 deferred=2 ai_requests=0" in lines[1]
     assert not any(word in " ".join(lines) for word in ("Budget", "owner@", "subject"))
+
+
+async def test_the_permission_line_names_the_year_when_it_is_another(
+    window: MainWindow, backend: FakeBackend
+) -> None:
+    window.zone = ZoneInfo("UTC")
+    window.now = lambda: datetime(2027, 1, 4, 12, tzinfo=UTC)
+    backend.permission = make_auto_send(
+        limit=2, granted_at_utc=datetime(2026, 9, 29, 15, tzinfo=UTC)
+    )
+    panel = window.settings_dialog.preferences_panel
+
+    await open_settings(window)  # The line when Settings opens.
+    assert panel.auto_line.text() == "Up to 2 messages per run, since Tue Sep 29, 2026"
+    window.settings_dialog.reject()
+
+    panel.set_auto_send(None, window.zone, today=window._local_today())
+    window._account_email = OWNER
+    window.start(window._open_auto_send)  # The line when its dialog is opened.
+    await finish(window)
+    assert panel.auto_line.text() == "Up to 2 messages per run, since Tue Sep 29, 2026"
+    window.auto_send_dialog.reject()

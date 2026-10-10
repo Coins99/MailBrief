@@ -6,6 +6,7 @@ so everything here is plain text: rows and labels are never rich text, nothing i
 a button label escapes the mnemonic marker.
 """
 
+from datetime import date
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from mailbrief.domain.actions import Action, ActionProposal, ActionStatus
 from mailbrief.domain.analysis import FollowUpKind
-from mailbrief.ui.deadline_text import deadline_text
+from mailbrief.ui.deadline_text import deadline_text, moment_text
 from mailbrief.ui.lists import ActivatingList
 
 _COMPLETES = {
@@ -41,25 +42,24 @@ def pending_proposals(action: Action) -> tuple[ActionProposal, ...]:
     return action.proposals if action.status is ActionStatus.OPEN else ()
 
 
-def effect_text(proposal: ActionProposal, zone: ZoneInfo) -> str:
+def effect_text(proposal: ActionProposal, zone: ZoneInfo, *, today: date) -> str:
     """What applying a proposal does, named by its effect.
 
-    A new deadline reads "Set the deadline to 2026-10-05 17:00" (an exact time in ``zone``),
-    "... to 2026-10-05" (a date) or "... to “next Monday”" (words only); a cancellation or
+    A new deadline reads "Set the deadline to Mon Oct 5, 17:00" (an exact time in ``zone``),
+    "... to Mon Oct 5" (a date) or "... to “next Monday”" (words only); a cancellation or
     delivery reads "Complete it (cancelled)" or "Complete it (delivered)".
     """
     if proposal.kind is FollowUpKind.NEW_DEADLINE:
-        due = deadline_text(proposal, zone)
+        due = deadline_text(proposal, zone, today=today)
         return "Set the deadline" if due is None else f"Set the deadline to {due}"
     return _COMPLETES[proposal.kind]
 
 
-def proposal_text(proposal: ActionProposal, zone: ZoneInfo) -> str:
+def proposal_text(proposal: ActionProposal, zone: ZoneInfo, *, today: date) -> str:
     """One row: the effect, the email's quote, its sender and when it arrived in ``zone``."""
-    received = proposal.received_at_utc.astimezone(zone)
     return (
-        f"{effect_text(proposal, zone)} · “{proposal.evidence}” · "
-        f"{proposal.sender_address} · {received:%Y-%m-%d %H:%M}"
+        f"{effect_text(proposal, zone, today=today)} · “{proposal.evidence}” · "
+        f"{proposal.sender_address} · {moment_text(proposal.received_at_utc, zone, today=today)}"
     )
 
 
@@ -127,19 +127,19 @@ class ProposalsDialog(QDialog):
         """A proposal being shown, with the action revision it was loaded at."""
         return next((item for item in self._proposals if item.id == proposal_id), None)
 
-    def show_proposals(self, action: Action | None, zone: ZoneInfo) -> None:
+    def show_proposals(self, action: Action | None, zone: ZoneInfo, today: date) -> None:
         """Replace what is listed with the action's pending proposals, keeping the selection on
         the same proposal when it remains. ``action`` is None when the action is gone."""
         previous = self._selected()
         kept = None if previous is None else previous.id
         self._action_id = None if action is None else action.public_id
         self._proposals = () if action is None else pending_proposals(action)
-        self._zone = zone
+        self._zone, self._today = zone, today
         self.heading.setText("Proposals" if action is None else f"Proposals for “{action.title}”")
         self.listing.blockSignals(True)
         self.listing.clear()
         for proposal in self._proposals:
-            self.listing.addItem(QListWidgetItem(proposal_text(proposal, zone)))
+            self.listing.addItem(QListWidgetItem(proposal_text(proposal, zone, today=today)))
         self.listing.blockSignals(False)
         ids = [proposal.id for proposal in self._proposals]
         if self._proposals:
@@ -166,7 +166,7 @@ class ProposalsDialog(QDialog):
             self.apply_button.setText("&Apply")
             self.apply_button.setAccessibleName("Apply the selected proposal")
             return
-        effect = effect_text(chosen, self._zone)
+        effect = effect_text(chosen, self._zone, today=self._today)
         # A fixed mnemonic (A): the effect's own first letter varies with the row.
         self.apply_button.setText(f"&Apply: {_label(effect)}")
         self.apply_button.setAccessibleName(f"Apply: {effect}")

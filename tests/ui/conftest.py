@@ -5,6 +5,7 @@ import sys
 from collections.abc import Iterator
 
 import pytest
+from PySide6.QtCore import QLocale
 from PySide6.QtWidgets import QApplication, QProxyStyle
 
 from mailbrief.ui.theme import DARK, set_current_tokens
@@ -23,7 +24,8 @@ def require_gui_session() -> None:
 @pytest.fixture
 def themed(qapp: QApplication) -> Iterator[None]:
     """Restore the application's look after a test that applies the theme, so no other
-    test ever sees Fusion, the palette, the stylesheet or the bundled font."""
+    test ever sees Fusion, the palette, the stylesheet or the bundled font, nor the English
+    default locale that ``app.main`` sets."""
     stylesheet = qapp.styleSheet()
     qapp.setStyleSheet("")  # A stylesheet's proxy style hides the real style's name.
     current = qapp.style()
@@ -31,6 +33,7 @@ def themed(qapp: QApplication) -> Iterator[None]:
     style = (current.baseStyle() if isinstance(current, QProxyStyle) else current).name()
     palette = qapp.palette()
     font = qapp.font()
+    locale = QLocale()  # The default locale.
     qapp.setStyleSheet(stylesheet)
     try:
         yield
@@ -41,3 +44,4 @@ def themed(qapp: QApplication) -> Iterator[None]:
         qapp.setFont(font)
         qapp.setStyleSheet(stylesheet)
         set_current_tokens(DARK)
+        QLocale.setDefault(locale)

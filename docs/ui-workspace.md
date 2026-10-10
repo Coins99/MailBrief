@@ -21,6 +21,11 @@ Run each check on Windows and on macOS, and note the date, platform and build.
 - [ ] The focus ring is visible on every stop, and Return or Enter opens a row once.
 - [ ] In the brief list, Page Up and Page Down scroll the selected email while the whole
       list fits, and page the list when it scrolls.
+- [ ] On Actions and Waiting, Tab runs the Open / Waiting / Completed tabs → the list →
+      the selected action's buttons in display order; the arrow keys switch tabs, and
+      Return on a row opens the editor once.
+- [ ] In an action list, Page Up and Page Down scroll the selected action while the whole
+      list fits, and page the list when it scrolls.
 
 ## Reading the brief
 
@@ -35,6 +40,18 @@ Run each check on Windows and on macOS, and note the date, platform and build.
       the selection or keyboard focus; the Actions page shows yesterday's actions as
       carried over (and overdue when they were due); and the Briefs page, if it shows,
       reloads. During a sync, that reload waits until the sync ends.
+
+## Dates and language
+
+- [ ] With the Mac set to another language (System Settings → General → Language &
+      Region, another language first in the list), dates read in English everywhere,
+      including the month and weekday names in the calendar pop-ups (Saved mail's date
+      and the action editor's target date). Check it both after opening MailBrief from
+      Finder and after starting it from Terminal. On Windows, check the same with another
+      Windows display language.
+- [ ] A draft or brief from another year shows its year: in Drafts ("updated Wed Dec 3,
+      2025, 14:00"), in the draft editor's versions, and on the Briefs page ("Wed Dec 31,
+      2025 · Complete · …").
 
 ## Screen readers
 
@@ -55,6 +72,17 @@ Run each check on Windows and on macOS, and note the date, platform and build.
       long addresses wrap, and nothing scrolls sideways.
 
 ## Pages
+
+- [ ] Actions and Waiting show rows beside the selected action, edge to edge like Today:
+      the meta line (completed day, target without its reason, due date, steps), the
+      Overdue, "N new in thread" and proposal chips, and muted Completed rows. The tab
+      counts match the sidebar's.
+- [ ] The detail shows the state, dates (an overdue deadline in the warning colour), the
+      plan with ✓ and ○, notes, thread activity with **Mark seen**, pending proposals with
+      **Proposals…**, the sources with **Open source** (it opens Gmail), and Edit,
+      Complete or Reopen, Delete and Draft; each still works, with **Undo**.
+- [ ] Each view with no actions shows its own empty message and no buttons.
+- [ ] A long title, note or step wraps in the detail and never widens the window.
 
 - [ ] The Briefs page lists saved briefs and missed days; opening a past brief returns to
       Today with the "Viewing the brief for …" banner and **Back to latest**.

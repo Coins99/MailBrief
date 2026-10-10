@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from mailbrief.domain.cached_mail import CachedAccount, CachedMailPage
+from mailbrief.ui.deadline_text import day_text, moment_text
 
 
 class CachedMailDialog(QDialog):
@@ -129,12 +130,13 @@ class CachedMailDialog(QDialog):
     def show_page(self, page: CachedMailPage) -> None:
         self._page = page
         last = page.account.last_sync_at_utc
-        stamp = (
-            last.astimezone(self.zone).isoformat(timespec="minutes") if last else "none recorded"
-        )
+        today = self.today()
+        zone = self.zone or ZoneInfo(page.timezone_name)
+        stamp = moment_text(last, zone, today=today) if last else "none recorded"
         self.status.setText(
-            f"{page.local_date} ({page.timezone_name}) · {len(page.messages)} saved messages "
-            f"on this page. Account last complete sync: {stamp}. "
+            f"{day_text(page.local_date, today=today)} ({page.timezone_name}) · "
+            f"{len(page.messages)} saved messages on this page. "
+            f"Account last complete sync: {stamp}. "
             "Cached metadata may be stale; browsing does not use the network."
         )
         self.messages.clear()
@@ -154,10 +156,12 @@ class CachedMailDialog(QDialog):
             self.details.clear()
             return
         message = self._page.messages[index]
-        received = message.received_at_utc.astimezone(ZoneInfo(self._page.timezone_name))
+        received = moment_text(
+            message.received_at_utc, ZoneInfo(self._page.timezone_name), today=self.today()
+        )
         self.details.setPlainText(
             f"From: {message.sender.address}\nSubject: {message.subject}\n"
-            f"Received: {received.isoformat(timespec='minutes')}\n"
+            f"Received: {received}\n"
             f"In Inbox at last observation: {'yes' if message.is_in_inbox else 'no'}\n\n"
             f"Saved preview (not a downloaded body):\n{message.body_preview}"
         )

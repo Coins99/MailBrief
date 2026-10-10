@@ -121,7 +121,7 @@ def test_the_drafts_panel_opens_once(qtbot: QtBot, key: Qt.Key) -> None:
     qtbot.addWidget(panel)
     requests: list[str] = []
     panel.draft_requested.connect(lambda kind, value: requests.append(kind))
-    panel.show_drafts((summary(1),), TORONTO)
+    panel.show_drafts((summary(1),), TORONTO, TODAY)
     panel.show()
     panel.list.setCurrentRow(0)
     panel.list.setFocus()

@@ -8,6 +8,7 @@ permission is not part of the form: it is set in its own dialog, and the panel o
 
 import functools
 import zoneinfo
+from datetime import date
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
@@ -42,6 +43,7 @@ from mailbrief.domain.preferences import (
     normalize_exclusion,
 )
 from mailbrief.services.consent import NO_CONSENT
+from mailbrief.ui.deadline_text import day_text
 from mailbrief.ui.drafting_panel import LENGTH_CHOICES, TONE_CHOICES
 
 # Each AI limit's field, label and range; the spin box's minimum is one below the range
@@ -183,7 +185,8 @@ class PreferencesPanel(QWidget):
         self.save_button.clicked.connect(self._save)
         self.reset_button.clicked.connect(self.reset_requested.emit)
         self.auto_button.clicked.connect(self.auto_send_requested.emit)
-        self.set_auto_send(None, ZoneInfo("UTC"))
+        # No permission to date yet, so ``today`` is never read.
+        self.set_auto_send(None, ZoneInfo("UTC"), today=date.min)
         self.set_zones("unknown", ())
 
     def set_zones(self, system_zone: str, zones: tuple[str, ...]) -> None:
@@ -230,9 +233,10 @@ class PreferencesPanel(QWidget):
         *,
         unreadable: bool = False,
         connected: bool = True,
+        today: date,
     ) -> None:
         """Show the connected account's automatic-analysis permission, in ``zone`` for the
-        date it was given.
+        date it was given, with its year when ``today`` (the owner's day) is in another.
 
         Without an active consent (``status`` None) there is nothing to allow yet, so the
         button is off and the line says how to get one. ``unreadable`` says it couldn't be
@@ -248,7 +252,7 @@ class PreferencesPanel(QWidget):
             text, changeable = _AUTO_OFF, True
         else:
             noun = "message" if status.limit == 1 else "messages"
-            since = status.granted_at_utc.astimezone(zone).date().isoformat()
+            since = day_text(status.granted_at_utc.astimezone(zone).date(), today=today)
             text, changeable = f"Up to {status.limit} {noun} per run, since {since}", True
         self.auto_line.setText(text)
         self.auto_button.setEnabled(changeable)

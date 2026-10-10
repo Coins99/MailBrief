@@ -1,7 +1,7 @@
 """The refresh settings in the Preferences tab, and the automatic-analysis dialog (ADR 0017)."""
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -16,6 +16,7 @@ from mailbrief.ui.preferences_view import REFRESH_CHOICES, PreferencesPanel
 from tests.factories import make_auto_send
 
 TORONTO = ZoneInfo("America/Toronto")
+TODAY = date(2026, 9, 30)
 
 
 @pytest.fixture
@@ -118,14 +119,14 @@ def line(panel: PreferencesPanel) -> tuple[str, bool]:
 
 
 def test_without_a_consent_there_is_nothing_to_change_yet(panel: PreferencesPanel) -> None:
-    panel.set_auto_send(None, TORONTO)
+    panel.set_auto_send(None, TORONTO, today=TODAY)
 
     assert line(panel) == ("Analyze once with Sync and review to give consent first.", False)
     assert line(panel)[0] == NO_CONSENT
 
 
 def test_off_says_every_run_asks_first(panel: PreferencesPanel) -> None:
-    panel.set_auto_send(make_auto_send(limit=0), TORONTO)
+    panel.set_auto_send(make_auto_send(limit=0), TORONTO, today=TODAY)
 
     assert line(panel) == ("Off — every run asks you first", True)
 
@@ -133,22 +134,31 @@ def test_off_says_every_run_asks_first(panel: PreferencesPanel) -> None:
 @pytest.mark.parametrize(
     ("limit", "granted", "text"),
     [
-        (1, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 1 message per run, since 2026-09-30"),
-        (3, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 3 messages per run, since 2026-09-30"),
+        (1, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 1 message per run, since Wed Sep 30"),
+        (3, datetime(2026, 9, 30, 14, tzinfo=UTC), "Up to 3 messages per run, since Wed Sep 30"),
         # 02:00 UTC is still the evening before in Toronto: the date is the owner's.
-        (10, datetime(2026, 9, 30, 2, tzinfo=UTC), "Up to 10 messages per run, since 2026-09-29"),
+        (10, datetime(2026, 9, 30, 2, tzinfo=UTC), "Up to 10 messages per run, since Tue Sep 29"),
     ],
 )
 def test_a_permission_says_how_many_and_since_when_in_the_owners_zone(
     panel: PreferencesPanel, limit: int, granted: datetime, text: str
 ) -> None:
-    panel.set_auto_send(make_auto_send(limit=limit, granted_at_utc=granted), TORONTO)
+    panel.set_auto_send(make_auto_send(limit=limit, granted_at_utc=granted), TORONTO, today=TODAY)
 
     assert line(panel) == (text, True)
 
 
+def test_a_permission_from_another_year_names_the_year(panel: PreferencesPanel) -> None:
+    granted = datetime(2026, 12, 30, 14, tzinfo=UTC)
+    panel.set_auto_send(
+        make_auto_send(limit=2, granted_at_utc=granted), TORONTO, today=date(2027, 1, 4)
+    )
+
+    assert line(panel)[0] == "Up to 2 messages per run, since Wed Dec 30, 2026"
+
+
 def test_a_setting_that_could_not_be_read_can_not_be_changed(panel: PreferencesPanel) -> None:
-    panel.set_auto_send(None, TORONTO, unreadable=True)
+    panel.set_auto_send(None, TORONTO, today=TODAY, unreadable=True)
 
     text, changeable = line(panel)
     assert "couldn't be read" in text and not changeable
@@ -157,10 +167,10 @@ def test_a_setting_that_could_not_be_read_can_not_be_changed(panel: PreferencesP
 def test_change_asks_the_window_and_changes_nothing_itself(panel: PreferencesPanel) -> None:
     asked: list[bool] = []
     panel.auto_send_requested.connect(lambda: asked.append(True))
-    panel.set_auto_send(make_auto_send(limit=2), TORONTO)
+    panel.set_auto_send(make_auto_send(limit=2), TORONTO, today=TODAY)
 
     panel.auto_button.click()
-    panel.set_auto_send(None, TORONTO)
+    panel.set_auto_send(None, TORONTO, today=TODAY)
     panel.auto_button.click()  # Disabled without a consent.
 
     assert asked == [True]
@@ -170,7 +180,9 @@ def test_change_asks_the_window_and_changes_nothing_itself(panel: PreferencesPan
 
 
 def test_plain_text_only(panel: PreferencesPanel) -> None:
-    panel.set_auto_send(make_auto_send(limit=2, account_email="<b>me</b>@example.com"), TORONTO)
+    panel.set_auto_send(
+        make_auto_send(limit=2, account_email="<b>me</b>@example.com"), TORONTO, today=TODAY
+    )
 
     assert panel.auto_line.textFormat() == Qt.TextFormat.PlainText
     assert "<b>" not in panel.auto_line.text()

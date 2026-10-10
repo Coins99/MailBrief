@@ -16,11 +16,14 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
+from mailbrief.domain.actions import ActionFilter
 from mailbrief.domain.digests import DailyDigest, DigestCoverage, DigestItem, DigestStatus
 from mailbrief.domain.messages import EmailContact
 from mailbrief.services.history import coverage_short
+from mailbrief.ui.actions_view import ActionRow, ActionsPanel
 from mailbrief.ui.brief_detail import DETAIL_MAX_WIDTH
-from mailbrief.ui.theme import ThemeMode, apply_theme, current_tokens
+from mailbrief.ui.brief_list import ELIDE_MARGIN, ROW_ROLE, elided
+from mailbrief.ui.theme import TEXT_PX, ThemeMode, apply_theme, current_tokens, ui_metrics
 from mailbrief.ui.workspace import (
     EMPTY_BRIEF,
     KEY_ROLE,
@@ -30,7 +33,7 @@ from mailbrief.ui.workspace import (
 )
 from tests.factories import make_digest_item
 from tests.ui.window_wait import show
-from tests.ui.workspace_fixtures import ZONE, mockup_digest
+from tests.ui.workspace_fixtures import ACTIONS_NOW, ZONE, mockup_actions, mockup_digest
 
 SIZES = {"mockup": (680, 520), "desktop": (1100, 720)}
 OWNER_ZONE = ZoneInfo(ZONE)
@@ -70,6 +73,71 @@ def test_workspace_renders(
         Path(folder).mkdir(parents=True, exist_ok=True)
         dpr = image.devicePixelRatio()
         assert image.save(str(Path(folder) / f"{size}-{mode.value}-{dpr:g}x.png"))
+
+
+# The Actions page's renders: the sidebar row, then the view shown.
+ACTION_PAGES = {
+    "page-actions": ("actions", ActionFilter.OPEN),
+    "page-waiting": ("waiting", ActionFilter.WAITING),
+    "page-completed": ("actions", ActionFilter.COMPLETED),
+}
+
+
+def build_actions(qtbot: QtBot, key: str) -> ThreePaneWorkspace:
+    """The workspace on the Actions page, as the window composes it."""
+    workspace = build(qtbot)
+    panel = ActionsPanel()
+    for view, actions in mockup_actions().items():
+        panel.show_actions(view, actions, today=TODAY, zone=OWNER_ZONE, now=ACTIONS_NOW)
+    workspace.add_page("actions", panel)
+    sidebar, view = ACTION_PAGES[key]
+    workspace.show_page("actions")
+    panel.show_view(view)
+    workspace.sidebar.set_current(sidebar)
+    return workspace
+
+
+@pytest.mark.parametrize("key", list(ACTION_PAGES))
+@pytest.mark.parametrize("mode", list(ThemeMode))
+def test_actions_page_renders(
+    qtbot: QtBot, qapp: QApplication, themed: None, mode: ThemeMode, key: str
+) -> None:
+    if key == "page-completed" and mode is ThemeMode.LIGHT:
+        pytest.skip("one render of the Completed view is enough")
+    apply_theme(qapp, mode)
+    workspace = build_actions(qtbot, key)
+    workspace.resize(*SIZES["desktop"])
+    show(qtbot, workspace)
+    image = workspace.grab()
+    assert not image.isNull()
+    folder = os.environ.get("MAILBRIEF_UI_SHOTS")
+    if folder:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        dpr = image.devicePixelRatio()
+        assert image.save(str(Path(folder) / f"{key}-{mode.value}-{dpr:g}x.png"))
+
+
+@pytest.mark.parametrize("key", list(ACTION_PAGES))
+def test_no_action_row_line_is_cut_off_at_the_gallery_size(
+    qtbot: QtBot, qapp: QApplication, themed: None, key: str
+) -> None:
+    apply_theme(qapp, ThemeMode.DARK)
+    workspace = build_actions(qtbot, key)
+    workspace.resize(*SIZES["desktop"])
+    show(qtbot, workspace)
+    panel = workspace.findChild(ActionsPanel)
+    assert panel is not None
+    listing = panel.lists[panel.view()]
+    assert listing.count() > 0
+    if workspace.width() < SIZES["desktop"][0]:
+        pytest.skip("the screen is too small for the gallery's window")
+    # The width a row really gets, which differs a little by platform (frame, scroll bar).
+    width = listing.viewport().width() - ELIDE_MARGIN
+    metrics = ui_metrics(TEXT_PX)
+    for number in range(listing.count()):
+        row = listing.item(number).data(ROW_ROLE)
+        assert isinstance(row, ActionRow)
+        assert elided(row.meta, metrics, width) == row.meta, row.meta
 
 
 def test_sidebar_requests_pages_and_settings(qtbot: QtBot) -> None:
@@ -263,41 +331,61 @@ def test_brief_meta_uses_the_brief_zone() -> None:
         generated_at_utc=datetime(2026, 10, 6, 13, 14, tzinfo=UTC),
         coverage=None,
     )
-    assert brief_meta(morning, paris) == (
+    assert brief_meta(morning, paris, TODAY) == (
         "owner@example.com · saved 09:14 (America/Toronto)",
-        "owner@example.com. Saved 2026-10-06T09:14-04:00 (America/Toronto).",
+        "owner@example.com. Saved Tue Oct 6, 09:14 (America/Toronto).",
     )
     assert "up to 09:14" in coverage_short(morning)  # The heading and footer agree.
     # Oct 6 23:30 in Toronto is Oct 7 05:30 in Paris: the brief's own day decides.
     late = morning.model_copy(update={"generated_at_utc": datetime(2026, 10, 7, 3, 30, tzinfo=UTC)})
-    short, _full = brief_meta(late, paris)
+    short, _full = brief_meta(late, paris, TODAY)
     assert short.startswith("owner@example.com · saved 23:30 (America/Toronto)")
     assert "Oct 7" not in short
     # Another name with the same offset at that moment shows the same time: no zone.
     for owner in (toronto, ZoneInfo("America/New_York")):
         for brief in (morning, late):
-            assert "(" not in brief_meta(brief, owner)[0]
+            assert "(" not in brief_meta(brief, owner, TODAY)[0]
     calcutta = morning.model_copy(update={"timezone_name": "Asia/Calcutta"})
-    assert "(" not in brief_meta(calcutta, ZoneInfo("Asia/Kolkata"))[0]  # One zone, two names.
+    assert (
+        "(" not in brief_meta(calcutta, ZoneInfo("Asia/Kolkata"), TODAY)[0]
+    )  # One zone, two names.
 
 
 def test_brief_title_names_the_day_and_an_incomplete_brief() -> None:
-    assert brief_title(brief_with()) == "Tue Oct 6"
-    assert brief_title(brief_with(status=DigestStatus.PARTIAL)) == "Tue Oct 6 · Partial"
-    assert brief_title(brief_with(status=DigestStatus.EMPTY)) == "Tue Oct 6 · Empty"
+    assert brief_title(brief_with(), TODAY) == "Tue Oct 6"
+    assert brief_title(brief_with(status=DigestStatus.PARTIAL), TODAY) == "Tue Oct 6 · Partial"
+    assert brief_title(brief_with(status=DigestStatus.EMPTY), TODAY) == "Tue Oct 6 · Empty"
+
+
+def test_a_brief_from_another_year_names_it() -> None:
+    old = brief_with(local_date=date(2026, 12, 31))
+    assert brief_title(old, date(2027, 1, 4)) == "Thu Dec 31, 2026"
+    assert brief_title(old, date(2026, 12, 31)) == "Thu Dec 31"
+    full = brief_meta(old, OWNER_ZONE, date(2027, 1, 4))[1]
+    assert "Saved Tue Oct 6, 2026, 09:14." in full  # Same zone: not named.
+    tokyo = brief_with(
+        timezone_name="Asia/Tokyo",
+        generated_at_utc=datetime(2026, 10, 6, 12, 0, tzinfo=UTC),
+        coverage=None,
+    )
+    # The brief's zone and the owner's differ: the time is the brief's, and named.
+    assert brief_meta(tokyo, OWNER_ZONE, TODAY) == (
+        "owner@example.com · saved 21:00 (Asia/Tokyo)",
+        "owner@example.com. Saved Tue Oct 6, 21:00 (Asia/Tokyo).",
+    )
 
 
 def test_brief_meta_short_and_full() -> None:
     complete = brief_with(coverage=coverage())
-    assert brief_meta(complete, OWNER_ZONE) == (
+    assert brief_meta(complete, OWNER_ZONE, TODAY) == (
         "owner@example.com · saved 09:14",
-        "owner@example.com. Saved 2026-10-06T09:14-04:00. "
+        "owner@example.com. Saved Tue Oct 6, 09:14. "
         "3 analyzed, 1 reused, 0 failed, 1 skipped. Inbox sync complete.",
     )
     later = brief_with(generated_at_utc=datetime(2026, 10, 7, 13, 5, tzinfo=UTC))
-    assert brief_meta(later, OWNER_ZONE)[0] == "owner@example.com · saved Oct 7 09:05"
+    assert brief_meta(later, OWNER_ZONE, TODAY)[0] == "owner@example.com · saved Oct 7 09:05"
     troubled = brief_with(coverage=coverage(failed=2, deferred=1, sync_complete=False))
-    short, full = brief_meta(troubled, OWNER_ZONE)
+    short, full = brief_meta(troubled, OWNER_ZONE, TODAY)
     assert short == (
         "owner@example.com · saved 09:14 · 2 failed · 1 deferred · Inbox sync incomplete"
     )
@@ -305,9 +393,9 @@ def test_brief_meta_short_and_full() -> None:
         "3 analyzed, 1 reused, 2 failed, 1 skipped, 1 deferred. Inbox sync incomplete."
     )
     unknown = brief_with(coverage=None)
-    assert brief_meta(unknown, OWNER_ZONE) == (
+    assert brief_meta(unknown, OWNER_ZONE, TODAY) == (
         "owner@example.com · saved 09:14",
-        "owner@example.com. Saved 2026-10-06T09:14-04:00.",
+        "owner@example.com. Saved Tue Oct 6, 09:14.",
     )
 
 
@@ -317,7 +405,7 @@ def test_the_heading_shows_the_brief(qtbot: QtBot) -> None:
     assert not heading.isHidden()
     assert heading.title.text() == "Tue Oct 6"
     assert heading.meta.text() == "owner@example.com · saved 09:14"
-    assert heading.meta.accessibleName().startswith("owner@example.com. Saved 2026-10-06T09:14")
+    assert heading.meta.accessibleName().startswith("owner@example.com. Saved Tue Oct 6, 09:14")
 
 
 def workspace_with(
@@ -513,3 +601,25 @@ def test_the_detail_keeps_a_readable_width_on_wide_windows(qtbot: QtBot) -> None
     assert content is not None
     assert 0 < content.width() <= DETAIL_MAX_WIDTH
     assert content.x() == 0  # Left-aligned.
+
+
+def test_the_heading_gains_its_year_after_new_year(qtbot: QtBot) -> None:
+    workspace = ThreePaneWorkspace()
+    qtbot.addWidget(workspace)
+    digest = brief_with(
+        local_date=date(2026, 12, 31),
+        generated_at_utc=datetime(2026, 12, 31, 15, 0, tzinfo=UTC),
+        coverage=None,
+    )
+    workspace.show_digest(digest, owner_zone=OWNER_ZONE, today=date(2026, 12, 31))
+    assert workspace.heading.title.text() == "Thu Dec 31"
+    assert workspace.heading.meta.accessibleName().startswith(
+        "owner@example.com. Saved Thu Dec 31, 10:00"
+    )
+
+    workspace.set_today(date(2027, 1, 1), OWNER_ZONE)  # Midnight passes.
+
+    assert workspace.heading.title.text() == "Thu Dec 31, 2026"
+    assert workspace.heading.meta.accessibleName().startswith(
+        "owner@example.com. Saved Thu Dec 31, 2026, 10:00"
+    )

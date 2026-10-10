@@ -261,7 +261,7 @@ async def test_a_past_brief_shows_the_banner_on_today(
     await finish(window)
     assert window.workspace.current_page() == "today"
     assert window.viewing.isVisible()
-    assert window.viewing_label.text() == "Viewing the brief for 2026-10-05."
+    assert window.viewing_label.text() == "Viewing the brief for Mon Oct 5."
 
 
 async def test_counts_follow_each_refresh_and_survive_a_failure(

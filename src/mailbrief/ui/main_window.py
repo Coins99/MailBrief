@@ -122,6 +122,7 @@ from mailbrief.ui.auto_send_view import AutoSendDialog
 from mailbrief.ui.brief_detail import ACCEPT, APPLY, DISMISS, is_gmail_link
 from mailbrief.ui.cached_view import CachedMailDialog
 from mailbrief.ui.data_view import DataDialog
+from mailbrief.ui.deadline_text import day_text, month_day
 from mailbrief.ui.diagnostics import (
     configuration_guidance,
     error_guidance,
@@ -335,13 +336,13 @@ def _step_heading(layout: QVBoxLayout, step: str, title: str) -> None:
     layout.addWidget(heading)
 
 
-def _page(widget: QWidget, name: str, accessible_name: str) -> QWidget:
-    """A workspace page holding ``widget`` with 12 px margins."""
+def _page(widget: QWidget, name: str, accessible_name: str, *, margins: int = 12) -> QWidget:
+    """A workspace page holding ``widget``, with ``margins`` px around it."""
     page = QWidget()
     page.setObjectName(name)
     page.setAccessibleName(accessible_name)
     layout = QVBoxLayout(page)
-    layout.setContentsMargins(12, 12, 12, 12)
+    layout.setContentsMargins(margins, margins, margins, margins)
     layout.addWidget(widget)
     return page
 
@@ -472,6 +473,8 @@ class MainWindow(QMainWindow):
         # Carryover and overdue labels use the owner's local day.
         self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.zone = resolve_timezone(None)
+        if self.data_dialog is not None:
+            self.data_dialog.today = self._local_today
         self.action_editor = ActionEditor(self)
         self.action_editor.save_requested.connect(self._request_save_action)
         self.draft_writes = DraftWrites()
@@ -659,7 +662,7 @@ class MainWindow(QMainWindow):
         centred.addStretch(1)
         run_page.setWidget(run_content)
         workspace.add_page("run", run_page)
-        self.cached_dialog.zone = self.zone
+        self._set_dialog_zones()
         workspace.detail.suggestion_requested.connect(self._request_suggestion)
         workspace.detail.accept_into_requested.connect(self._request_accept_into)
         workspace.detail.proposal_requested.connect(self._request_proposal)
@@ -669,7 +672,10 @@ class MainWindow(QMainWindow):
         self.actions_panel.action_requested.connect(self._request_action)
         self.actions_panel.draft_requested.connect(self._request_action_draft)
         self.actions_panel.tabs.currentChanged.connect(self._actions_tab_changed)
-        workspace.add_page("actions", _page(self.actions_panel, "actionsPage", "Actions"))
+        # Edge to edge, like Today: the list and the detail meet at a hairline.
+        workspace.add_page(
+            "actions", _page(self.actions_panel, "actionsPage", "Actions", margins=0)
+        )
         self.drafts_panel = DraftsPanel()
         self.drafts_panel.draft_requested.connect(self._request_draft)
         workspace.add_page("drafts", _page(self.drafts_panel, "draftsPage", "Drafts"))
@@ -857,7 +863,8 @@ class MainWindow(QMainWindow):
         if local.date() == self._local_today():
             text = f"Checked Gmail at {local:%H:%M}"
         else:
-            text = f"Checked Gmail {local:%b} {local.day} at {local:%H:%M}"
+            day = month_day(local.date(), today=self._local_today())
+            text = f"Checked Gmail {day} at {local:%H:%M}"
         self.workspace.header.set_status(text)
 
     def _minute_tick(self) -> None:
@@ -953,7 +960,9 @@ class MainWindow(QMainWindow):
         self._shown = shown
         self.viewing.setVisible(shown is not None)
         if shown is not None:
-            self.viewing_label.setText(f"Viewing the brief for {shown[1].isoformat()}.")
+            self.viewing_label.setText(
+                f"Viewing the brief for {day_text(shown[1], today=self._local_today())}."
+            )
 
     async def _reload_brief(self) -> None:
         """Reload the brief shown: the latest, or the past brief being viewed."""
@@ -1020,7 +1029,7 @@ class MainWindow(QMainWindow):
     async def _refresh_drafts(self) -> None:
         try:
             drafts = await self.backend.list_drafts()
-            self.drafts_panel.show_drafts(drafts, self.zone)
+            self.drafts_panel.show_drafts(drafts, self.zone, self._local_today())
             self._set_counts(drafts=len(drafts))
         except Exception as exc:
             self._note_not_refreshed(exc)
@@ -1030,7 +1039,9 @@ class MainWindow(QMainWindow):
         dialog = self.proposals_dialog
         public_id = dialog.action_public_id
         if dialog.isVisible() and public_id is not None:
-            dialog.show_proposals(self.actions_panel.action_with_id(public_id), self.zone)
+            dialog.show_proposals(
+                self.actions_panel.action_with_id(public_id), self.zone, self._local_today()
+            )
 
     async def _refresh_views(self) -> None:
         await self._reload_brief()
@@ -1186,7 +1197,7 @@ class MainWindow(QMainWindow):
         elif kind == SEEN:
             self.start(lambda: self._mark_seen(action), cancellable=False)
         elif kind == PROPOSALS:
-            self.proposals_dialog.show_proposals(action, self.zone)
+            self.proposals_dialog.show_proposals(action, self.zone, self._local_today())
             self.proposals_dialog.open()
 
     def _request_save_action(
@@ -1552,7 +1563,7 @@ class MainWindow(QMainWindow):
             log_failure(exc)
             editor.set_status("Couldn't load the saved versions; try again.")
             return
-        editor.show_versions(versions)
+        editor.show_versions(versions, self._local_today())
 
     async def _show_draft_version(self, number: int) -> None:
         editor = self.draft_editor
@@ -1739,10 +1750,15 @@ class MainWindow(QMainWindow):
             self.status.setText(str(exc))
         self.settings_dialog.open()
 
+    def _set_dialog_zones(self) -> None:
+        self.cached_dialog.zone = self.zone
+        if self.data_dialog is not None:
+            self.data_dialog.zone = self.zone
+
     def _apply_owner_preferences(self, preferences: OwnerPreferences) -> None:
         """The owner's zone for every local day and time shown, and the drafting defaults."""
         self.zone = owner_zone(preferences)
-        self.cached_dialog.zone = self.zone
+        self._set_dialog_zones()
         self._render_checked()  # In the new zone.
         self.draft_editor.ai_panel.set_defaults(preferences.draft_tone, preferences.draft_length)
         self.scheduler.configure(
@@ -1936,7 +1952,9 @@ class MainWindow(QMainWindow):
             self.status.setText("That brief is no longer saved.")
             return
         await self._view(digest, origin)  # Back on Today.
-        self.status.setText(f"Showing the brief for {local_date.isoformat()}.")
+        self.status.setText(
+            f"Showing the brief for {day_text(local_date, today=self._local_today())}."
+        )
 
     async def _view(self, digest: DailyDigest, origin: str | None = None) -> None:
         """Show a brief; the banner appears unless it is the latest. Today shows it unless
@@ -1976,7 +1994,11 @@ class MainWindow(QMainWindow):
         if local_date is None and self._shown is not None:
             self._set_shown(None)  # Sync and review returns to the latest brief.
             await self._reload_brief()
-        day = "today's Inbox" if local_date is None else f"the Inbox for {local_date.isoformat()}"
+        day = (
+            "today's Inbox"
+            if local_date is None
+            else f"the Inbox for {day_text(local_date, today=self._local_today())}"
+        )
         self.status.setText(f"Syncing {day}…")
         result = await self.backend.generate(
             self, self, self._cancel, self._progress, local_date=local_date
@@ -1991,7 +2013,7 @@ class MainWindow(QMainWindow):
                     await self._show_digest(digest)
                 else:
                     await self._view(digest)
-                self.status.setText(f"Brief saved ({digest.status.value}).")
+                self.status.setText(f"Brief saved ({digest.status.value.capitalize()}).")
                 if digest.status is DigestStatus.EMPTY:
                     if result.sync.message_count == 0 and result.sync.status is SyncStatus.COMPLETE:
                         self.status.setText(f"No messages in {day}. Empty brief saved.")
@@ -2150,25 +2172,29 @@ class MainWindow(QMainWindow):
         consent; local data only."""
         panel = self.settings_dialog.preferences_panel
         if self._account_email is None:
-            panel.set_auto_send(None, self.zone, connected=False)
+            panel.set_auto_send(None, self.zone, connected=False, today=self._local_today())
             return
         try:
             status = await self.backend.auto_send_status(self._account_email)
         except Exception as exc:
             log_failure(exc)
-            panel.set_auto_send(None, self.zone, unreadable=True)
+            panel.set_auto_send(None, self.zone, unreadable=True, today=self._local_today())
             return
-        panel.set_auto_send(status, self.zone)
+        panel.set_auto_send(status, self.zone, today=self._local_today())
 
     async def _open_auto_send(self) -> None:
         """Open the dialog on the connected account's permission; without an account or a
         consent there is none to change."""
         if self._account_email is None:
-            self.settings_dialog.preferences_panel.set_auto_send(None, self.zone, connected=False)
+            self.settings_dialog.preferences_panel.set_auto_send(
+                None, self.zone, connected=False, today=self._local_today()
+            )
             self.status.setText(AUTO_DISCONNECTED)
             return
         status = await self.backend.auto_send_status(self._account_email)
-        self.settings_dialog.preferences_panel.set_auto_send(status, self.zone)
+        self.settings_dialog.preferences_panel.set_auto_send(
+            status, self.zone, today=self._local_today()
+        )
         if status is None:
             self.status.setText(NO_CONSENT)
             return
@@ -2182,7 +2208,7 @@ class MainWindow(QMainWindow):
     async def _set_auto_send(self, limit: int) -> None:
         status = await self.backend.set_auto_send(limit, self._account_email)
         self.settings_dialog.preferences_panel.set_auto_send(
-            status, self.zone, connected=self._account_email is not None
+            status, self.zone, connected=self._account_email is not None, today=self._local_today()
         )
         if status is None or status.limit == 0:
             self.status.setText("Automatic analysis is off. Every run asks you first.")

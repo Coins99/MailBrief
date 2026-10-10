@@ -55,6 +55,25 @@ def test_rows_add_a_header_whenever_the_section_changes() -> None:
     assert rows[2].chips == ()
 
 
+def test_a_deadline_in_another_year_names_the_year() -> None:
+    dated = make_digest_item(
+        deadline_text="October 9",
+        deadline_precision=DeadlinePrecision.DATE,
+        deadline_date=date(2027, 10, 9),
+        deadline_at_utc=None,
+    )
+    assert deadline_chip(dated, TORONTO, TODAY, TORONTO) == Chip(
+        "Due Oct 9, 2027", ChipTone.WARNING
+    )
+    timed = make_digest_item(
+        deadline_precision=DeadlinePrecision.DATETIME,
+        deadline_at_utc=datetime(2027, 10, 9, 21, tzinfo=UTC),  # 17:00 in Toronto.
+    )
+    assert deadline_chip(timed, TORONTO, TODAY, TORONTO) == Chip(
+        "Due Oct 9, 2027 17:00", ChipTone.WARNING
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "address", "expected"),
     [
