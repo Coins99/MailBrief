@@ -10,6 +10,7 @@ from mailbrief.providers.gmail import body as body_module
 from mailbrief.providers.gmail.body import MAX_SEPARATE_PART_BYTES, extract_body
 from mailbrief.providers.gmail.client import MESSAGES_URL, GmailClient
 from mailbrief.providers.gmail.provider import GmailProvider
+from mailbrief.text.prepare import readable_length
 from tests.unit.providers.gmail.body_fixtures import encode, message, part
 from tests.unit.providers.gmail.metadata_fixtures import FakeSession, no_sleep
 
@@ -48,6 +49,28 @@ async def test_stub_plain_part_falls_back_to_html() -> None:
     )
     assert body.source is BodySource.HTML
     assert body.text.startswith("Real newsletter content.")
+
+
+async def test_plain_part_of_tracking_links_falls_back_to_html() -> None:
+    plain = "".join(
+        f"https://click.example.test/track/{index:04d}?u=a1b2c3d4e5f6&id=0123456789abcdef\n"
+        for index in range(20)
+    )
+    plain += "View in browser"
+    html = "<p>" + "Real newsletter content. " * 60 + "</p>"
+    assert len(plain) >= body_module.STUB_PLAIN_CHARS
+    body = await extract_body(message(alternative(plain, html)), "m1", PartStore())
+    assert body.source is BodySource.HTML
+    assert body.text.startswith("Real newsletter content.")
+
+
+async def test_plain_part_with_enough_text_beside_its_links_is_kept() -> None:
+    plain = "Order 1234 has shipped.\n" * 30
+    plain += "https://x.example.test/a\n(https://x.example.test/b) <https://x.example.test/c>\n"
+    html = "<p>" + "Order 1234 has shipped. " * 100 + "</p>"
+    assert readable_length(plain) == 600
+    body = await extract_body(message(alternative(plain, html)), "m1", PartStore())
+    assert body.source is BodySource.PLAIN
 
 
 async def test_html_only_message() -> None:

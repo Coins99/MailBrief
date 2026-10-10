@@ -10,8 +10,16 @@ MAX_ATTRIBUTION_CHARS = 300
 MIN_DUPLICATE_CHARS = 30
 
 _FORWARD_SUBJECT = re.compile(r"^\s*(fwd?|wg|tr|rv|转发|轉寄)\s*[:：]", re.IGNORECASE)
+# The last alternative is a separator in any language: Gmail writes "---------- Forwarded
+# message ---------" in the reader's language, and Thunderbird writes "-------- Forwarded
+# Message --------", so any phrase of up to 80 characters between two runs of 8 or more dashes
+# counts. The rule is broad on purpose: a false match only keeps quoted history, while a miss
+# cuts the forwarded email. Outlook's "-----Original Message-----" has too few dashes and
+# stays a reply header.
 _FORWARD_MARKER = re.compile(
-    r"^\s*(-{2,}\s*forwarded message\s*-{2,}|begin forwarded message:)\s*$", re.IGNORECASE
+    r"^\s*(-{2,}\s*forwarded message\s*-{2,}|begin forwarded message:"
+    r"|-{8,} (?=[^\s-]).{1,80}(?<=[^\s-]) -{8,})\s*$",
+    re.IGNORECASE,
 )
 _ORIGINAL_MESSAGE = re.compile(r"^\s*-{2,}\s*original message\s*-{2,}\s*$", re.IGNORECASE)
 _UNDERSCORES = re.compile(r"^\s*_{10,}\s*$")
@@ -130,6 +138,14 @@ def normalize_text(text: str) -> str:
         seen.add(paragraph)
         paragraphs.append(paragraph)
     return "\n\n".join(paragraphs)
+
+
+def readable_length(text: str) -> int:
+    """Non-whitespace characters left once the links normalize_text removes are gone.
+
+    A plain-text version made mostly of tracking links can be long while saying very little.
+    """
+    return len("".join(_BARE_LINK.sub("", _WRAPPED_LINK.sub("", text)).split()))
 
 
 def _is_quote(line: str) -> bool:
