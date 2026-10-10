@@ -1,6 +1,6 @@
 """Async database lifecycle and transaction boundaries."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Self
@@ -17,6 +17,13 @@ from mailbrief.storage.tables import Base
 
 # Batch size limit for bulk SQLite inserts and IN lists to safeguard parameter limits
 MAX_SQLITE_BATCH_SIZE = 100
+
+
+def sorted_batches[T: (int, str)](values: Iterable[T]) -> Iterator[list[T]]:
+    """``values`` without duplicates, sorted, in lists of at most MAX_SQLITE_BATCH_SIZE."""
+    ordered = sorted(set(values))
+    for start in range(0, len(ordered), MAX_SQLITE_BATCH_SIZE):
+        yield ordered[start : start + MAX_SQLITE_BATCH_SIZE]
 
 
 def sqlite_url(database_path: Path) -> str:
