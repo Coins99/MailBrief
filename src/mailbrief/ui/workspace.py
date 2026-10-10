@@ -107,7 +107,8 @@ def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date | None = None) -
 
     The save time is in the brief's own zone, like its coverage footer. When the owner's
     zone, ``zone``, would show another time, the brief's zone is named. The full sentence
-    gives the save time in ``zone``, as ``moment_text`` writes it.
+    gives the same time, in the brief's zone, written as ``moment_text`` does and named the
+    same way, so what is spoken matches what is shown.
     """
     saved = digest.generated_at_utc.astimezone(ZoneInfo(digest.timezone_name))
     if saved.date() > digest.local_date:
@@ -119,7 +120,8 @@ def brief_meta(digest: DailyDigest, zone: ZoneInfo, today: date | None = None) -
     owner_offset = digest.generated_at_utc.astimezone(zone).utcoffset()
     named = "" if saved.utcoffset() == owner_offset else f" ({digest.timezone_name})"
     short = [f"{digest.account_id} · saved {when}{named}"]
-    full = f"{digest.account_id}. Saved {moment_text(digest.generated_at_utc, zone, today)}."
+    when_full = moment_text(digest.generated_at_utc, ZoneInfo(digest.timezone_name), today)
+    full = f"{digest.account_id}. Saved {when_full}{named}."
     coverage = digest.coverage
     if coverage is not None:
         if coverage.failed:

@@ -117,10 +117,6 @@ def test_actions_page_renders(
         assert image.save(str(Path(folder) / f"{key}-{mode.value}-{dpr:g}x.png"))
 
 
-# The Actions list's viewport at the gallery's 1100 px window (the 4 : 5 split).
-GALLERY_LIST_WIDTH = 364
-
-
 @pytest.mark.parametrize("key", list(ACTION_PAGES))
 def test_no_action_row_line_is_cut_off_at_the_gallery_size(
     qtbot: QtBot, qapp: QApplication, themed: None, key: str
@@ -133,9 +129,10 @@ def test_no_action_row_line_is_cut_off_at_the_gallery_size(
     assert panel is not None
     listing = panel.lists[panel.view()]
     assert listing.count() > 0
-    if workspace.width() == SIZES["desktop"][0]:  # A small screen can clamp the window.
-        assert listing.viewport().width() == GALLERY_LIST_WIDTH
-    width = GALLERY_LIST_WIDTH - ELIDE_MARGIN
+    if workspace.width() < SIZES["desktop"][0]:
+        pytest.skip("the screen is too small for the gallery's window")
+    # The width a row really gets, which differs a little by platform (frame, scroll bar).
+    width = listing.viewport().width() - ELIDE_MARGIN
     metrics = ui_metrics(TEXT_PX)
     for number in range(listing.count()):
         row = listing.item(number).data(ROW_ROLE)
@@ -336,7 +333,7 @@ def test_brief_meta_uses_the_brief_zone() -> None:
     )
     assert brief_meta(morning, paris) == (
         "owner@example.com · saved 09:14 (America/Toronto)",
-        "owner@example.com. Saved Tue Oct 6, 15:14.",  # In the owner's zone, Paris.
+        "owner@example.com. Saved Tue Oct 6, 09:14 (America/Toronto).",
     )
     assert "up to 09:14" in coverage_short(morning)  # The heading and footer agree.
     # Oct 6 23:30 in Toronto is Oct 7 05:30 in Paris: the brief's own day decides.
@@ -363,7 +360,17 @@ def test_a_brief_from_another_year_names_it() -> None:
     assert brief_title(old, date(2027, 1, 4)) == "Thu Dec 31, 2026"
     assert brief_title(old, date(2026, 12, 31)) == "Thu Dec 31"
     full = brief_meta(old, OWNER_ZONE, date(2027, 1, 4))[1]
-    assert "Saved Tue Oct 6, 2026, 09:14." in full
+    assert "Saved Tue Oct 6, 2026, 09:14." in full  # Same zone: not named.
+    tokyo = brief_with(
+        timezone_name="Asia/Tokyo",
+        generated_at_utc=datetime(2026, 10, 6, 12, 0, tzinfo=UTC),
+        coverage=None,
+    )
+    # The brief's zone and the owner's differ: the time is the brief's, and named.
+    assert brief_meta(tokyo, OWNER_ZONE) == (
+        "owner@example.com · saved 21:00 (Asia/Tokyo)",
+        "owner@example.com. Saved Tue Oct 6, 21:00 (Asia/Tokyo).",
+    )
 
 
 def test_brief_meta_short_and_full() -> None:
