@@ -39,8 +39,8 @@ QPushButton[variant="primary"]:focus { border-color: $accent_fg; }
 QPushButton[variant="primary"]:disabled { background: transparent; color: $text_muted; border-color: $hairline; }
 QPushButton[variant="nav"] { text-align: left; background: transparent; color: $text_secondary; border: none; border-radius: 8px; padding: 6px 10px; }
 QPushButton[variant="nav"]:hover, QPushButton[variant="nav"]:focus { background: $selection; color: $text; }
-QListView#sidebarNav, QListView#briefList { background: $panel; border: none; outline: 0; }
-QScrollArea#briefDetail { background: $panel; border: none; }
+QListView#sidebarNav, QListView#briefList, QListView#actionList { background: $panel; border: none; outline: 0; }
+QScrollArea#briefDetail, QScrollArea#actionDetail { background: $panel; border: none; }
 QListWidget::item { padding: 4px 8px; border-left: 2px solid transparent; }
 QListWidget::item:selected, QListWidget::item:selected:!active { background: $selection; color: $text; border-left: 2px solid $accent_border; }
 QTabWidget::pane { border: none; }

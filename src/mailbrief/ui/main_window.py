@@ -335,13 +335,13 @@ def _step_heading(layout: QVBoxLayout, step: str, title: str) -> None:
     layout.addWidget(heading)
 
 
-def _page(widget: QWidget, name: str, accessible_name: str) -> QWidget:
-    """A workspace page holding ``widget`` with 12 px margins."""
+def _page(widget: QWidget, name: str, accessible_name: str, *, margins: int = 12) -> QWidget:
+    """A workspace page holding ``widget``, with ``margins`` px around it."""
     page = QWidget()
     page.setObjectName(name)
     page.setAccessibleName(accessible_name)
     layout = QVBoxLayout(page)
-    layout.setContentsMargins(12, 12, 12, 12)
+    layout.setContentsMargins(margins, margins, margins, margins)
     layout.addWidget(widget)
     return page
 
@@ -669,7 +669,10 @@ class MainWindow(QMainWindow):
         self.actions_panel.action_requested.connect(self._request_action)
         self.actions_panel.draft_requested.connect(self._request_action_draft)
         self.actions_panel.tabs.currentChanged.connect(self._actions_tab_changed)
-        workspace.add_page("actions", _page(self.actions_panel, "actionsPage", "Actions"))
+        # Edge to edge, like Today: the list and the detail meet at a hairline.
+        workspace.add_page(
+            "actions", _page(self.actions_panel, "actionsPage", "Actions", margins=0)
+        )
         self.drafts_panel = DraftsPanel()
         self.drafts_panel.draft_requested.connect(self._request_draft)
         workspace.add_page("drafts", _page(self.drafts_panel, "draftsPage", "Drafts"))

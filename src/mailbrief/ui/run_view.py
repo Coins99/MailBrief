@@ -256,7 +256,7 @@ class ShortlistDelegate(QStyledItemDelegate):
             row.subject,
             sender_line(ui_metrics(TEXT_PX), row.name, row.address, width),
             title_color=tokens.text_muted if row.blocked else tokens.text,
-            sender_color=tokens.text_muted if row.blocked else tokens.text_secondary,
+            subtitle_color=tokens.text_muted if row.blocked else tokens.text_secondary,
         )
         if row.chips:
             paint_chips(painter, row.chips, left, top + CHIP_GAP)
